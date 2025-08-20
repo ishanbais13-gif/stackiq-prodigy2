@@ -18,4 +18,9 @@ def test_ticker(ticker):
 # Azure runs via gunicorn; this is for local dev only
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
+import os
+
+@app.get("/envcheck")
+def envcheck():
+    return {"has_key": bool(os.environ.get("FINNHUB_API_KEY"))}
 
