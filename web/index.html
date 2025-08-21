@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>StackIQ — Live Stocks</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>StackIQ</h1>
+      <div class="ping" id="apiStatus">Checking API…</div>
+    </header>
+
+    <section class="card">
+      <form id="tickerForm">
+        <label for="ticker">Ticker</label>
+        <input id="ticker" name="ticker" placeholder="AAPL, MSFT, NVDA…" autofocus />
+        <button type="submit">Fetch</button>
+      </form>
+      <p class="hint">Tip: You can also open
+        <code>/test/AAPL?pretty=1</code> directly in the address bar to see raw JSON.
+      </p>
+    </section>
+
+    <section id="results" class="card hidden">
+      <h2 id="title"></h2>
+
+      <div class="grid">
+        <div>
+          <h3>Price (quote)</h3>
+          <div class="kv"><span>Current</span><strong id="c"></strong></div>
+          <div class="kv"><span>Change</span><strong id="d"></strong></div>
+          <div class="kv"><span>% Change</span><strong id="dp"></strong></div>
+          <div class="kv"><span>Open</span><strong id="o"></strong></div>
+          <div class="kv"><span>High</span><strong id="h"></strong></div>
+          <div class="kv"><span>Low</span><strong id="l"></strong></div>
+          <div class="kv"><span>Prev Close</span><strong id="pc"></strong></div>
+        </div>
+
+        <div>
+          <h3>Next Earnings</h3>
+          <div id="earningsBlock">
+            <div class="kv"><span>Date</span><strong id="edate">–</strong></div>
+            <div class="kv"><span>Quarter</span><strong id="equarter">–</strong></div>
+            <div class="kv"><span>EPS (est)</span><strong id="eeps">–</strong></div>
+            <div class="kv"><span>Revenue (est)</span><strong id="erev">–</strong></div>
+          </div>
+          <div id="noEarnings" class="muted hidden">No upcoming earnings found.</div>
+        </div>
+      </div>
+    </section>
+
+    <footer>
+      <a id="rawLink" href="#" target="_blank" rel="noreferrer">View raw JSON</a>
+    </footer>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
