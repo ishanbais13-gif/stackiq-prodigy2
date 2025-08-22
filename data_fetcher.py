@@ -1,97 +1,95 @@
-# data_fetcher.py — Finnhub callers + simple cache
-# Safe to paste over your entire file.
-
+# data_fetcher.py — Finnhub helpers used by /test/<ticker>
 import os
 import time
+import json
+import urllib.parse
+from typing import Dict, Any, List
 import requests
-from typing import Any, Dict, Tuple
-
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "")
-FINNHUB_BASE = "https://finnhub.io/api/v1"
-
-# 30s cache (protect free-tier rate limits)
-_TTL_SECONDS = 30
-_cache: Dict[Tuple[str, str], Tuple[float, Any]] = {}
 
 class FetchError(Exception):
-    def __init__(self, public_message: str, status: str = "upstream_error", http_code: int = 502):
-        super().__init__(public_message)
-        self.public_message = public_message
-        self.status = status
-        self.http_code = http_code
+    pass
 
-def _cache_get(key):
-    now = time.time()
-    if key in _cache:
-        ts, val = _cache[key]
-        if now - ts <= _TTL_SECONDS:
-            return val
-        else:
-            _cache.pop(key, None)
-    return None
-
-def _cache_set(key, val):
-    _cache[key] = (time.time(), val)
-    return val
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
+BASE = "https://finnhub.io/api/v1"
 
 def _require_key():
     if not FINNHUB_API_KEY:
-        raise FetchError("API key missing. Set FINNHUB_API_KEY in Azure App Settings.", "missing_key", 500)
+        raise FetchError("FINNHUB_API_KEY not set in environment")
 
-def _get(path: str, params: Dict[str, Any]) -> Any:
+def _get(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
     _require_key()
-    url = f"{FINNHUB_BASE}{path}"
+    # add token, basic retry
     params = dict(params or {})
     params["token"] = FINNHUB_API_KEY
 
-    key = ("GET", url + "?" + "&".join(f"{k}={v}" for k, v in sorted(params.items())))
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
-
-    try:
+    for attempt in range(3):
         r = requests.get(url, params=params, timeout=10)
-        if r.status_code != 200:
-            # Finnhub often returns 429 on rate limit, or 4xx for symbol errors
-            raise FetchError(f"Upstream {r.status_code}", "upstream_error", r.status_code)
-        data = r.json()
-        return _cache_set(key, data)
-    except requests.Timeout:
-        raise FetchError("Upstream timeout", "timeout", 504)
-    except requests.RequestException:
-        raise FetchError("Network error contacting data provider", "network_error", 502)
+        if r.status_code == 200:
+            try:
+                return r.json()
+            except Exception:
+                raise FetchError("Malformed JSON from provider")
+        if r.status_code == 429:
+            # rate-limited — small backoff, then retry
+            time.sleep(0.8 * (attempt + 1))
+            continue
+        # other status -> raise with body snippet
+        raise FetchError(f"HTTP {r.status_code}: {r.text[:180]}")
+    raise FetchError("Too many retries")
 
-def get_quote(ticker: str) -> Dict[str, Any]:
+def get_ticker_data(symbol: str) -> Dict[str, Any]:
     """
-    Returns Finnhub /quote fields:
-      c: current, d: change, dp: change%, h: high, l: low, o: open, pc: prev close, t: timestamp
+    Returns Finnhub quote payload:
+      { c, d, dp, h, l, o, pc }
     """
-    if not ticker:
-        raise FetchError("Ticker required", "bad_request", 400)
+    if not symbol:
+        raise FetchError("Missing symbol")
+    url = f"{BASE}/quote"
+    data = _get(url, {"symbol": symbol})
+    # Validate presence of 'c' etc.
+    if "c" not in data:
+        raise FetchError("Quote not found or no data")
+    return data
 
-    data = _get("/quote", {"symbol": ticker})
-    # Finnhub sends 0s or {} for bad symbols — guard it
-    if not isinstance(data, dict) or data.get("c") in (None, 0) and data.get("t") in (None, 0):
-        raise FetchError("Ticker not found or no data", "not_found", 404)
+def get_earnings_calendar(symbol: str) -> List[Dict[str, Any]]:
+    """
+    Returns a (possibly empty) list of the symbol's next/last earnings items.
+    Finnhub: /calendar/earnings?symbol=SYMB
+    """
+    url = f"{BASE}/calendar/earnings"
+    data = _get(url, {"symbol": symbol})
+    items = data.get("earningsCalendar") or data.get("earningscalendar") or data.get("earnings") or []
+    # Normalize to a list of simple dicts
+    if isinstance(items, dict):
+        items = [items]
+    return items
+
+def get_price_and_earnings(symbol: str) -> Dict[str, Any]:
+    """
+    Unified call used by /test/<ticker>.
+    """
+    quote = get_ticker_data(symbol)
+    earnings = get_earnings_calendar(symbol)
     return {
-        "c": data.get("c"),
-        "d": data.get("d"),
-        "dp": data.get("dp"),
-        "h": data.get("h"),
-        "l": data.get("l"),
-        "o": data.get("o"),
-        "pc": data.get("pc"),
-        "t": data.get("t"),
+        "ticker": symbol,
+        "price": {
+            "c": quote.get("c"),
+            "d": quote.get("d"),
+            "dp": quote.get("dp"),
+            "h": quote.get("h"),
+            "l": quote.get("l"),
+            "o": quote.get("o"),
+            "pc": quote.get("pc"),
+        },
+        "earnings": {
+            "earningsCalendar": earnings
+        },
     }
 
-def get_next_earnings(ticker: str) -> Dict[str, Any]:
-    """
-    Returns the next earnings row from Finnhub earnings calendar.
-    """
-    if not ticker:
-        raise FetchError("Ticker required", "bad_request", 400)
+# Backwards-compatible aliases the app might look for
+get_stock_data = get_ticker_data
+get_quote_and_earnings = get_price_and_earnings
+get_ticker = get_ticker_data
+get = get_ticker_data
+fetch = get_price_and_earnings
 
-    data = _get("/calendar/earnings", {"symbol": ticker})
-    cal = (data or {}).get("earningsCalendar") or []
-    next_row = cal[0] if cal else None
-    return {"earningsCalendar": [next_row] if next_row else []}
