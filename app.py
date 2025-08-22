@@ -1,9 +1,11 @@
-# app.py — minimal Flask backend for StackIQ (Day 1–3 final)
-import os
+# app.py — StackIQ minimal backend (Flask)
+# Safe to paste over your entire file.
+
 import time
+import os
 import json
 
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, send_from_directory
 from werkzeug.exceptions import HTTPException
 from flask_cors import CORS
 
@@ -11,63 +13,98 @@ import data_fetcher  # local module that calls Finnhub
 
 # ---- App metadata ----
 START_TIME = time.time()
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.0"  # bump this when you ship changes
 
 # ---- Flask app ----
-app = Flask(__name__)
-CORS(app)  # allow the frontend to call the API
+app = Flask(__name__, static_folder=None)  # we'll serve our own static directory
+CORS(app)  # allow frontend to call the API
 
-# ---- Routes ----
+# -------------------------
+# Frontend (serve /web UI)
+# -------------------------
+WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
+
+@app.get("/web")
+def web_index():
+    # /web -> serve web/index.html
+    return send_from_directory(WEB_DIR, "index.html")
+
+@app.get("/web/<path:filename>")
+def web_assets(filename):
+    # /web/* -> serve any asset under web/
+    return send_from_directory(WEB_DIR, filename)
+
+# -------------------------
+# Helper: pretty JSON
+# -------------------------
+def _maybe_pretty(data):
+    if request.args.get("pretty") == "1":
+        return Response(json.dumps(data, indent=2), mimetype="application/json")
+    return jsonify(data)
+
+# -------------------------
+# API routes
+# -------------------------
 @app.get("/")
 def root():
     return "StackIQ backend is live."
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "stackiq-web"}
+    return jsonify({"ok": True, "service": "stackiq-web"})
 
 @app.get("/version")
 def version():
-    return {"version": APP_VERSION}
+    return jsonify({"version": APP_VERSION})
 
 @app.get("/status")
 def status():
-    """Operational status + uptime."""
+    """operational status + uptime."""
     uptime_seconds = int(time.time() - START_TIME)
-    return {
+    return jsonify({
         "status": "ok",
         "app": "StackIQ",
         "version": APP_VERSION,
         "uptime_seconds": uptime_seconds,
-    }
+    })
 
 @app.get("/envcheck")
 def envcheck():
-    """Quick check that the FINNHUB_API_KEY is set in the environment."""
     has_key = bool(os.environ.get("FINNHUB_API_KEY"))
-    return {"has_key": has_key}
+    return jsonify({"has_key": has_key})
+
+# ---------- stock data endpoints ----------
+@app.get("/quote/<ticker>")
+def quote_only(ticker: str):
+    """Just price/quote for a ticker."""
+    try:
+        data = data_fetcher.get_stock_data(ticker)
+        return _maybe_pretty({"ticker": ticker.upper(), "price": data["price"]})
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "error"}), 500
+
+@app.get("/earnings/<ticker>")
+def earnings_only(ticker: str):
+    """Just earnings calendar for a ticker."""
+    try:
+        earnings = data_fetcher.get_ticker_data(ticker).get("earningsCalendar", [])
+        return _maybe_pretty({"ticker": ticker.upper(), "earningsCalendar": earnings})
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "error"}), 500
 
 @app.get("/test/<ticker>")
-def test_ticker(ticker: str):
-    """
-    Unified test endpoint:
-    - Returns latest quote fields (c, d, dp, h, l, o, pc)
-    - Includes the most recent earnings calendar item if available
-    Add ?pretty=1 to pretty-print.
-    """
+def combined_test(ticker: str):
+    """Combined quote + earnings (what you’ve been testing)."""
     try:
-        data = data_fetcher.get_price_and_earnings(ticker.upper())
-        # pretty-print if requested
-        if request.args.get("pretty"):
-            return Response(json.dumps(data, indent=2), mimetype="application/json")
-        return jsonify(data)
-    except data_fetcher.FetchError as fe:
-        return jsonify({"error": str(fe), "status": "bad_request"}), 400
+        price = data_fetcher.get_stock_data(ticker)["price"]
+        earnings = data_fetcher.get_ticker_data(ticker).get("earningsCalendar", [])
+        return _maybe_pretty({
+            "ticker": ticker.upper(),
+            "price": price,
+            "earnings": {"earningsCalendar": earnings},
+        })
     except Exception as e:
-        # Bubble HTTP errors cleanly, everything else -> 500
-        if isinstance(e, HTTPException):
-            return jsonify(error=e.name, status=e.code), e.code
-        return jsonify({"detail": "Unexpected server error", "error": "Internal Server Error"}), 500
+        return jsonify({"error": str(e), "status": "error"}), 500
 
 # ---- Security headers (simple, safe defaults) ----
 @app.after_request
@@ -78,6 +115,10 @@ def add_headers(resp: Response):
     return resp
 
 # ---- Friendly JSON errors ----
+@app.errorhandler(HTTPException)
+def handle_http_err(e: HTTPException):
+    return jsonify(error=e.name, status=e.code), e.code
+
 @app.errorhandler(Exception)
 def handle_err(e: Exception):
     if isinstance(e, HTTPException):
@@ -87,5 +128,6 @@ def handle_err(e: Exception):
 # ---- Local dev only (Azure uses gunicorn; this block is ignored there) ----
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
+
 
 
