@@ -1,128 +1,97 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>StackIQ – Live Stocks</title>
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #0f172a;
-      color: #f8fafc;
-      margin: 0;
-      padding: 20px;
-    }
-    h1 { color: #38bdf8; }
-    .card {
-      background: #1e293b;
-      padding: 20px;
-      border-radius: 12px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-      margin-bottom: 20px;
-    }
-    label { display: block; margin-bottom: 6px; }
-    input {
-      padding: 8px;
-      border: none;
-      border-radius: 6px;
-      margin-bottom: 10px;
-    }
-    button {
-      background: #38bdf8;
-      border: none;
-      padding: 10px 16px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: bold;
-    }
-    button:hover { background: #0ea5e9; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    .hint { font-size: 0.9em; color: #94a3b8; }
-    #results { margin-top: 20px; }
+    body { font-family: Arial, sans-serif; background:#111; color:#eee; text-align:center; padding:20px; }
+    h1 { color:#4cafef; }
+    .card { background:#1b1b1b; padding:20px; border-radius:8px; display:inline-block; margin-top:20px; }
+    label { display:block; margin-bottom:8px; font-weight:bold; }
+    input { padding:8px; width:200px; }
+    button { padding:8px 16px; margin-top:10px; background:#4cafef; border:none; color:#fff; cursor:pointer; border-radius:4px; }
+    button:hover { background:#379bd8; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-top:20px; }
+    .grid div { background:#222; padding:10px; border-radius:6px; }
+    .hint { font-size:0.9em; margin-top:10px; color:#aaa; }
+    .error { color:#ff6b6b; margin-top:10px; }
   </style>
 </head>
 <body>
   <h1>StackIQ</h1>
-  <div id="apiStatus">Checking API…</div>
+  <p id="apiStatus">Checking API...</p>
 
   <div class="card">
     <form id="tickerForm">
-      <label for="ticker">Ticker</label>
-      <input id="ticker" name="ticker" placeholder="AAPL, MSFT, NVDA…" required>
+      <label for="ticker">Enter Stock Ticker:</label>
+      <input id="ticker" name="ticker" placeholder="AAPL, MSFT, NVDA..." required />
       <button type="submit">Fetch</button>
     </form>
-    <p class="hint">Tip: You can also open <code>/test/AAPL?pretty=1</code> directly.</p>
+    <p class="hint">Tip: You can also open <code>/test/AAPL?pretty=1</code> directly in the browser.</p>
   </div>
 
   <div id="results" class="card hidden">
     <h2 id="title"></h2>
     <div class="grid">
-      <div><strong>Current:</strong> <span id="c"></span></div>
+      <div><strong>Current Price:</strong> <span id="c"></span></div>
       <div><strong>Change:</strong> <span id="d"></span></div>
       <div><strong>% Change:</strong> <span id="dp"></span></div>
       <div><strong>Open:</strong> <span id="o"></span></div>
       <div><strong>High:</strong> <span id="h"></span></div>
       <div><strong>Low:</strong> <span id="l"></span></div>
       <div><strong>Prev Close:</strong> <span id="pc"></span></div>
+      <div><strong>Volume:</strong> <span id="volume"></span></div>
     </div>
-    <h3>Latest Earnings</h3>
-    <div id="earnings"></div>
+    <div>
+      <h3>Earnings</h3>
+      <pre id="earnings"></pre>
+    </div>
+    <p class="error" id="error"></p>
   </div>
 
   <script>
-    // 🔥 Replace this with YOUR Azure backend base URL
-    const BACKEND_URL = "https://stackiq-web-btbdfxakdfhrcaey.centralus-01.azurewebsites.net";
+    const BACKEND_URL = "https://stackiq-web-btbfdxekdfhrcaey.centralus-01.azurewebsites.net";
 
     async function checkAPI() {
       try {
         const res = await fetch(`${BACKEND_URL}/health`);
-        const data = await res.json();
-        document.getElementById("apiStatus").textContent =
-          data.ok ? "API OK ✅" : "API not responding ❌";
+        if (res.ok) {
+          document.getElementById("apiStatus").innerText = "✅ API is live";
+        } else {
+          document.getElementById("apiStatus").innerText = "⚠️ API issue";
+        }
       } catch (err) {
-        document.getElementById("apiStatus").textContent = "API connection failed ❌";
+        document.getElementById("apiStatus").innerText = "❌ Cannot reach API";
       }
     }
 
     document.getElementById("tickerForm").addEventListener("submit", async (e) => {
       e.preventDefault();
       const ticker = document.getElementById("ticker").value.trim().toUpperCase();
-      if (!ticker) return;
+      const resultsDiv = document.getElementById("results");
+      const errorDiv = document.getElementById("error");
+      errorDiv.innerText = "";
 
       try {
         const res = await fetch(`${BACKEND_URL}/test/${ticker}?pretty=1`);
+        if (!res.ok) throw new Error("Ticker not found");
         const data = await res.json();
 
-        if (data.error) {
-          document.getElementById("results").classList.remove("hidden");
-          document.getElementById("title").textContent = `Error: ${data.error}`;
-          return;
-        }
+        document.getElementById("title").innerText = `Results for ${ticker}`;
+        document.getElementById("c").innerText = data.price?.c ?? "-";
+        document.getElementById("d").innerText = data.price?.d ?? "-";
+        document.getElementById("dp").innerText = data.price?.dp ?? "-";
+        document.getElementById("o").innerText = data.price?.o ?? "-";
+        document.getElementById("h").innerText = data.price?.h ?? "-";
+        document.getElementById("l").innerText = data.price?.l ?? "-";
+        document.getElementById("pc").innerText = data.price?.pc ?? "-";
+        document.getElementById("volume").innerText = data.price?.volume ?? "-";
+        document.getElementById("earnings").innerText = JSON.stringify(data.earnings?.earningsCalendar ?? [], null, 2);
 
-        const price = data.price || {};
-        document.getElementById("results").classList.remove("hidden");
-        document.getElementById("title").textContent = `Results for ${ticker}`;
-        document.getElementById("c").textContent = price.c;
-        document.getElementById("d").textContent = price.d;
-        document.getElementById("dp").textContent = price.dp;
-        document.getElementById("o").textContent = price.o;
-        document.getElementById("h").textContent = price.h;
-        document.getElementById("l").textContent = price.l;
-        document.getElementById("pc").textContent = price.pc;
-
-        // Earnings
-        const earningsDiv = document.getElementById("earnings");
-        earningsDiv.innerHTML = "";
-        if (data.earnings && data.earnings.earningsCalendar) {
-          data.earnings.earningsCalendar.forEach(e => {
-            const row = document.createElement("div");
-            row.textContent =
-              `${e.date} | EPS: ${e.epsActual} vs ${e.epsEstimate} | Rev: ${e.revenueActual}`;
-            earningsDiv.appendChild(row);
-          });
-        }
+        resultsDiv.classList.remove("hidden");
       } catch (err) {
-        document.getElementById("title").textContent = "Failed to fetch data ❌";
+        errorDiv.innerText = "Error: " + err.message;
       }
     });
 
@@ -130,4 +99,5 @@
   </script>
 </body>
 </html>
+
 
