@@ -1,133 +1,172 @@
-# app.py — StackIQ minimal backend (Flask)
-# Safe to paste over your entire file.
-
-import time
+# app.py
 import os
 import json
+import time
+from typing import Any, Dict, Optional
 
-from flask import Flask, jsonify, request, Response, send_from_directory
-from werkzeug.exceptions import HTTPException
-from flask_cors import CORS
+from fastapi import FastAPI, Query, Response
+from fastapi.middleware.cors import CORSMiddleware
 
-import data_fetcher  # local module that calls Finnhub
+# ---- Import your fetcher (already in your repo) -----------------------------
+# It should return a dict like:
+# {
+#   "ticker": "AAPL",
+#   "price": {"c": 224.9, "d": -1.11, "dp": -0.49, "h": ..., "l": ..., "o": ..., "pc": ..., "v": ...},
+#   "earnings": {...}
+# }
+from data_fetcher import get_stock_data  # <-- keep this import
 
-# ---- App metadata ----
-START_TIME = time.time()
-APP_VERSION = "0.2.0"  # bump this when you ship changes
+# ---- App metadata -----------------------------------------------------------
+SERVICE_NAME = "stackiq-web"
+VERSION = "0.2.0"
+START_TS = time.time()
 
-# ---- Flask app ----
-app = Flask(__name__, static_folder=None)  # we'll serve our own static directory
-CORS(app)  # allow frontend to call the API
+app = FastAPI(title="StackIQ API", version=VERSION)
 
-# -------------------------
-# Frontend (serve /web UI)
-# -------------------------
-WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
+# CORS (safe default: allow browser calls from anywhere)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.get("/web")
-def web_index():
-    # /web -> serve web/index.html
-    return send_from_directory(WEB_DIR, "index.html")
+# ---- Helpers ----------------------------------------------------------------
+def json_response(payload: Dict[str, Any], pretty: bool = False, status: int = 200) -> Response:
+    """Return JSON in the exact format the frontend wants."""
+    if pretty:
+        body = json.dumps(payload, indent=2, ensure_ascii=False)
+    else:
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    return Response(content=body, status_code=status, media_type="application/json")
 
-@app.get("/web/<path:filename>")
-def web_assets(filename):
-    # /web/* -> serve any asset under web/
-    return send_from_directory(WEB_DIR, filename)
 
-# -------------------------
-# Helper: pretty JSON
-# -------------------------
-def _maybe_pretty(data):
-    if request.args.get("pretty") == "1":
-        return Response(json.dumps(data, indent=2), mimetype="application/json")
-    return jsonify(data)
+def normalize_price(price: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """
+    Convert short vendor keys to the stable keys the frontend expects.
+    - c: current
+    - d: change
+    - dp: percent_change
+    - h: high
+    - l: low
+    - o: open
+    - pc: prev_close
+    - v: volume
+    Unknown/missing values come back as None (frontend can handle that).
+    """
+    if not isinstance(price, dict):
+        price = {}
 
-# -------------------------
-# API routes
-# -------------------------
-@app.get("/")
-def root():
-    return "StackIQ backend is live."
+    return {
+        "current": price.get("c"),
+        "change": price.get("d"),
+        "percent_change": price.get("dp"),
+        "high": price.get("h"),
+        "low": price.get("l"),
+        "open": price.get("o"),
+        "prev_close": price.get("pc"),
+        "volume": price.get("v"),
+    }
+
+
+def normalize_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build the final object the web UI reads.
+    Keeps earnings as-is, but ensures `price` has the stable keys.
+    """
+    if not isinstance(raw, dict):
+        return {"error": "bad_response", "status": "error"}
+
+    ticker = raw.get("ticker") or raw.get("symbol")
+    earnings = raw.get("earnings", {})
+
+    # Some fetchers might nest as {"quote": {...}}; prefer raw["price"], then raw["quote"]
+    price_obj = raw.get("price") or raw.get("quote") or {}
+
+    return {
+        "ticker": ticker,
+        "price": normalize_price(price_obj),
+        "earnings": earnings,
+    }
+
+
+# ---- Routes -----------------------------------------------------------------
+@app.get("/", include_in_schema=False)
+def root() -> Response:
+    # Keep the tiny text page you were seeing before
+    return Response(content="StackIQ backend is live.", media_type="text/plain")
+
 
 @app.get("/health")
-def health():
-    return jsonify({"ok": True, "service": "stackiq-web"})
+def health(pretty: bool = Query(default=False)) -> Response:
+    return json_response({"ok": True, "service": SERVICE_NAME}, pretty=pretty)
+
 
 @app.get("/version")
-def version():
-    return jsonify({"version": APP_VERSION})
+def version(pretty: bool = Query(default=False)) -> Response:
+    return json_response({"version": VERSION}, pretty=pretty)
+
 
 @app.get("/status")
-def status():
-    """operational status + uptime."""
-    uptime_seconds = int(time.time() - START_TIME)
-    return jsonify({
-        "status": "ok",
-        "app": "StackIQ",
-        "version": APP_VERSION,
-        "uptime_seconds": uptime_seconds,
-    })
+def status(pretty: bool = Query(default=False)) -> Response:
+    uptime = int(time.time() - START_TS)
+    return json_response({"app": "StackIQ", "status": "ok", "uptime_seconds": uptime, "version": VERSION}, pretty=pretty)
+
 
 @app.get("/envcheck")
-def envcheck():
-    has_key = bool(os.environ.get("FINNHUB_API_KEY"))
-    return jsonify({"has_key": has_key})
+def envcheck(pretty: bool = Query(default=False)) -> Response:
+    # We just verify the API key variable exists (name can match your fetcher)
+    has_key = bool(os.getenv("FINNHUB_API_KEY") or os.getenv("STOCK_API_KEY") or os.getenv("API_KEY"))
+    return json_response({"has_key": has_key}, pretty=pretty)
 
-# ---------- stock data endpoints ----------
-@app.get("/quote/<ticker>")
-def quote_only(ticker: str):
-    """Just price/quote for a ticker."""
-    try:
-        data = data_fetcher.get_stock_data(ticker)
-        return _maybe_pretty({"ticker": ticker.upper(), "price": data["price"]})
-    except Exception as e:
-        return jsonify({"error": str(e), "status": "error"}), 500
 
-@app.get("/earnings/<ticker>")
-def earnings_only(ticker: str):
-    """Just earnings calendar for a ticker."""
-    try:
-        earnings = data_fetcher.get_ticker_data(ticker).get("earningsCalendar", [])
-        return _maybe_pretty({"ticker": ticker.upper(), "earningsCalendar": earnings})
-    except Exception as e:
-        return jsonify({"error": str(e), "status": "error"}), 500
+@app.get("/raw/{ticker}")
+def raw_ticker(
+    ticker: str,
+    pretty: bool = Query(default=False),
+) -> Response:
+    """
+    Useful for debugging. Returns the unmodified fetcher payload.
+    """
+    data = get_stock_data(ticker.strip().upper())
+    status = 200 if isinstance(data, dict) and "error" not in data else 500
+    return json_response(data, pretty=pretty, status=status)
 
-@app.get("/test/<ticker>")
-def combined_test(ticker: str):
-    """Combined quote + earnings (what you’ve been testing)."""
-    try:
-        price = data_fetcher.get_stock_data(ticker)["price"]
-        earnings = data_fetcher.get_ticker_data(ticker).get("earningsCalendar", [])
-        return _maybe_pretty({
-            "ticker": ticker.upper(),
-            "price": price,
-            "earnings": {"earningsCalendar": earnings},
-        })
-    except Exception as e:
-        return jsonify({"error": str(e), "status": "error"}), 500
 
-# ---- Security headers (simple, safe defaults) ----
-@app.after_request
-def add_headers(resp: Response):
-    resp.headers["X-Content-Type-Options"] = "nosniff"
-    resp.headers["X-Frame-Options"] = "DENY"
-    resp.headers["Referrer-Policy"] = "no-referrer"
-    return resp
+@app.get("/test/{ticker}")
+def test_ticker(
+    ticker: str,
+    pretty: bool = Query(default=False),
+) -> Response:
+    """
+    Main endpoint the web UI calls.
+    Fetch, normalize, and return stable keys for price/earnings.
+    """
+    raw = get_stock_data(ticker.strip().upper())
 
-# ---- Friendly JSON errors ----
-@app.errorhandler(HTTPException)
-def handle_http_err(e: HTTPException):
-    return jsonify(error=e.name, status=e.code), e.code
+    # Surface upstream errors directly
+    if not isinstance(raw, dict):
+        return json_response({"error": "bad_response_from_fetcher", "status": "error"}, pretty=pretty, status=500)
+    if "error" in raw:
+        # keep original error message
+        return json_response(raw, pretty=pretty, status=500)
 
-@app.errorhandler(Exception)
-def handle_err(e: Exception):
-    if isinstance(e, HTTPException):
-        return jsonify(error=e.name, status=e.code), e.code
-    return jsonify(error="Internal Server Error", status=500), 500
+    normalized = normalize_payload(raw)
 
-# ---- Local dev only (Azure uses gunicorn; this block is ignored there) ----
+    # If price normalization produced all Nones, tell the UI clearly
+    price_obj = normalized.get("price") or {}
+    if all(price_obj.get(k) is None for k in ["current", "change", "percent_change", "high", "low", "open", "prev_close", "volume"]):
+        return json_response({"error": "price", "status": "invalid_price_payload"}, pretty=pretty, status=500)
+
+    return json_response(normalized, pretty=pretty, status=200)
+
+
+# Optional: run locally
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
+
 
 
 
