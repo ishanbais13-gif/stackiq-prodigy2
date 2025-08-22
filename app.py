@@ -1,14 +1,18 @@
 # app.py — StackIQ minimal backend (Flask)
 # Safe to paste over your entire file.
 
-import time
 import os
+import time
 import json
-from flask import Flask, jsonify, request, Response
+from typing import Any, Dict
+
+from flask import Flask, jsonify, request, Response, send_from_directory
 from werkzeug.exceptions import HTTPException
 from flask_cors import CORS
 
-import data_fetcher  # local module that calls Finnhub
+# ---- Local module that calls Finnhub ----
+import data_fetcher  # do not remove; we call into it below
+
 
 # ---- App metadata ----
 START_TIME = time.time()
@@ -16,160 +20,148 @@ APP_VERSION = "0.2.0"  # bump this when you ship changes
 
 # ---- Flask app ----
 app = Flask(__name__)
-CORS(app)  # allow frontend to call the API
+CORS(app)  # allow a frontend to call the API (you can tighten this later)
 
-# ---- helpers ----
-def _json(data):
-    """Pretty JSON when `?pretty=1` is present."""
-    if request.args.get("pretty") == "1":
-        return Response(json.dumps(data, indent=2), mimetype="application/json")
-    return jsonify(data)
+# ---- Helper: call whatever function your data_fetcher exposes ----
+def fetch_from_data_fetcher(ticker: str) -> Dict[str, Any]:
+    """
+    Be flexible about the function name in data_fetcher.py so this keeps
+    working even if you named it slightly differently.
+    """
+    candidates = (
+        "get_stock_data",
+        "get_quote_and_earnings",
+        "get_price_and_earnings",
+        "get_ticker_data",
+        "get_ticker",
+        "get",
+        "fetch",
+    )
+    for name in candidates:
+        func = getattr(data_fetcher, name, None)
+        if callable(func):
+            return func(ticker)
 
-def _ticker_param(t):
-    return (t or "").strip().upper()
+    # If none of the above exist, fall back to an obvious error
+    raise RuntimeError(
+        "Couldn't find a callable in data_fetcher.py. "
+        "Expected one of: " + ", ".join(candidates)
+    )
 
-# ---- Routes ----
+
+# =========================
+#       STATIC FRONTEND
+# =========================
+
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+WEB_DIR = os.path.join(APP_DIR, "web")
+
 @app.get("/")
-def root():
-    return "StackIQ backend is live."
+def send_index():
+    """
+    Serve the Day-3 frontend (web/index.html) at the root URL.
+    """
+    return send_from_directory(WEB_DIR, "index.html")
 
-# Health & version
+@app.get("/web/<path:filename>")
+def send_web_static(filename: str):
+    """
+    Optional helper so you can serve additional files inside /web later.
+    Example: /web/styles.css
+    """
+    return send_from_directory(WEB_DIR, filename)
+
+
+# =========================
+#       API ROUTES
+# =========================
+
 @app.get("/health")
 def health():
-    return _json({"ok": True, "service": "stackiq-web"})
+    return jsonify({"ok": True, "service": "stackiq-web"})
 
 @app.get("/version")
 def version():
-    return _json({"version": APP_VERSION})
+    return jsonify({"version": APP_VERSION})
 
-# Env check (debug)
-@app.get("/envcheck")
-def envcheck():
-    return _json({"has_key": bool(os.environ.get("FINNHUB_API_KEY"))})
-
-# Operational status + uptime
 @app.get("/status")
 def status():
+    """Operational status + uptime."""
     uptime_seconds = int(time.time() - START_TIME)
-    return _json({
+    return jsonify({
         "status": "ok",
         "app": "StackIQ",
         "version": APP_VERSION,
-        "uptime_seconds": uptime_seconds
+        "uptime_seconds": uptime_seconds,
     })
 
-# ---- Quotes ----
-# Backward compatible old route
+@app.get("/envcheck")
+def envcheck():
+    """
+    Quick check that your Finnhub key is present in the environment.
+    """
+    has_key = bool(os.environ.get("FINNHUB_API_KEY"))
+    return jsonify({"has_key": has_key})
+
 @app.get("/test/<ticker>")
-def test_ticker(ticker):
-    t = _ticker_param(ticker)
+def test_ticker(ticker: str):
+    """
+    Hit this in your browser:
+    /test/AAPL?pretty=1
+    /test/MSFT?pretty=1
+    """
+    ticker = (ticker or "").strip().upper()
+
+    # basic validation
+    if not ticker.isalnum() or len(ticker) > 10:
+        return jsonify({"error": "Invalid ticker format", "status": "bad_request"}), 400
+
     try:
-        quote = data_fetcher.get_quote(t)
-        earnings = data_fetcher.get_next_earnings(t)
-        payload = {"ticker": t, "price": quote, "earnings": earnings}
-        return _json(payload)
-    except data_fetcher.FetchError as e:
-        return _json({"error": e.public_message, "status": e.status}), e.http_code
+        data = fetch_from_data_fetcher(ticker)
+        # Optional pretty output via ?pretty=1
+        if request.args.get("pretty"):
+            return Response(
+                json.dumps(data, indent=2),
+                mimetype="application/json"
+            )
+        return jsonify(data)
+    except HTTPException as he:  # let Flask handle standard HTTP errors
+        raise he
     except Exception as e:
-        return _json({"error": "Internal Server Error"}), 500
+        # Map common "not found" shapes to 404
+        msg = str(e).lower()
+        if "not found" in msg or "no data" in msg or "404" in msg:
+            return jsonify({"error": "Ticker not found or no data", "status": "not_found"}), 404
+        # Otherwise 500
+        return jsonify({"error": "Internal Server Error", "detail": str(e)}), 500
 
-# Clean alias (use this going forward)
-@app.get("/quote/<ticker>")
-def quote_route(ticker):
-    t = _ticker_param(ticker)
-    try:
-        quote = data_fetcher.get_quote(t)
-        return _json({"ticker": t, "price": quote})
-    except data_fetcher.FetchError as e:
-        return _json({"error": e.public_message, "status": e.status}), e.http_code
-    except Exception:
-        return _json({"error": "Internal Server Error"}), 500
 
-# ---- Simple metrics / analyzer ----
-@app.get("/metrics/<ticker>")
-def metrics_route(ticker):
-    """
-    Day-3 starter metrics:
-    - change_pct from quote.dp
-    - trend label (bullish/neutral/bearish)
-    - risk band (based on intraday range vs. price)
-    """
-    t = _ticker_param(ticker)
-    try:
-        q = data_fetcher.get_quote(t)
-        change_pct = q.get("dp")
-        last = q.get("c")
-        high = q.get("h")
-        low = q.get("l")
+# =========================
+#    SECURITY + ERRORS
+# =========================
 
-        # Trend label
-        if change_pct is None:
-            trend = "unknown"
-        elif change_pct >= 2:
-            trend = "bullish"
-        elif change_pct <= -2:
-            trend = "bearish"
-        else:
-            trend = "neutral"
-
-        # Simple intraday risk proxy
-        risk = "unknown"
-        if all(v is not None for v in [last, high, low]) and last:
-            intraday_span = abs(high - low)
-            span_ratio = intraday_span / max(last, 1e-9)
-            if span_ratio >= 0.05:
-                risk = "high"
-            elif span_ratio >= 0.025:
-                risk = "medium"
-            else:
-                risk = "low"
-
-        data = {
-            "ticker": t,
-            "last": last,
-            "change_pct": change_pct,
-            "trend": trend,
-            "risk": risk,
-        }
-        return _json(data)
-    except data_fetcher.FetchError as e:
-        return _json({"error": e.public_message, "status": e.status}), e.http_code
-    except Exception:
-        return _json({"error": "Internal Server Error"}), 500
-
-# ---- Recommendations (stub you can grow) ----
-@app.get("/recommendation")
-def recommendation():
-    """
-    Starter stub. You can extend this to:
-    - pull a watchlist and score each ticker
-    - rank by change_pct or custom factors
-    """
-    return _json({
-        "message": "Recommendation engine stub. Add your logic in app.py:/recommendation and/or data_fetcher.py.",
-        "how_to_extend": [
-            "Call get_quote on your watchlist and sort by change_pct.",
-            "Add moving averages via Finnhub candles and rank momentum.",
-            "Cache results for 30–60s to avoid rate limits."
-        ]
-    })
-
-# ---- Security headers (simple, safe defaults) ----
 @app.after_request
 def add_headers(resp: Response):
+    # Simple safe defaults; tune as needed
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "no-referrer"
     return resp
 
-# ---- Friendly JSON errors ----
 @app.errorhandler(Exception)
 def handle_err(e: Exception):
     if isinstance(e, HTTPException):
-        return _json({"error": e.name, "status": e.code}), e.code
-    return _json({"error": "Internal Server Error"}), 500
+        # Friendly JSON for HTTP errors (404 etc.)
+        return jsonify(error=e.name, status=e.code), e.code
+    return jsonify(error="Internal Server Error", status=500), 500
 
-# ---- Local dev only (Azure uses gunicorn; this block is ignored there) ----
+
+# =========================
+#     LOCAL DEV (only)
+# =========================
+
 if __name__ == "__main__":
+    # Azure uses gunicorn; this block is ignored on Azure.
     app.run(host="0.0.0.0", port=8000, debug=True)
+
 
