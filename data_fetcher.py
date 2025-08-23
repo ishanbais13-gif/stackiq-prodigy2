@@ -9,7 +9,6 @@ class FinnhubError(Exception):
 
 def _get(path: str, params: dict) -> dict:
     if not API_KEY:
-        # Clear error if the key isn't wired on the server
         raise FinnhubError("FINNHUB_API_KEY is missing on the server")
     all_params = {**(params or {}), "token": API_KEY}
     r = requests.get(f"{BASE}/{path}", params=all_params, timeout=10)
@@ -17,9 +16,7 @@ def _get(path: str, params: dict) -> dict:
     return r.json()
 
 def get_quote_and_earnings(ticker: str) -> dict | None:
-    """
-    Return {"ticker":..., "price": {...}, "earnings": {...}} or None if no quote.
-    """
+    """Return {"ticker":..., "price": {...}, "earnings": {...}} or None if no quote."""
     t = (ticker or "").upper().strip()
     if not t:
         return None
@@ -45,6 +42,8 @@ def get_quote_and_earnings(ticker: str) -> dict | None:
             "pc": q.get("pc"),
         },
         "earnings": e or {"earningsCalendar": []},
+    }
+
     }
 
 
