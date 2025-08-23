@@ -24,7 +24,7 @@ def test_ticker(ticker: str, pretty: int | None = None):
     try:
         data = get_quote_and_earnings(ticker)
     except FinnhubError as e:
-        # 503 makes it obvious it's a server/config issue (e.g., missing key)
+        # 503 makes it obvious it’s a server/config issue (e.g., missing key)
         raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail="Upstream error") from e
@@ -33,18 +33,19 @@ def test_ticker(ticker: str, pretty: int | None = None):
         raise HTTPException(status_code=404, detail="Ticker not found or no data")
     return data
 
-# --- Static web (your UI) ---
+# ---- Static web (your UI) ----
 # Serve /web assets
 if os.path.isdir("web"):
     app.mount("/web", StaticFiles(directory="web"), name="web")
 
-    @app.get("/web")
-    def web_index_redirect():
-        return FileResponse(os.path.join("web", "index.html"))
+@app.get("/web")
+def web_index_redirect():
+    return FileResponse(os.path.join("web", "index.html"))
 
 @app.get("/")
 def root():
-    return {"message": "StackIQ backend is live."}
+    return {"message": "StackIQ backend is Live."}
+
 
 
 
