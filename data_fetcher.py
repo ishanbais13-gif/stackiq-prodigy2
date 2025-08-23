@@ -1,95 +1,118 @@
-# data_fetcher.py — Finnhub helpers used by /test/<ticker>
 import os
-import time
-import json
-import urllib.parse
-from typing import Dict, Any, List
-import requests
+import httpx
+from datetime import datetime, timedelta
 
-class FetchError(Exception):
-    pass
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")  # set this in Azure App Settings
 
-FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY")
 BASE = "https://finnhub.io/api/v1"
 
-def _require_key():
+# Simple in-memory cache to avoid rate limits during quick tests
+_cache: dict[str, dict] = {}
+_cache_ttl = timedelta(seconds=30)
+
+def _cache_key(ticker: str) -> str:
+    return f"quote:{ticker}"
+
+def _cache_get(key: str):
+    entry = _cache.get(key)
+    if not entry:
+        return None
+    if datetime.utcnow() > entry["exp"]:
+        _cache.pop(key, None)
+        return None
+    return entry["val"]
+
+def _cache_set(key: str, val: dict, ttl=_cache_ttl):
+    _cache[key] = {"val": val, "exp": datetime.utcnow() + ttl}
+
+async def _get_json(url: str, params: dict) -> dict | None:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(url, params=params)
+            if r.status_code != 200:
+                return None
+            return r.json()
+    except Exception:
+        return None
+
+async def _get_quote(ticker: str) -> dict | None:
+    """
+    Finnhub /quote returns:
+      c: current, d: change, dp: percent, h: high, l: low, o: open, pc: prev close
+    We’ll also add 'v' (volume) if available (Finnhub has /stock/metric, but
+    to keep it simple we’ll omit volume if we can’t fetch it).
+    """
     if not FINNHUB_API_KEY:
-        raise FetchError("FINNHUB_API_KEY not set in environment")
+        return None
 
-def _get(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    _require_key()
-    # add token, basic retry
-    params = dict(params or {})
-    params["token"] = FINNHUB_API_KEY
+    ck = _cache_key(ticker)
+    cached = _cache_get(ck)
+    if cached:
+        return cached
 
-    for attempt in range(3):
-        r = requests.get(url, params=params, timeout=10)
-        if r.status_code == 200:
-            try:
-                return r.json()
-            except Exception:
-                raise FetchError("Malformed JSON from provider")
-        if r.status_code == 429:
-            # rate-limited — small backoff, then retry
-            time.sleep(0.8 * (attempt + 1))
-            continue
-        # other status -> raise with body snippet
-        raise FetchError(f"HTTP {r.status_code}: {r.text[:180]}")
-    raise FetchError("Too many retries")
+    quote = await _get_json(f"{BASE}/quote", {"symbol": ticker, "token": FINNHUB_API_KEY})
+    if not quote or not quote.get("c"):
+        return None
 
-def get_ticker_data(symbol: str) -> Dict[str, Any]:
-    """
-    Returns Finnhub quote payload:
-      { c, d, dp, h, l, o, pc }
-    """
-    if not symbol:
-        raise FetchError("Missing symbol")
-    url = f"{BASE}/quote"
-    data = _get(url, {"symbol": symbol})
-    # Validate presence of 'c' etc.
-    if "c" not in data:
-        raise FetchError("Quote not found or no data")
-    return data
+    # Volume isn't in /quote; try /scan/technical? Keep it simple: omit volume if not available.
+    price = {
+        "c": quote.get("c"),
+        "d": quote.get("d"),
+        "dp": quote.get("dp"),
+        "h": quote.get("h"),
+        "l": quote.get("l"),
+        "o": quote.get("o"),
+        "pc": quote.get("pc"),
+        "v": None,  # placeholder; UI tolerates missing/empty
+    }
+    _cache_set(ck, price)
+    return price
 
-def get_earnings_calendar(symbol: str) -> List[Dict[str, Any]]:
+async def _get_earnings_calendar(ticker: str) -> list:
     """
-    Returns a (possibly empty) list of the symbol's next/last earnings items.
-    Finnhub: /calendar/earnings?symbol=SYMB
+    Keep UI happy: return an array (can be empty if unavailable).
+    Finnhub has /calendar/earnings but may require plan; if it fails, return [].
     """
-    url = f"{BASE}/calendar/earnings"
-    data = _get(url, {"symbol": symbol})
-    items = data.get("earningsCalendar") or data.get("earningscalendar") or data.get("earnings") or []
-    # Normalize to a list of simple dicts
-    if isinstance(items, dict):
-        items = [items]
+    if not FINNHUB_API_KEY:
+        return []
+
+    # Try earnings calendar; if it fails, return []
+    data = await _get_json(f"{BASE}/calendar/earnings", {"symbol": ticker, "token": FINNHUB_API_KEY})
+    items = []
+    try:
+        # Finnhub response shape: {"earningsCalendar":[{date, epsActual, epsEstimate, hour, quarter, year, revenueActual, revenueEstimate, ...}]}
+        # If different or missing, we normalize lightly.
+        cal = data.get("earningsCalendar") if isinstance(data, dict) else None
+        if isinstance(cal, list):
+            for row in cal:
+                items.append({
+                    "date": row.get("date"),
+                    "epsActual": row.get("epsActual"),
+                    "epsEstimate": row.get("epsEstimate"),
+                    "hour": row.get("hour"),
+                    "quarter": row.get("quarter"),
+                    "year": row.get("year"),
+                    "revenueActual": row.get("revenueActual"),
+                    "revenueEstimate": row.get("revenueEstimate"),
+                    "symbol": ticker,
+                })
+    except Exception:
+        pass
     return items
 
-def get_price_and_earnings(symbol: str) -> Dict[str, Any]:
+async def get_price_and_earnings(ticker: str) -> dict | None:
     """
-    Unified call used by /test/<ticker>.
+    Returns a dict shaped exactly the way the front-end expects.
     """
-    quote = get_ticker_data(symbol)
-    earnings = get_earnings_calendar(symbol)
+    price = await _get_quote(ticker)
+    if not price:
+        return None
+
+    earnings_list = await _get_earnings_calendar(ticker)
     return {
-        "ticker": symbol,
-        "price": {
-            "c": quote.get("c"),
-            "d": quote.get("d"),
-            "dp": quote.get("dp"),
-            "h": quote.get("h"),
-            "l": quote.get("l"),
-            "o": quote.get("o"),
-            "pc": quote.get("pc"),
-        },
-        "earnings": {
-            "earningsCalendar": earnings
-        },
+        "ticker": ticker,
+        "price": price,
+        "earnings": {"earningsCalendar": earnings_list},
     }
 
-# Backwards-compatible aliases the app might look for
-get_stock_data = get_ticker_data
-get_quote_and_earnings = get_price_and_earnings
-get_ticker = get_ticker_data
-get = get_ticker_data
-fetch = get_price_and_earnings
 
