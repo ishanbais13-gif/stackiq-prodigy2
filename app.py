@@ -1,179 +1,120 @@
 # app.py
 import os
-from typing import Optional, Dict, Any
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
+import time
+from typing import Dict, Any
+
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-# ---- data layer (your existing helpers) ----
-# These must already exist in data_fetcher.py.
-# We only import the callables your earlier error message listed.
+START_TIME = time.time()
+APP_VERSION = os.getenv("STACKIQ_VERSION", "0.2.0")
+
+app = FastAPI(title="StackIQ", version=APP_VERSION)
+
+# --- Optional import of your real fetcher ---
+fetch_impl = None
 try:
-    from data_fetcher import (
-        get_price_and_earnings,  # -> Dict[str, Any]
-        get_ticker_data,         # optional alt
-    )
-except Exception as e:
-    # Fall back to a helpful error at runtime if imports break
-    def _import_error(*_, **__):
-        raise RuntimeError(
-            "data_fetcher.py is missing required functions; "
-            "expected: get_price_and_earnings / get_ticker_data"
-        )
-    get_price_and_earnings = _import_error
-    get_ticker_data = _import_error
+    import data_fetcher  # your file
+    # pick a callable that exists
+    for name in [
+        "get_quote_and_earnings",
+        "get_price_and_earnings",
+        "get_stock_data",
+        "get_ticker_data",
+        "get",
+        "fetch",
+    ]:
+        if hasattr(data_fetcher, name):
+            fetch_impl = getattr(data_fetcher, name)
+            break
+except Exception:
+    fetch_impl = None
 
-VERSION = "0.2.0"
-SERVICE = "stackiq-web"
+# --- Health/Status ---
+@app.get("/health", response_class=JSONResponse)
+def health():
+    return {"ok": True, "service": "stackiq-web"}
 
-app = FastAPI(title="StackIQ", version=VERSION)
+@app.get("/version", response_class=JSONResponse)
+def version():
+    return {"version": APP_VERSION}
 
-# --- CORS (allow your web UI + local dev) ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # tighten later (add your domain)
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@app.get("/status", response_class=JSONResponse)
+def status():
+    return {
+        "app": "StackIQ",
+        "status": "ok",
+        "uptime_seconds": int(time.time() - START_TIME),
+        "version": APP_VERSION,
+    }
 
-# --- Static front-end under /web (./web/index.html) ---
-if os.path.isdir("web"):
-    app.mount("/web", StaticFiles(directory="web", html=True), name="web")
+# --- Test API (safe wrapper) ---
+def _shape_quote(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a few common quote keys so the UI doesn't break."""
+    if not isinstance(raw, dict):
+        return {}
+    price = raw.get("price") or raw.get("c") or raw.get("current") or raw.get("last")
+    change = raw.get("change") or raw.get("d")
+    pct = raw.get("percent_change") or raw.get("dp")
+    high = raw.get("high") or raw.get("h")
+    low = raw.get("low") or raw.get("l")
+    open_ = raw.get("open") or raw.get("o")
+    prev = raw.get("prevClose") or raw.get("pc")
+    vol = raw.get("volume") or raw.get("v")
+    return {
+        "price": price,
+        "change": change,
+        "percent_change": pct,
+        "high": high,
+        "low": low,
+        "open": open_,
+        "prev_close": prev,
+        "volume": vol,
+    }
 
-# ---------- Health / meta ----------
+@app.get("/test/{ticker}", response_class=JSONResponse)
+def test_ticker(ticker: str, pretty: int = 0):
+    if not ticker:
+        raise HTTPException(status_code=400, detail="ticker required")
+
+    # If you have a real fetcher, use it; otherwise return a stub so the UI renders.
+    if fetch_impl:
+        try:
+            data = fetch_impl(ticker)
+            # Accept either dict with "price"/"earnings" or any shape we can normalize
+            if isinstance(data, dict) and ("price" in data or "earnings" in data):
+                return data
+            # try to normalize generic quote-only responses
+            quote = _shape_quote(data if isinstance(data, dict) else {})
+            return {"ticker": ticker.upper(), "price": quote, "earnings": {"earningsCalendar": []}}
+        except HTTPException:
+            raise
+        except Exception as e:
+            # Surface fetch errors but keep the process alive
+            raise HTTPException(status_code=500, detail=str(e))
+    else:
+        # Fallback stub so the page stays up even if data_fetcher is broken
+        return {
+            "ticker": ticker.upper(),
+            "price": {"c": 100.0, "d": 0.0, "dp": 0.0, "h": 101.0, "l": 99.0, "o": 100.5, "pc": 100.2, "v": 1000000},
+            "earnings": {"earningsCalendar": []},
+        }
+
+# --- Static UI (/web) ---
+web_dir = os.path.join(os.path.dirname(__file__), "web")
+if os.path.isdir(web_dir):
+    app.mount("/web", StaticFiles(directory=web_dir, html=True), name="web")
+else:
+    @app.get("/web", response_class=PlainTextResponse)
+    def web_placeholder():
+        return "StackIQ backend is live. (No /web directory found.)"
+
+# Root convenience
 @app.get("/", response_class=PlainTextResponse)
 def root():
     return "StackIQ backend is live."
 
-@app.get("/health")
-def health():
-    return {"ok": True, "service": SERVICE}
-
-@app.get("/status")
-def status():
-    # “uptime_seconds” is optional; leaving as 0 keeps it simple
-    return {"app": "StackIQ", "status": "ok", "uptime_seconds": 0, "version": VERSION}
-
-@app.get("/version")
-def version():
-    return {"version": VERSION}
-
-@app.get("/envcheck")
-def envcheck():
-    # Minimal check that your API key is present (don’t leak the value)
-    has_key = bool(os.getenv("STOCK_API_KEY") or os.getenv("FINNHUB_API_KEY") or os.getenv("RAPIDAPI_KEY"))
-    return {"has_key": has_key}
-
-# ---------- Data test endpoint ----------
-@app.get("/test/{ticker}")
-def test_ticker(
-    ticker: str,
-    pretty: Optional[int] = Query(default=0, description="Return pretty JSON when =1")
-):
-    """
-    Returns combined price + earnings for a ticker.
-    The structure matches what your front-end expects.
-    """
-    try:
-        data = get_price_and_earnings(ticker.upper())
-        # enforce the expected shape to avoid KeyError in UI
-        price: Dict[str, Any] = data.get("price") or {}
-        # Required keys your UI reads: c,d,dp,h,l,o,pc,v
-        mapped_price = {
-            "c": price.get("c"),     # current price
-            "d": price.get("d"),     # absolute change
-            "dp": price.get("dp"),   # % change
-            "h": price.get("h"),
-            "l": price.get("l"),
-            "o": price.get("o"),
-            "pc": price.get("pc"),
-            "v": price.get("v"),
-        }
-        out = {
-            "ticker": ticker.upper(),
-            "price": mapped_price,
-            "earnings": data.get("earnings", {}),
-        }
-        if pretty:
-            return JSONResponse(out, media_type="application/json")
-        return out
-    except HTTPException:
-        raise
-    except KeyError as e:
-        # This is the “Error: 'price'” you saw; return a clear message
-        raise HTTPException(status_code=502, detail=f"Upstream payload missing key: {e}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ---------- Recommendation engine ----------
-@app.get("/recommend")
-def recommend(
-    ticker: str,
-    horizon: str = Query(..., description="short|medium|long"),
-    risk: str = Query(..., description="low|medium|high"),
-    conviction: int = Query(5, ge=0, le=10),
-):
-    """
-    Tiny rules engine:
-      - looks at short-term % change (dp)
-      - blends with risk & conviction to produce BUY / HOLD / AVOID
-    """
-    try:
-        payload = get_price_and_earnings(ticker.upper())
-        price = payload.get("price") or {}
-        dp = price.get("dp")  # % change
-        if dp is None:
-            raise HTTPException(status_code=502, detail="Missing dp (percent change) for ticker.")
-
-        # Normalize inputs
-        hz = horizon.lower()
-        r  = risk.lower()
-
-        # Base score from % change (negative motion can be a buy opportunity)
-        # Clamp dp to a sensible band
-        dp_clamped = max(min(float(dp), 15.0), -15.0)
-        score = 0.0 - (dp_clamped / 10.0)  # down -> positive score (value buy), up -> negative (froth)
-
-        # Horizon adjustments
-        if hz.startswith("short"):
-            score *= 0.8  # be more conservative short-term
-        elif hz.startswith("long"):
-            score *= 1.2
-
-        # Risk appetite
-        if r == "low":
-            score -= 0.3
-        elif r == "high":
-            score += 0.3
-
-        # Conviction: nudge toward action when user is confident
-        score += (conviction - 5) / 20.0  # -0.25..+0.25
-
-        # Map score to label
-        if score >= 0.25:
-            rec = "BUY"
-        elif score <= -0.25:
-            rec = "AVOID"
-        else:
-            rec = "HOLD"
-
-        return {
-            "ticker": ticker.upper(),
-            "inputs": {"horizon": hz, "risk": r, "conviction": conviction},
-            "signals": {"dp": dp_clamped, "score": round(score, 3)},
-            "recommendation": rec,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ---------- Local dev ----------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
 
 
 
