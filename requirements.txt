@@ -1,5 +1,7 @@
-flask==3.0.3
-gunicorn==21.2.0
-requests
-flask-cors
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+yfinance==0.2.40
+pandas==2.2.2
+numpy==1.26.4
+
 
