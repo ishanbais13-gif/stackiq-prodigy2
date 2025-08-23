@@ -1,119 +1,137 @@
-# app.py
-import os
-import time
-from typing import Dict, Any
+ # app.py
+import math
+from typing import Dict, Any, List
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 
-START_TIME = time.time()
-APP_VERSION = os.getenv("STACKIQ_VERSION", "0.2.0")
+import yfinance as yf
 
-app = FastAPI(title="StackIQ", version=APP_VERSION)
+app = FastAPI(title="StackIQ")
 
-# --- Optional import of your real fetcher ---
-fetch_impl = None
-try:
-    import data_fetcher  # your file
-    # pick a callable that exists
-    for name in [
-        "get_quote_and_earnings",
-        "get_price_and_earnings",
-        "get_stock_data",
-        "get_ticker_data",
-        "get",
-        "fetch",
-    ]:
-        if hasattr(data_fetcher, name):
-            fetch_impl = getattr(data_fetcher, name)
-            break
-except Exception:
-    fetch_impl = None
+# allow your static site to call the API from /web
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# --- Health/Status ---
-@app.get("/health", response_class=JSONResponse)
-def health():
-    return {"ok": True, "service": "stackiq-web"}
 
-@app.get("/version", response_class=JSONResponse)
-def version():
-    return {"version": APP_VERSION}
-
-@app.get("/status", response_class=JSONResponse)
-def status():
-    return {
-        "app": "StackIQ",
-        "status": "ok",
-        "uptime_seconds": int(time.time() - START_TIME),
-        "version": APP_VERSION,
-    }
-
-# --- Test API (safe wrapper) ---
-def _shape_quote(raw: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize a few common quote keys so the UI doesn't break."""
-    if not isinstance(raw, dict):
-        return {}
-    price = raw.get("price") or raw.get("c") or raw.get("current") or raw.get("last")
-    change = raw.get("change") or raw.get("d")
-    pct = raw.get("percent_change") or raw.get("dp")
-    high = raw.get("high") or raw.get("h")
-    low = raw.get("low") or raw.get("l")
-    open_ = raw.get("open") or raw.get("o")
-    prev = raw.get("prevClose") or raw.get("pc")
-    vol = raw.get("volume") or raw.get("v")
-    return {
-        "price": price,
-        "change": change,
-        "percent_change": pct,
-        "high": high,
-        "low": low,
-        "open": open_,
-        "prev_close": prev,
-        "volume": vol,
-    }
-
-@app.get("/test/{ticker}", response_class=JSONResponse)
-def test_ticker(ticker: str, pretty: int = 0):
-    if not ticker:
-        raise HTTPException(status_code=400, detail="ticker required")
-
-    # If you have a real fetcher, use it; otherwise return a stub so the UI renders.
-    if fetch_impl:
-        try:
-            data = fetch_impl(ticker)
-            # Accept either dict with "price"/"earnings" or any shape we can normalize
-            if isinstance(data, dict) and ("price" in data or "earnings" in data):
-                return data
-            # try to normalize generic quote-only responses
-            quote = _shape_quote(data if isinstance(data, dict) else {})
-            return {"ticker": ticker.upper(), "price": quote, "earnings": {"earningsCalendar": []}}
-        except HTTPException:
-            raise
-        except Exception as e:
-            # Surface fetch errors but keep the process alive
-            raise HTTPException(status_code=500, detail=str(e))
-    else:
-        # Fallback stub so the page stays up even if data_fetcher is broken
-        return {
-            "ticker": ticker.upper(),
-            "price": {"c": 100.0, "d": 0.0, "dp": 0.0, "h": 101.0, "l": 99.0, "o": 100.5, "pc": 100.2, "v": 1000000},
-            "earnings": {"earningsCalendar": []},
-        }
-
-# --- Static UI (/web) ---
-web_dir = os.path.join(os.path.dirname(__file__), "web")
-if os.path.isdir(web_dir):
-    app.mount("/web", StaticFiles(directory=web_dir, html=True), name="web")
-else:
-    @app.get("/web", response_class=PlainTextResponse)
-    def web_placeholder():
-        return "StackIQ backend is live. (No /web directory found.)"
-
-# Root convenience
-@app.get("/", response_class=PlainTextResponse)
+@app.get("/")
 def root():
-    return "StackIQ backend is live."
+    return {"status": "ok", "msg": "StackIQ backend is live."}
+
+
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+def _safe_float(x) -> float:
+    try:
+        if x is None or (isinstance(x, float) and math.isnan(x)):
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+
+def _make_price_block(ticker: str) -> Dict[str, Any]:
+    """
+    Build the exact object your frontend expects:
+
+    {
+      "ticker": "AAPL",
+      "price": {"c": ..., "d": ..., "dp": ..., "h": ..., "l": ..., "o": ..., "pc": ..., "v": ...}
+    }
+    """
+    tk = yf.Ticker(ticker)
+    # Use last 2 daily candles to compute current & previous close.
+    hist = tk.history(period="5d", interval="1d", auto_adjust=False)
+
+    if hist is None or hist.empty:
+        raise HTTPException(status_code=404, detail="Ticker not found or no data")
+
+    # Last row is "current day" (close is last official close, or current if market open with yfinance caching)
+    last = hist.tail(1).iloc[0]
+    c = _safe_float(last["Close"])
+    o = _safe_float(last["Open"])
+    h = _safe_float(last["High"])
+    l = _safe_float(last["Low"])
+    v = int(last["Volume"]) if not math.isnan(_safe_float(last["Volume"])) else None
+
+    # Previous close (pc)
+    if len(hist) >= 2:
+        prev = hist.tail(2).iloc[0]
+        pc = _safe_float(prev["Close"])
+    else:
+        pc = c
+
+    d = _safe_float(c - pc) if (c is not None and pc is not None) else None
+    dp = _safe_float((d / pc) * 100) if (d is not None and pc not in (None, 0)) else None
+
+    return {
+        "ticker": ticker.upper(),
+        "price": {
+            "c": c,
+            "d": d,
+            "dp": dp,
+            "h": h,
+            "l": l,
+            "o": o,
+            "pc": pc,
+            "v": v,
+        },
+    }
+
+
+def _make_earnings_block(ticker: str) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Return an 'earnings' object compatible with your UI.
+    """
+    tk = yf.Ticker(ticker)
+    # Pull up to a few dates; if none, return empty list
+    try:
+        ed = tk.get_earnings_dates(limit=4)
+    except Exception:
+        ed = None
+
+    items: List[Dict[str, Any]] = []
+    if ed is not None and not ed.empty:
+        # yfinance returns a DataFrame with columns like: "Earnings Date", "EPS Estimate", "Reported EPS", etc.
+        # Normalize fields to match your earlier shape.
+        for _, row in ed.reset_index().iterrows():
+            item = {
+                "date": str(row.get("Earnings Date") or row.get("index") or ""),
+                "epsActual": _safe_float(row.get("Reported EPS")),
+                "epsEstimate": _safe_float(row.get("EPS Estimate")),
+                "hour": "amc",           # yfinance doesn’t always give this; placeholder
+                "quarter": None,         # unknown; placeholder
+                "revenueActual": None,   # unknown; placeholder
+                "revenueEstimate": None, # unknown; placeholder
+                "symbol": ticker.upper(),
+                "year": None,
+            }
+            items.append(item)
+
+    return {"earningsCalendar": items}
+
+
+@app.get("/test/{ticker}")
+def test_ticker(ticker: str, pretty: int | None = None):
+    try:
+        price = _make_price_block(ticker)
+        earnings = _make_earnings_block(ticker)
+        out = {**price, "earnings": earnings}
+        return out
+    except HTTPException:
+        # bubble up not-found error as-is
+        raise
+    except Exception as e:
+        # Any other error -> consistent JSON your UI can show
+        return {"status": "error", "error": str(e)}
+
 
 
 
