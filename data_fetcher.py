@@ -98,6 +98,8 @@ def get_quote_and_earnings(symbol: str) -> Dict[str, Any]:
         "earnings": fetch_earnings(symbol),
     }
 
+    }
+
 
 
 
