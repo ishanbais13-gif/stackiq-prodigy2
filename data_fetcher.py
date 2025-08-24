@@ -1,5 +1,4 @@
-from __future__ import annotations
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 import os
 import time
 import requests
@@ -8,7 +7,7 @@ import requests
 # Errors
 # =========================
 class FinnhubError(Exception):
-    """Generic data fetch error (name kept to avoid changing app.py)."""
+    """Generic data fetch error (name kept to match app.py)."""
     pass
 
 
@@ -19,10 +18,9 @@ FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 
 # tiny in-memory cache: key -> {"data": Any, "exp": unix_ts}
 _cache: Dict[str, Dict[str, Any]] = {}
-# simple per-symbol throttle (avoid hammering providers)
+# simple per-symbol throttle
 _last_call: Dict[str, float] = {}
 
-# good UA helps avoid some 403/429 from Yahoo
 UA_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -35,30 +33,30 @@ UA_HEADERS = {
 # =========================
 # Helpers
 # =========================
-def _get_cached(key: str) -> Any | None:
+def _get_cached(key: str) -> Optional[Any]:
     item = _cache.get(key)
     if not item:
         return None
-    if time.time() >= item["exp"]:
+    if time.time() >= item.get("exp", 0):
         _cache.pop(key, None)
         return None
-    return item["data"]
+    return item.get("data")
 
-def _set_cached(key: str, data: Any, ttl_seconds: int):
+def _set_cached(key: str, data: Any, ttl_seconds: int) -> None:
     _cache[key] = {"data": data, "exp": time.time() + ttl_seconds}
 
-def _get_with_retries(url: str, *, headers=None, tries=3, backoff=0.6) -> requests.Response:
+def _get_with_retries(url: str, headers: Optional[Dict[str, str]] = None,
+                      tries: int = 3, backoff: float = 0.6) -> requests.Response:
     """
     GET with small exponential backoff on 429/5xx and network errors.
     """
     delay = 0.0
-    last_exc: Exception | None = None
+    last_exc: Optional[Exception] = None
     for _ in range(tries):
         if delay:
             time.sleep(delay)
         try:
             r = requests.get(url, timeout=10, headers=headers or UA_HEADERS)
-            # retry on 429 or any 5xx
             if r.status_code == 429 or 500 <= r.status_code < 600:
                 last_exc = requests.HTTPError(f"{r.status_code} {r.reason}")
                 delay = backoff if delay == 0 else delay * 2
@@ -78,14 +76,16 @@ def _get_with_retries(url: str, *, headers=None, tries=3, backoff=0.6) -> reques
 def _quote_from_finnhub(symbol: str) -> Dict[str, Any]:
     if not FINNHUB_API_KEY:
         raise FinnhubError("No FINNHUB_API_KEY")
-    url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
+    url = "https://finnhub.io/api/v1/quote?symbol={s}&token={t}".format(
+        s=symbol, t=FINNHUB_API_KEY
+    )
     r = _get_with_retries(url, headers=None, tries=3)
     try:
         j = r.json()
     except Exception as e:
-        raise FinnhubError(f"Finnhub JSON error: {e}, text={r.text[:200]}")
+        raise FinnhubError("Finnhub JSON error: {e}".format(e=e))
     if not j or "c" not in j:
-        raise FinnhubError(f"Bad response from Finnhub: {j}")
+        raise FinnhubError("Bad response from Finnhub: {j}".format(j=j))
     return {
         "currentPrice": j.get("c"),
         "previousClose": j.get("pc"),
@@ -98,38 +98,40 @@ def _quote_from_finnhub(symbol: str) -> Dict[str, Any]:
 
 def _quote_from_yahoo(symbol: str) -> Dict[str, Any]:
     urls = [
-        f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}",
-        f"https://query2.finance.yahoo.com/v6/finance/quote?symbols={symbol}",
+        "https://query1.finance.yahoo.com/v7/finance/quote?symbols={s}".format(s=symbol),
+        "https://query2.finance.yahoo.com/v6/finance/quote?symbols={s}".format(s=symbol),
     ]
+    last_error: Optional[str] = None
     for url in urls:
-        r = _get_with_retries(url, headers=UA_HEADERS, tries=3)
         try:
+            r = _get_with_retries(url, headers=UA_HEADERS, tries=3)
             d = r.json()
-        except Exception:
-            # try the other endpoint
+            res = d.get("quoteResponse", {}).get("result", [])
+            if not res:
+                last_error = "empty result"
+                continue
+            q = res[0]
+            return {
+                "currentPrice": q.get("regularMarketPrice"),
+                "previousClose": q.get("regularMarketPreviousClose"),
+                "open": q.get("regularMarketOpen"),
+                "dayHigh": q.get("regularMarketDayHigh"),
+                "dayLow": q.get("regularMarketDayLow"),
+                "volume": q.get("regularMarketVolume"),
+                "currency": q.get("currency"),
+                "shortName": q.get("shortName"),
+                "exchange": q.get("fullExchangeName"),
+                "marketState": q.get("marketState"),
+                "source": "yahoo",
+            }
+        except Exception as e:
+            last_error = str(e)
             continue
-        res = d.get("quoteResponse", {}).get("result", [])
-        if not res:
-            continue
-        q = res[0]
-        return {
-            "currentPrice": q.get("regularMarketPrice"),
-            "previousClose": q.get("regularMarketPreviousClose"),
-            "open": q.get("regularMarketOpen"),
-            "dayHigh": q.get("regularMarketDayHigh"),
-            "dayLow": q.get("regularMarketDayLow"),
-            "volume": q.get("regularMarketVolume"),
-            "currency": q.get("currency"),
-            "shortName": q.get("shortName"),
-            "exchange": q.get("fullExchangeName"),
-            "marketState": q.get("marketState"),
-            "source": "yahoo",
-        }
-    raise FinnhubError("Yahoo quote unavailable or rate-limited")
+    raise FinnhubError("Yahoo quote unavailable or rate-limited ({e})".format(e=last_error))
 
 
 # =========================
-# Public API (used by app.py)
+# Public API used by app.py
 # =========================
 def fetch_quote(symbol: str) -> Dict[str, Any]:
     """
@@ -140,7 +142,7 @@ def fetch_quote(symbol: str) -> Dict[str, Any]:
     if not symbol:
         raise FinnhubError("Empty symbol")
 
-    cache_key = f"quote:{symbol}"
+    cache_key = "quote:{s}".format(s=symbol)
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
@@ -152,8 +154,8 @@ def fetch_quote(symbol: str) -> Dict[str, Any]:
         return cached
     _last_call[symbol] = now
 
+    # primary path
     try:
-        # Primary path
         if FINNHUB_API_KEY:
             out = _quote_from_finnhub(symbol)
         else:
@@ -161,13 +163,14 @@ def fetch_quote(symbol: str) -> Dict[str, Any]:
         _set_cached(cache_key, out, ttl_seconds=60)
         return out
     except Exception:
-        # Secondary path (fallback)
+        # fallback path
         try:
             out = _quote_from_yahoo(symbol) if FINNHUB_API_KEY else _quote_from_finnhub(symbol)
             _set_cached(cache_key, out, ttl_seconds=60)
             return out
         except Exception as e2:
-            raise FinnhubError(f"Unable to fetch quote for {symbol}: {e2}")
+            # final guarded error to avoid app crash pages
+            raise FinnhubError("Unable to fetch quote for {s}: {e}".format(s=symbol, e=e2))
 
 def fetch_earnings(symbol: str) -> List[Dict[str, Any]]:
     """
@@ -177,12 +180,12 @@ def fetch_earnings(symbol: str) -> List[Dict[str, Any]]:
     if not symbol:
         raise FinnhubError("Empty symbol")
 
-    cache_key = f"earnings:{symbol}"
+    cache_key = "earnings:{s}".format(s=symbol)
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
-    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=earnings"
+    url = "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{s}?modules=earnings".format(s=symbol)
     r = _get_with_retries(url, headers=UA_HEADERS, tries=3)
     d = r.json()
     earnings = (
@@ -195,7 +198,8 @@ def fetch_earnings(symbol: str) -> List[Dict[str, Any]]:
 
     rows: List[Dict[str, Any]] = []
     for row in earnings:
-        def raw(v): return v.get("raw") if isinstance(v, dict) else v
+        def raw(v):
+            return v.get("raw") if isinstance(v, dict) else v
         rows.append({
             "date": row.get("date"),
             "epsEstimate": raw(row.get("estimate")),
@@ -212,7 +216,6 @@ def get_quote_and_earnings(symbol: str) -> Dict[str, Any]:
         "earnings": fetch_earnings(symbol),
     }
 
-    }
 
 
 
