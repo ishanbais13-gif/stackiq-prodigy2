@@ -1,241 +1,340 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>StackIQ – Live Stocks</title>
   <style>
-    :root { --bg:#0e0f13; --panel:#1a1d24; --muted:#9aa3b2; --txt:#e9edf3; --ok:#35d27d; --err:#ff6b6b; --accent:#3aa0ff; }
-    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu}
-    .wrap{max-width:980px;margin:40px auto;padding:0 16px}
-    h1{font-weight:800;letter-spacing:.3px;text-align:center}
-    .status{display:flex;gap:8px;align-items:center;justify-content:center;margin:-8px 0 24px}
-    .dot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok)}
-    .grid{display:grid;grid-template-columns:1.1fr .9fr;gap:28px}
-    .card{background:var(--panel);border:1px solid #262b35;border-radius:16px;padding:18px;box-shadow:0 6px 18px rgba(0,0,0,.25)}
-    .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
-    .kgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
-    .k{background:#141722;border:1px solid #272c37;border-radius:10px;padding:10px 12px}
-    .k b{display:block;font-size:12px;color:var(--muted);margin-bottom:2px}
-    .k span{font-weight:700}
-    .row{display:flex;gap:10px;align-items:center}
-    input[type=text]{flex:1;background:#0f1219;border:1px solid #2a3040;border-radius:10px;padding:10px 12px;color:var(--txt);outline:none}
-    button{background:var(--accent);border:0;color:white;font-weight:700;border-radius:10px;padding:10px 14px;cursor:pointer}
-    button:disabled{opacity:.6;cursor:not-allowed}
-    .hint{margin-top:8px;color:var(--muted);font-size:12px}
-    .err{color:var(--err);font-weight:700;margin-top:8px}
-    .ok{color:var(--ok)}
-    table{width:100%;border-collapse:collapse;margin-top:10px}
-    th,td{border-bottom:1px solid #283041;padding:8px 6px;font-size:14px}
-    th{color:var(--muted);text-align:left}
-    /* Wizard */
-    .wizard h3{margin:6px 0 6px}
-    .wizard select,.wizard input[type=number]{width:100%;background:#0f1219;border:1px solid #2a3040;border-radius:10px;padding:10px 12px;color:var(--txt);outline:none}
-    .pill{display:inline-block;background:#0f1219;border:1px solid #2a3040;border-radius:14px;padding:4px 10px;margin-right:6px;color:var(--muted);font-size:12px}
+    :root {
+      --bg: #0f1115;
+      --panel: #171a22;
+      --muted: #8a90a2;
+      --text: #e6e9ef;
+      --accent: #4da3ff;
+      --ok: #3ddc84;
+      --danger: #ff6b6b;
+      --card: #1b1f2a;
+      --border: #232838;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: radial-gradient(1200px 800px at 20% -10%, #131722 0%, #0f1115 45%);
+      color: var(--text);
+      font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif;
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 36px auto;
+      padding: 0 16px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+    .title {
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      font-size: 28px;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #111520;
+      color: var(--muted);
+      border: 1px solid var(--border);
+      font-weight: 600;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--danger);
+      box-shadow: 0 0 0 4px #111520 inset;
+    }
+    .dot.ok { background: var(--ok); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 460px 1fr;
+      gap: 24px;
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent 40%) , var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 6px 30px rgba(0,0,0,0.25);
+    }
+    h2 {
+      margin: 0 0 12px 0;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .row { display: flex; gap: 8px; }
+    .input {
+      flex: 1 1 auto;
+      height: 40px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #0f1420;
+      color: var(--text);
+      padding: 0 12px;
+      outline: none;
+    }
+    .btn {
+      appearance: none;
+      border: 1px solid rgba(77,163,255,0.35);
+      background: radial-gradient(120% 120% at 0% 0%, rgba(77,163,255,0.25), rgba(77,163,255,0.05)) , #102033;
+      color: #cfe6ff;
+      font-weight: 700;
+      height: 40px;
+      padding: 0 14px;
+      border-radius: 10px;
+      cursor: pointer;
+    }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .hint { margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .error { color: var(--danger); font-weight: 700; margin-top: 8px; min-height: 18px; }
+
+    .stack { display: grid; gap: 12px; }
+    .select, .range, .input {
+      width: 100%;
+      background: #0f1420;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px 12px;
+      outline: none;
+    }
+    .subtle { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .rec {
+      margin-top: 10px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      color: #b8c7ff;
+      min-height: 20px;
+    }
+
+    .kv {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      margin-top: 6px;
+    }
+    .kv .cell {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      min-height: 58px;
+    }
+    .k { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .v { font-size: 16px; font-weight: 700; }
+
+    .earnings {
+      margin-top: 14px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      max-height: 260px;
+      overflow: auto;
+    }
+    .earn-item { padding: 8px 0; border-bottom: 1px dashed var(--border); }
+    .earn-item:last-child { border-bottom: 0; }
+    .earn-item strong { color: #d5d9ff; }
+
+    footer { margin-top: 18px; color: var(--muted); font-size: 12px; }
+    a { color: #9ecaff; text-decoration: none; }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>StackIQ</h1>
-    <div class="status"><span class="dot"></span><span id="apiStatus">Checking API…</span></div>
+    <header>
+      <div class="title">StackIQ</div>
+      <div class="pill"><span id="apiDot" class="dot"></span> <span id="apiText">API status</span></div>
+    </header>
 
     <div class="grid">
-      <!-- LEFT: Input + Wizard -->
+      <!-- Left: Controls -->
       <div class="card">
-        <div class="label">Enter Stock Ticker</div>
-        <div class="row" style="margin-top:8px">
-          <input id="ticker" type="text" placeholder="AAPL, MSFT, NVDA…" />
-          <button id="fetchBtn">Fetch</button>
+        <h2>Enter Stock Ticker</h2>
+        <div class="row">
+          <input id="tickerInput" class="input" placeholder="AAPL, MSFT, NVDA…" />
+          <button id="fetchBtn" class="btn">Fetch</button>
         </div>
         <div class="hint">Tip: you can also open <code>/test/AAPL?pretty=1</code> directly.</div>
-        <div id="formErr" class="err" style="display:none"></div>
+        <div id="err" class="error"></div>
 
-        <hr style="border:none;border-top:1px solid #283041;margin:18px 0">
-
-        <div class="wizard">
-          <div class="label">Strategy Wizard</div>
-          <div class="pill">goal: decide buy / hold / avoid</div>
-          <h3>Investment Horizon</h3>
-          <select id="horizon">
-            <option value="short">Short (days–weeks)</option>
-            <option value="medium" selected>Medium (months)</option>
-            <option value="long">Long (1yr+)</option>
-          </select>
-
-          <h3>Risk Tolerance</h3>
-          <select id="risk">
-            <option value="low">Low</option>
-            <option value="medium" selected>Medium</option>
-            <option value="high">High</option>
-          </select>
-
-          <h3>Conviction (0–10)</h3>
-          <input id="conviction" type="number" min="0" max="10" step="1" value="5"/>
-
-          <div class="row" style="margin-top:12px; justify-content:flex-end">
-            <button id="recommendBtn">Get Recommendation</button>
+        <h2 style="margin-top:18px;">Strategy Wizard</h2>
+        <div class="stack">
+          <div>
+            <div class="subtle">Investment Horizon</div>
+            <select id="horizon" class="select">
+              <option value="short">Short (weeks)</option>
+              <option value="medium" selected>Medium (months)</option>
+              <option value="long">Long (years)</option>
+            </select>
           </div>
-          <div id="recOut" class="hint"></div>
+          <div>
+            <div class="subtle">Risk Tolerance</div>
+            <select id="risk" class="select">
+              <option>Low</option>
+              <option selected>Medium</option>
+              <option>High</option>
+            </select>
+          </div>
+          <div>
+            <div class="subtle">Conviction (0–10)</div>
+            <input id="conviction" type="number" min="0" max="10" step="1" value="5" class="input" />
+          </div>
+          <div class="row" style="justify-content:flex-end;">
+            <button id="recBtn" class="btn">Get Recommendation</button>
+          </div>
+          <div id="rec" class="rec">Recommendation: —</div>
         </div>
       </div>
 
-      <!-- RIGHT: Quote + Earnings -->
+      <!-- Right: Quote / Earnings -->
       <div class="card">
-        <div class="row" style="justify-content:space-between">
-          <div class="label">Quote</div>
-          <div id="loading" class="hint" style="display:none">Loading…</div>
+        <h2>Quote</h2>
+        <div class="kv">
+          <div class="cell"><div class="k">Current Price</div><div class="v" id="currentPrice">—</div></div>
+          <div class="cell"><div class="k">Change</div><div class="v" id="change">—</div></div>
+          <div class="cell"><div class="k">% Change</div><div class="v" id="percentChange">—</div></div>
+          <div class="cell"><div class="k">Open</div><div class="v" id="open">—</div></div>
+          <div class="cell"><div class="k">High</div><div class="v" id="high">—</div></div>
+          <div class="cell"><div class="k">Low</div><div class="v" id="low">—</div></div>
+          <div class="cell"><div class="k">Prev Close</div><div class="v" id="prevClose">—</div></div>
+          <div class="cell"><div class="k">Volume</div><div class="v" id="volume">—</div></div>
         </div>
 
-        <div class="kgrid">
-          <div class="k"><b>Current Price</b><span id="c"></span></div>
-          <div class="k"><b>Change</b><span id="d"></span></div>
-          <div class="k"><b>% Change</b><span id="dp"></span></div>
-          <div class="k"><b>Open</b><span id="o"></span></div>
-          <div class="k"><b>High</b><span id="h"></span></div>
-          <div class="k"><b>Low</b><span id="l"></span></div>
-          <div class="k"><b>Prev Close</b><span id="pc"></span></div>
-          <div class="k"><b>Volume</b><span id="v"></span></div>
-        </div>
-
-        <div style="margin-top:16px">
-          <div class="label">Earnings</div>
-          <table id="earnTbl" style="display:none">
-            <thead><tr><th>Date</th><th>Quarter</th><th>EPS</th><th>Rev (est → actual)</th></tr></thead>
-            <tbody id="earnBody"></tbody>
-          </table>
-          <div id="earnEmpty" class="hint" style="display:none">No recent earnings in feed.</div>
-        </div>
+        <h2 style="margin-top:16px;">Earnings</h2>
+        <div id="earnings" class="earnings">No recent earnings in feed.</div>
       </div>
     </div>
+
+    <footer>
+      UI runs from <code>/web</code>. Data served by <code>/test/:symbol</code>, <code>/quote/:symbol</code>, <code>/earnings/:symbol</code>. Health: <code>/health</code>.
+    </footer>
   </div>
 
   <script>
-    // Base URL (same site) – robust even when page is at /web
-    const API_BASE = `${location.origin}`;
+    const $ = (id) => document.getElementById(id);
 
-    // Format helpers
-    const fmt = {
-      num: (x) => (x === null || x === undefined || isNaN(+x)) ? '' : (+x).toLocaleString(),
-      usd: (x) => (x === null || x === undefined || isNaN(+x)) ? '' : (+x).toLocaleString(undefined,{style:'currency',currency:'USD'}),
-      pct: (x) => (x === null || x === undefined || isNaN(+x)) ? '' : `${(+x).toFixed(2)}%`,
-      abbr: (x) => {
-        const n = +x; if (isNaN(n)) return '';
-        const abs = Math.abs(n);
-        if (abs >= 1e12) return (n/1e12).toFixed(2)+'T';
-        if (abs >= 1e9)  return (n/1e9).toFixed(2)+'B';
-        if (abs >= 1e6)  return (n/1e6).toFixed(2)+'M';
-        return n.toLocaleString();
-      }
-    };
-
-    // Status check
-    (async () => {
+    // --- API status poll ---
+    async function pollHealth() {
       try {
-        const r = await fetch(`${API_BASE}/health`, {cache:'no-store'});
-        const ok = r.ok;
-        document.querySelector('#apiStatus').innerHTML =
-          ok ? '<span class="ok">API is live</span>' : '<span class="err">API offline</span>';
+        const r = await fetch('/health');
+        const ok = r.ok && (await r.json()).ok === true;
+        $('apiDot').classList.toggle('ok', ok);
+        $('apiText').textContent = ok ? 'API is live' : 'API unreachable';
       } catch {
-        document.querySelector('#apiStatus').innerHTML = '<span class="err">API offline</span>';
+        $('apiDot').classList.remove('ok');
+        $('apiText').textContent = 'API unreachable';
       }
-    })();
+    }
+    pollHealth();
+    setInterval(pollHealth, 15000);
 
-    const el = (id) => document.getElementById(id);
-    const ids = ['c','d','dp','o','h','l','pc','v'];
-    function clearQuote(){ ids.forEach(i=>el(i).textContent=''); el('earnTbl').style.display='none'; el('earnBody').innerHTML=''; el('earnEmpty').style.display='none'; }
-    function setErr(msg){ const e=el('formErr'); e.textContent=msg; e.style.display='block'; }
-    function clrErr(){ const e=el('formErr'); e.textContent=''; e.style.display='none'; }
+    // --- Format helpers ---
+    const nf2 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+    const nfi = new Intl.NumberFormat();
 
-    async function fetchTicker() {
-      clrErr(); clearQuote();
-      const raw = el('ticker').value.trim();
-      if (!raw) { setErr('Please enter a ticker.'); return; }
-      const symbol = raw.toUpperCase();
-      el('ticker').value = symbol;
+    function setQuote(q) {
+      $('currentPrice').textContent  = q?.current != null ? nf2.format(q.current) : '—';
+      $('change').textContent        = q?.change  != null ? nf2.format(q.change) : '—';
+      $('percentChange').textContent = q?.percent_change != null ? nf2.format(q.percent_change) + '%' : '—';
+      $('open').textContent          = q?.open    != null ? nf2.format(q.open) : '—';
+      $('high').textContent          = q?.high    != null ? nf2.format(q.high) : '—';
+      $('low').textContent           = q?.low     != null ? nf2.format(q.low) : '—';
+      $('prevClose').textContent     = q?.prev_close != null ? nf2.format(q.prev_close) : '—';
+      $('volume').textContent        = q?.volume  != null ? nfi.format(q.volume) : '—';
+    }
 
-      el('loading').style.display='block';
-      el('fetchBtn').disabled = true;
+    function setEarnings(earn) {
+      const box = $('earnings');
+      if (!earn?.items?.length) {
+        box.textContent = 'No recent earnings in feed.';
+        return;
+      }
+      box.innerHTML = earn.items.map(it => `
+        <div class="earn-item">
+          <strong>${it.period}</strong> — EPS Actual: <strong>${nf2.format(it.epsActual ?? it.actual ?? 0)}</strong>,
+          Estimate: ${nf2.format(it.epsEstimate ?? it.estimate ?? 0)}
+          ${it.surprise != null ? `, Surprise: ${nf2.format(it.surprise)}` : ''}
+        </div>
+      `).join('');
+    }
 
+    // --- Fetch flow ---
+    async function fetchStock() {
+      $('err').textContent = '';
+      const symbol = $('tickerInput').value.trim().toUpperCase();
+      if (!symbol) { $('err').textContent = 'Enter a ticker (e.g., AAPL).'; return; }
+
+      $('fetchBtn').disabled = true;
       try {
-        const url = `${API_BASE}/test/${encodeURIComponent(symbol)}`;
-        const res = await fetch(url, { cache:'no-store' });
+        const r = await fetch(`/test/${encodeURIComponent(symbol)}`);
+        const data = await r.json();
 
-        if (!res.ok) {
-          // Try to print API error if present
-          let errText = 'Ticker not found';
-          try { const j = await res.json(); if (j && j.error) errText = j.error; } catch {}
-          throw new Error(errText);
+        if (!r.ok) {
+          $('err').textContent = (data && data.detail) ? data.detail : 'Fetch failed.';
+          setQuote(null); setEarnings(null);
+          return;
         }
 
-        const data = await res.json();
-
-        // price payload (support string/number)
-        const p = data.price || {};
-        el('c').textContent  = fmt.usd(p.c);
-        el('d').textContent  = fmt.usd(p.d);
-        el('dp').textContent = fmt.pct(p.dp);
-        el('o').textContent  = fmt.usd(p.o);
-        el('h').textContent  = fmt.usd(p.h);
-        el('l').textContent  = fmt.usd(p.l);
-        el('pc').textContent = fmt.usd(p.pc);
-        el('v').textContent  = fmt.abbr(p.v);
-
-        // earnings payload
-        const ec = (data.earnings && (data.earnings.earningsCalendar || data.earnings.calendar)) || [];
-        if (ec.length) {
-          el('earnTbl').style.display='table';
-          el('earnBody').innerHTML = ec.slice(0,4).map(e => {
-            const rev = `${fmt.abbr(e.revenueEstimate)} → ${fmt.abbr(e.revenueActual)}`;
-            const eps = `${e.epsEstimate ?? ''} → ${e.epsActual ?? ''}`;
-            return `<tr>
-              <td>${e.date || ''}</td>
-              <td>${e.quarter ?? ''}</td>
-              <td>${eps}</td>
-              <td>${rev}</td>
-            </tr>`;
-          }).join('');
-        } else {
-          el('earnEmpty').style.display='block';
-        }
+        setQuote(data.quote);
+        setEarnings(data.earnings);
+        lastQuote = data.quote || null; // keep for recommendation
       } catch (e) {
-        setErr(`Error: ${e.message || 'Request failed'}`);
+        console.error(e);
+        $('err').textContent = 'Network error.';
       } finally {
-        el('loading').style.display='none';
-        el('fetchBtn').disabled = false;
+        $('fetchBtn').disabled = false;
       }
     }
 
-    el('fetchBtn').addEventListener('click', fetchTicker);
-    el('ticker').addEventListener('keydown', (ev)=>{ if (ev.key==='Enter') fetchTicker(); });
+    // --- Simple recommendation using quote + user inputs ---
+    let lastQuote = null;
+    function makeRecommendation() {
+      const risk = $('risk').value.toLowerCase();
+      const horizon = $('horizon').value.toLowerCase();
+      const conv = Math.max(0, Math.min(10, parseInt($('conviction').value || '5', 10)));
+      const pct = Number(lastQuote?.percent_change ?? 0);
 
-    // Strategy wizard: very simple rules to demonstrate flow
-    el('recommendBtn').addEventListener('click', () => {
-      const horizon = el('horizon').value; // short | medium | long
-      const risk = el('risk').value;       // low | medium | high
-      const conv = +el('conviction').value || 0;
-      // Use latest fetched quote fields if present
-      const dpTxt = el('dp').textContent.replace('%','');
-      const dp = parseFloat(dpTxt) || 0;
-
-      // Toy logic:
-      // - long + medium/high risk + conviction >=6 → BUY if dp between -2% and +2%, else HOLD
-      // - short + high risk + green day (dp>0) → BUY; red day → AVOID
-      // - low risk + short horizon → AVOID unless conviction >=8 and dp>-0.5
       let rec = 'HOLD';
-      if (horizon==='long') {
-        if ((risk==='medium'||risk==='high') && conv>=6) rec = (Math.abs(dp)<=2 ? 'BUY' : 'HOLD');
-        else rec = conv>=5 ? 'HOLD' : 'AVOID';
-      } else if (horizon==='short') {
-        if (risk==='high') rec = dp>0 ? 'BUY' : 'AVOID';
-        else rec = conv>=8 && dp>-0.5 ? 'BUY' : 'AVOID';
-      } else { // medium
-        rec = conv>=7 ? 'BUY' : (conv>=4 ? 'HOLD' : 'AVOID');
-      }
-      el('recOut').innerHTML = `<b>Recommendation:</b> ${rec}`;
+      if (pct > 0.75 && conv >= 6) rec = 'BUY';
+      if (pct < -0.75 && risk === 'low') rec = 'HOLD';
+      if (pct < -1.2 || (pct < -0.8 && conv <= 3)) rec = 'AVOID';
+
+      // small horizon nudge
+      if (horizon === 'long' && pct > 0 && conv >= 7) rec = 'BUY';
+      if (horizon === 'short' && Math.abs(pct) < 0.3) rec = 'HOLD';
+
+      $('rec').textContent = `Recommendation: ${rec}`;
+    }
+
+    // --- Wire up ---
+    $('fetchBtn').addEventListener('click', fetchStock);
+    $('recBtn').addEventListener('click', makeRecommendation);
+    $('tickerInput').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') fetchStock();
     });
   </script>
 </body>
 </html>
+
 
 
 
