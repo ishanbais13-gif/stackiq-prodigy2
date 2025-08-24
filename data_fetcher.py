@@ -1,42 +1,17 @@
 from typing import Any, Dict, List
 import requests
-import yfinance as yf
 
 class FinnhubError(Exception):
     pass
 
-def _pick(d: Dict[str, Any], *keys: str):
-    for k in keys:
-        if k in d:
-            return d[k]
-    return None
-
 def fetch_quote(symbol: str) -> Dict[str, Any]:
     """
-    Try yfinance.fast_info first (stable), then fall back to Yahoo quote API.
+    Fetch quote from Yahoo Finance JSON endpoint.
+    Returns a small dict with current price/ohlc/volume.
     """
     symbol = symbol.upper()
-
-    # 1) Primary: yfinance fast_info
+    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
     try:
-        t = yf.Ticker(symbol)
-        fi = dict(getattr(t, "fast_info", {}) or {})
-        if fi:
-            return {
-                "currentPrice": _pick(fi, "last_price", "lastPrice"),
-                "previousClose": _pick(fi, "previous_close", "previousClose"),
-                "open": _pick(fi, "open"),
-                "dayHigh": _pick(fi, "day_high", "dayHigh"),
-                "dayLow": _pick(fi, "day_low", "dayLow"),
-                "volume": _pick(fi, "volume"),
-            }
-    except Exception:
-        # fall through to Yahoo HTTP endpoint
-        pass
-
-    # 2) Fallback: Yahoo finance HTTP endpoint
-    try:
-        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         data = r.json()
@@ -51,53 +26,54 @@ def fetch_quote(symbol: str) -> Dict[str, Any]:
             "dayHigh": q.get("regularMarketDayHigh"),
             "dayLow": q.get("regularMarketDayLow"),
             "volume": q.get("regularMarketVolume"),
+            "currency": q.get("currency"),
+            "shortName": q.get("shortName"),
         }
+    except requests.RequestException as e:
+        raise FinnhubError(f"Network error for {symbol}: {e}")
+    except ValueError as e:
+        raise FinnhubError(f"Bad JSON for {symbol}: {e}")
     except Exception as e:
-        raise FinnhubError(f"Error fetching quote for {symbol}: {str(e)}")
+        raise FinnhubError(f"Error fetching quote for {symbol}: {e}")
 
 def fetch_earnings(symbol: str) -> List[Dict[str, Any]]:
     """
-    Use yfinance earnings info. Return a simple list of records.
+    Fetch earnings summary from Yahoo Finance.
+    Returns a simple list of quarterly records: date, estimate, actual, surprise%.
     """
     symbol = symbol.upper()
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=earnings"
     try:
-        t = yf.Ticker(symbol)
-        # get_earnings_dates returns recent + future dates with surprises
-        try:
-            ed = t.get_earnings_dates(limit=12)
-            if ed is not None:
-                # Normalize to list of dicts
-                records = []
-                for idx, row in ed.reset_index().iterrows():
-                    records.append({
-                        "earningsDate": str(row.get("Earnings Date")),
-                        "epsEstimate": row.get("EPS Estimate"),
-                        "epsActual": row.get("Reported EPS"),
-                        "surprise": row.get("Surprise(%)"),
-                    })
-                return records
-        except Exception:
-            pass
-
-        # Older fallback
-        try:
-            df = t.earnings
-            if df is not None and not df.empty:
-                df = df.reset_index().rename(columns={"Year": "year"})
-                return df.to_dict(orient="records")
-        except Exception:
-            pass
-
-        return []
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        earnings = (
+            data.get("quoteSummary", {})
+                .get("result", [{}])[0]
+                .get("earnings", {})
+                .get("financialsChart", {})
+                .get("quarterly", [])
+        )
+        out: List[Dict[str, Any]] = []
+        for row in earnings:
+            out.append({
+                "date": row.get("date"),
+                "epsEstimate": (row.get("estimate", {}) or {}).get("raw") if isinstance(row.get("estimate"), dict) else row.get("estimate"),
+                "epsActual": (row.get("actual", {}) or {}).get("raw") if isinstance(row.get("actual"), dict) else row.get("actual"),
+                "surprisePercent": (row.get("surprisePercent", {}) or {}).get("raw") if isinstance(row.get("surprisePercent"), dict) else row.get("surprisePercent"),
+            })
+        return out
+    except requests.RequestException as e:
+        raise FinnhubError(f"Network error for {symbol}: {e}")
+    except ValueError as e:
+        raise FinnhubError(f"Bad JSON for {symbol}: {e}")
     except Exception as e:
-        raise FinnhubError(f"Error fetching earnings for {symbol}: {str(e)}")
+        raise FinnhubError(f"Error fetching earnings for {symbol}: {e}")
 
 def get_quote_and_earnings(symbol: str) -> Dict[str, Any]:
     return {
         "quote": fetch_quote(symbol),
         "earnings": fetch_earnings(symbol),
-    }
-
     }
 
 
