@@ -1,8 +1,12 @@
 import os
 import logging
-from fastapi import FastAPI, HTTPException
+import os.path as osp
+from typing import Any, Dict
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 
 from data_fetcher import (
     get_quote_and_earnings,
@@ -36,23 +40,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------- Static frontend (optional) ----------
-# If a /web directory exists in the repo, serve it at /web
-if os.path.isdir("web"):
+# ---------- Static frontend (/web) ----------
+if osp.isdir("web"):
     app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
 # ---------- Routes ----------
+
 @app.get("/")
-def root():
+def root() -> Dict[str, Any]:
     return {"status": "ok", "message": "StackIQ API is running"}
 
 @app.get("/health")
-def health():
+def health() -> Dict[str, Any]:
     return {"ok": True}
 
 @app.get("/debug")
-def debug():
-    """Quick check to confirm env is wired (won't reveal the key)."""
+def debug() -> Dict[str, Any]:
+    """Quick check that env is wired (won't reveal the key)."""
     return {"has_finnhub_key": bool(os.getenv("FINNHUB_API_KEY"))}
 
 @app.get("/quote/{symbol}")
@@ -61,10 +65,17 @@ def quote(symbol: str):
         data = fetch_quote(symbol)
         return {"symbol": symbol.upper(), "quote": data}
     except FinnhubError as e:
-        raise HTTPException(status_code=429 if "rate" in str(e).lower() else 400, detail=str(e))
+        # Known data-source issue (rate limit, bad symbol, etc.)
+        return JSONResponse(
+            status_code=429 if "rate" in str(e).lower() else 400,
+            content={"detail": str(e), "where": "quote", "symbol": symbol.upper()},
+        )
     except Exception as e:
         log.exception("Unhandled error in /quote")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"/quote crashed: {e}", "where": "quote", "symbol": symbol.upper()},
+        )
 
 @app.get("/earnings/{symbol}")
 def earnings(symbol: str):
@@ -72,10 +83,16 @@ def earnings(symbol: str):
         data = fetch_earnings(symbol)
         return {"symbol": symbol.upper(), "earnings": data}
     except FinnhubError as e:
-        raise HTTPException(status_code=429 if "rate" in str(e).lower() else 400, detail=str(e))
+        return JSONResponse(
+            status_code=429 if "rate" in str(e).lower() else 400,
+            content={"detail": str(e), "where": "earnings", "symbol": symbol.upper()},
+        )
     except Exception as e:
         log.exception("Unhandled error in /earnings")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"/earnings crashed: {e}", "where": "earnings", "symbol": symbol.upper()},
+        )
 
 @app.get("/test/{symbol}")
 def test(symbol: str):
@@ -84,10 +101,17 @@ def test(symbol: str):
         payload["symbol"] = symbol.upper()
         return payload
     except FinnhubError as e:
-        raise HTTPException(status_code=429 if "rate" in str(e).lower() else 400, detail=str(e))
+        return JSONResponse(
+            status_code=429 if "rate" in str(e).lower() else 400,
+            content={"detail": str(e), "where": "test", "symbol": symbol.upper()},
+        )
     except Exception as e:
         log.exception("Unhandled error in /test")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"/test crashed: {e}", "where": "test", "symbol": symbol.upper()},
+        )
+
 
 
 
