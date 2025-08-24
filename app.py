@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 
 from data_fetcher import get_quote_and_earnings, fetch_quote, fetch_earnings, FinnhubError
 
@@ -36,13 +36,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------- Static web (serves /web/index.html if present) ----------
+if os.path.isdir("web"):
+    app.mount("/web", StaticFiles(directory="web", html=True), name="web")
+
 # ---------- Routes ----------
 @app.get("/")
 def root():
     return {"status": "ok", "message": "StackIQ API is running"}
 
 @app.get("/quote/{symbol}")
-def get_quote(symbol: str):
+def quote(symbol: str):
     try:
         data = fetch_quote(symbol)
         return {"symbol": symbol.upper(), "quote": data}
@@ -50,12 +54,21 @@ def get_quote(symbol: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/earnings/{symbol}")
-def get_earnings(symbol: str):
+def earnings(symbol: str):
     try:
         data = fetch_earnings(symbol)
         return {"symbol": symbol.upper(), "earnings": data}
     except FinnhubError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+# Combined endpoint you tried: /test/{symbol}
+@app.get("/test/{symbol}")
+def test(symbol: str):
+    try:
+        return {"symbol": symbol.upper(), **get_quote_and_earnings(symbol)}
+    except FinnhubError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
 
 
 
