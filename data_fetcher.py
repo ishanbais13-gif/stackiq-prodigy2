@@ -1,15 +1,40 @@
 from __future__ import annotations
 from typing import Any, Dict, List
+import os
 import time
 import requests
 
+# =========================
+# Errors
+# =========================
 class FinnhubError(Exception):
+    """Generic data fetch error (name kept to avoid changing app.py)."""
     pass
 
-# ------------ Simple in-memory cache ------------
-_cache: Dict[str, Dict[str, Any]] = {}         # key -> {data, exp}
-_last_call: Dict[str, float] = {}              # per-symbol throttle
 
+# =========================
+# Config / Globals
+# =========================
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+
+# tiny in-memory cache: key -> {"data": Any, "exp": unix_ts}
+_cache: Dict[str, Dict[str, Any]] = {}
+# simple per-symbol throttle (avoid hammering providers)
+_last_call: Dict[str, float] = {}
+
+# good UA helps avoid some 403/429 from Yahoo
+UA_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124 Safari/537.36"
+    )
+}
+
+
+# =========================
+# Helpers
+# =========================
 def _get_cached(key: str) -> Any | None:
     item = _cache.get(key)
     if not item:
@@ -19,103 +44,134 @@ def _get_cached(key: str) -> Any | None:
         return None
     return item["data"]
 
-def _set_cached(key: str, data: Any, ttl: int):
-    _cache[key] = {"data": data, "exp": time.time() + ttl}
+def _set_cached(key: str, data: Any, ttl_seconds: int):
+    _cache[key] = {"data": data, "exp": time.time() + ttl_seconds}
 
-HEADERS = {
-    # helps avoid some 403/429 responses
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
-}
-
-def _get_with_retries(url: str, *, tries=3, backoff=0.6) -> requests.Response:
+def _get_with_retries(url: str, *, headers=None, tries=3, backoff=0.6) -> requests.Response:
     """
-    GET with small exponential backoff on 429/5xx.
+    GET with small exponential backoff on 429/5xx and network errors.
     """
     delay = 0.0
     last_exc: Exception | None = None
-    for i in range(tries):
+    for _ in range(tries):
         if delay:
             time.sleep(delay)
         try:
-            r = requests.get(url, timeout=10, headers=HEADERS)
-            # Retry on 429 or 5xx
+            r = requests.get(url, timeout=10, headers=headers or UA_HEADERS)
+            # retry on 429 or any 5xx
             if r.status_code == 429 or 500 <= r.status_code < 600:
-                delay = backoff if delay == 0 else delay * 2
                 last_exc = requests.HTTPError(f"{r.status_code} {r.reason}")
+                delay = backoff if delay == 0 else delay * 2
                 continue
             r.raise_for_status()
             return r
         except requests.RequestException as e:
-            # network hiccup: retry
-            delay = backoff if delay == 0 else delay * 2
             last_exc = e
+            delay = backoff if delay == 0 else delay * 2
             continue
-    # all tries failed
-    if last_exc:
-        raise last_exc
-    raise FinnhubError("Unknown network error")
+    raise last_exc or FinnhubError("Network error")
 
-# ------------ Quote ------------
+
+# =========================
+# Quote Providers
+# =========================
+def _quote_from_finnhub(symbol: str) -> Dict[str, Any]:
+    if not FINNHUB_API_KEY:
+        raise FinnhubError("No FINNHUB_API_KEY")
+    url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
+    r = _get_with_retries(url, headers=None, tries=3)
+    try:
+        j = r.json()
+    except Exception as e:
+        raise FinnhubError(f"Finnhub JSON error: {e}, text={r.text[:200]}")
+    if not j or "c" not in j:
+        raise FinnhubError(f"Bad response from Finnhub: {j}")
+    return {
+        "currentPrice": j.get("c"),
+        "previousClose": j.get("pc"),
+        "open": j.get("o"),
+        "dayHigh": j.get("h"),
+        "dayLow": j.get("l"),
+        "volume": j.get("v"),
+        "source": "finnhub",
+    }
+
+def _quote_from_yahoo(symbol: str) -> Dict[str, Any]:
+    urls = [
+        f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}",
+        f"https://query2.finance.yahoo.com/v6/finance/quote?symbols={symbol}",
+    ]
+    for url in urls:
+        r = _get_with_retries(url, headers=UA_HEADERS, tries=3)
+        try:
+            d = r.json()
+        except Exception:
+            # try the other endpoint
+            continue
+        res = d.get("quoteResponse", {}).get("result", [])
+        if not res:
+            continue
+        q = res[0]
+        return {
+            "currentPrice": q.get("regularMarketPrice"),
+            "previousClose": q.get("regularMarketPreviousClose"),
+            "open": q.get("regularMarketOpen"),
+            "dayHigh": q.get("regularMarketDayHigh"),
+            "dayLow": q.get("regularMarketDayLow"),
+            "volume": q.get("regularMarketVolume"),
+            "currency": q.get("currency"),
+            "shortName": q.get("shortName"),
+            "exchange": q.get("fullExchangeName"),
+            "marketState": q.get("marketState"),
+            "source": "yahoo",
+        }
+    raise FinnhubError("Yahoo quote unavailable or rate-limited")
+
+
+# =========================
+# Public API (used by app.py)
+# =========================
 def fetch_quote(symbol: str) -> Dict[str, Any]:
     """
-    Yahoo quote with cache (60s) + throttle (one call per 10s per symbol).
-    Retries on 429/5xx a few times before failing.
+    Get a quote with caching (60s) + throttle (10s per symbol).
+    Prefer Finnhub (if key available), fallback to Yahoo.
     """
     symbol = symbol.upper().strip()
     if not symbol:
         raise FinnhubError("Empty symbol")
 
     cache_key = f"quote:{symbol}"
-    # serve cache if fresh
     cached = _get_cached(cache_key)
     if cached is not None:
         return cached
 
-    # simple throttle: if we queried this symbol <10s ago, wait or serve stale (if any)
+    # throttle repeated hits per symbol
     now = time.time()
-    last = _last_call.get(symbol, 0)
+    last = _last_call.get(symbol, 0.0)
     if now - last < 10 and cached is not None:
         return cached
     _last_call[symbol] = now
 
-    # try query1, then query2 as fallback
-    urls = [
-        f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}",
-        f"https://query2.finance.yahoo.com/v6/finance/quote?symbols={symbol}",
-    ]
-
-    for url in urls:
+    try:
+        # Primary path
+        if FINNHUB_API_KEY:
+            out = _quote_from_finnhub(symbol)
+        else:
+            out = _quote_from_yahoo(symbol)
+        _set_cached(cache_key, out, ttl_seconds=60)
+        return out
+    except Exception:
+        # Secondary path (fallback)
         try:
-            r = _get_with_retries(url)
-            data = r.json()
-            results = data.get("quoteResponse", {}).get("result", [])
-            if not results:
-                continue
-            q = results[0]
-            out = {
-                "currentPrice": q.get("regularMarketPrice"),
-                "previousClose": q.get("regularMarketPreviousClose"),
-                "open": q.get("regularMarketOpen"),
-                "dayHigh": q.get("regularMarketDayHigh"),
-                "dayLow": q.get("regularMarketDayLow"),
-                "volume": q.get("regularMarketVolume"),
-                "currency": q.get("currency"),
-                "shortName": q.get("shortName"),
-                "exchange": q.get("fullExchangeName"),
-                "marketState": q.get("marketState"),
-            }
-            _set_cached(cache_key, out, ttl=60)
+            out = _quote_from_yahoo(symbol) if FINNHUB_API_KEY else _quote_from_finnhub(symbol)
+            _set_cached(cache_key, out, ttl_seconds=60)
             return out
-        except Exception:
-            # try next URL
-            continue
+        except Exception as e2:
+            raise FinnhubError(f"Unable to fetch quote for {symbol}: {e2}")
 
-    raise FinnhubError(f"Unable to fetch quote for {symbol} (rate-limited or unavailable)")
-
-# ------------ Earnings ------------
 def fetch_earnings(symbol: str) -> List[Dict[str, Any]]:
     """
-    Yahoo earnings summary with 10-minute cache.
+    Recent quarterly earnings from Yahoo (cached 10 minutes).
     """
     symbol = symbol.upper().strip()
     if not symbol:
@@ -127,36 +183,35 @@ def fetch_earnings(symbol: str) -> List[Dict[str, Any]]:
         return cached
 
     url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=earnings"
-    try:
-        r = _get_with_retries(url)
-        data = r.json()
-        earnings = (
-            data.get("quoteSummary", {})
-                .get("result", [{}])[0]
-                .get("earnings", {})
-                .get("financialsChart", {})
-                .get("quarterly", [])
-        )
-        rows: List[Dict[str, Any]] = []
-        for row in earnings:
-            def _raw(v):
-                return v.get("raw") if isinstance(v, dict) else v
-            rows.append({
-                "date": row.get("date"),
-                "epsEstimate": _raw(row.get("estimate")),
-                "epsActual": _raw(row.get("actual")),
-                "surprisePercent": _raw(row.get("surprisePercent")),
-            })
-        _set_cached(cache_key, rows, ttl=600)
-        return rows
-    except Exception as e:
-        raise FinnhubError(f"Unable to fetch earnings for {symbol}: {e}")
+    r = _get_with_retries(url, headers=UA_HEADERS, tries=3)
+    d = r.json()
+    earnings = (
+        d.get("quoteSummary", {})
+         .get("result", [{}])[0]
+         .get("earnings", {})
+         .get("financialsChart", {})
+         .get("quarterly", [])
+    )
 
-# ------------ Combined ------------
+    rows: List[Dict[str, Any]] = []
+    for row in earnings:
+        def raw(v): return v.get("raw") if isinstance(v, dict) else v
+        rows.append({
+            "date": row.get("date"),
+            "epsEstimate": raw(row.get("estimate")),
+            "epsActual": raw(row.get("actual")),
+            "surprisePercent": raw(row.get("surprisePercent")),
+        })
+
+    _set_cached(cache_key, rows, ttl_seconds=600)  # 10 minutes
+    return rows
+
 def get_quote_and_earnings(symbol: str) -> Dict[str, Any]:
     return {
         "quote": fetch_quote(symbol),
         "earnings": fetch_earnings(symbol),
+    }
+
     }
 
 
