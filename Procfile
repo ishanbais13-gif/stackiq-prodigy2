@@ -1,2 +1,3 @@
-web: uvicorn app:app --host=0.0.0.0 --port=8000
+web: gunicorn -k uvicorn.workers.UvicornWorker app:app --timeout 120 --log-level info
+
 
