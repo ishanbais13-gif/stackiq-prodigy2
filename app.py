@@ -1,22 +1,16 @@
-import os
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from starlette.staticfiles import StaticFiles
+from pathlib import Path
+import os
 
-import data_fetcher as df
-
-app = FastAPI(title="StackIQ", version="1.0.0")
-
-# CORS (optional, but harmless)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+from data_fetcher import (
+    fetch_quote, fetch_earnings, fetch_history, get_quote_and_earnings, FinnhubError
 )
 
-# ---- Health & version ----
+app = FastAPI(title="StackIQ Web", version="1.0.0")
+
+WEB_DIR = Path(__file__).parent / "web"
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -25,53 +19,51 @@ def health():
 def version():
     return {"version": app.version}
 
-# ---- API endpoints used by web/index.html ----
-@app.get("/quote/{symbol}")
-def quote(symbol: str):
-    try:
-        return df.fetch_quote(symbol)
-    except df.FinnhubError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-@app.get("/earnings/{symbol}")
-def earnings(symbol: str, limit: int = 4):
-    try:
-        return df.fetch_earnings(symbol, limit=limit)
-    except df.FinnhubError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-@app.get("/history/{symbol}")
-def history(symbol: str, range_days: int = 30):
-    try:
-        return df.fetch_history(symbol, range_days=range_days)
-    except df.FinnhubError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-# Combined test endpoint used by your page’s JS: /test/{symbol}
-@app.get("/test/{symbol}")
-def test(symbol: str):
-    try:
-        return df.get_quote_and_earnings(symbol)
-    except df.FinnhubError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-# ---- Static site (your /web/index.html) ----
-WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
-if os.path.isdir(WEB_DIR):
-    app.mount("/web", StaticFiles(directory=WEB_DIR, html=True), name="web")
-
-# Root can show a tiny hint (optional)
 @app.get("/", response_class=HTMLResponse)
 def root():
-    if os.path.isdir(WEB_DIR):
-        return '<p>OK. UI is at <a href="/web/">/web/</a></p>'
-    return "<p>OK</p>"
+    idx = WEB_DIR / "index.html"
+    if idx.exists():
+        return idx.read_text(encoding="utf-8")
+    return HTMLResponse("<h1>StackIQ</h1><p>index.html not found.</p>", status_code=200)
 
-# ---- Error handler (nicer JSON) ----
-@app.exception_handler(Exception)
-async def unhandled(request, exc):
-    # Don’t leak internals; log would go to stdout for Kudu
-    return JSONResponse(status_code=500, content={"error": "internal_error"})
+@app.get("/web/{path:path}", response_class=HTMLResponse)
+def web_assets(path: str):
+    p = WEB_DIR / path
+    if p.is_file():
+        return HTMLResponse(p.read_text(encoding="utf-8"))
+    raise HTTPException(status_code=404, detail="Not found")
+
+@app.get("/quote/{symbol}")
+def quote(symbol: str, pretty: int = 0):
+    try:
+        data = fetch_quote(symbol)
+        return JSONResponse(data, media_type="application/json", indent=2 if pretty else None)
+    except FinnhubError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+@app.get("/earnings/{symbol}")
+def earnings(symbol: str, pretty: int = 0, limit: int = 4):
+    try:
+        data = fetch_earnings(symbol, limit=limit)
+        return JSONResponse(data, media_type="application/json", indent=2 if pretty else None)
+    except FinnhubError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+@app.get("/history/{symbol}")
+def history(symbol: str, pretty: int = 0, range_days: int = 30):
+    try:
+        data = fetch_history(symbol, range_days=range_days)
+        return JSONResponse(data, media_type="application/json", indent=2 if pretty else None)
+    except FinnhubError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+@app.get("/test/{symbol}")
+def test(symbol: str, pretty: int = 0):
+    try:
+        data = get_quote_and_earnings(symbol)
+        return JSONResponse(data, media_type="application/json", indent=2 if pretty else None)
+    except FinnhubError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
 
 
 
