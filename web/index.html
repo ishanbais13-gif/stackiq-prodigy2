@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -6,332 +6,189 @@
   <title>StackIQ – Live Stocks</title>
   <style>
     :root {
-      --bg: #0f1115;
-      --panel: #171a22;
-      --muted: #8a90a2;
-      --text: #e6e9ef;
-      --accent: #4da3ff;
-      --ok: #3ddc84;
-      --danger: #ff6b6b;
-      --card: #1b1f2a;
-      --border: #232838;
+      --bg:#0e0f13; --panel:#1a1d24; --muted:#93a3b2; --txt:#e9edf3; --ok:#35d27d; --err:#ff6b6b; --accent:#3aa0ff;
     }
-    * { box-sizing: border-box; }
-    html, body { height: 100%; }
-    body {
-      margin: 0;
-      background: radial-gradient(1200px 800px at 20% -10%, #131722 0%, #0f1115 45%);
-      color: var(--text);
-      font: 14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial, sans-serif;
-    }
-    .wrap {
-      max-width: 1100px;
-      margin: 36px auto;
-      padding: 0 16px;
-    }
-    header {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 18px;
-    }
-    .title {
-      font-weight: 800;
-      letter-spacing: 0.5px;
-      font-size: 28px;
-    }
-    .pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: #111520;
-      color: var(--muted);
-      border: 1px solid var(--border);
-      font-weight: 600;
-    }
-    .dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: var(--danger);
-      box-shadow: 0 0 0 4px #111520 inset;
-    }
-    .dot.ok { background: var(--ok); }
-
-    .grid {
-      display: grid;
-      grid-template-columns: 460px 1fr;
-      gap: 24px;
-    }
-    .card {
-      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent 40%) , var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 18px;
-      box-shadow: 0 6px 30px rgba(0,0,0,0.25);
-    }
-    h2 {
-      margin: 0 0 12px 0;
-      font-size: 13px;
-      font-weight: 700;
-      letter-spacing: 0.6px;
-      color: var(--muted);
-      text-transform: uppercase;
-    }
-
-    .row { display: flex; gap: 8px; }
-    .input {
-      flex: 1 1 auto;
-      height: 40px;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      background: #0f1420;
-      color: var(--text);
-      padding: 0 12px;
-      outline: none;
-    }
-    .btn {
-      appearance: none;
-      border: 1px solid rgba(77,163,255,0.35);
-      background: radial-gradient(120% 120% at 0% 0%, rgba(77,163,255,0.25), rgba(77,163,255,0.05)) , #102033;
-      color: #cfe6ff;
-      font-weight: 700;
-      height: 40px;
-      padding: 0 14px;
-      border-radius: 10px;
-      cursor: pointer;
-    }
-    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
-
-    .hint { margin-top: 8px; color: var(--muted); font-size: 12px; }
-    .error { color: var(--danger); font-weight: 700; margin-top: 8px; min-height: 18px; }
-
-    .stack { display: grid; gap: 12px; }
-    .select, .range, .input {
-      width: 100%;
-      background: #0f1420;
-      border: 1px solid var(--border);
-      color: var(--text);
-      border-radius: 10px;
-      padding: 10px 12px;
-      outline: none;
-    }
-    .subtle { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    .rec {
-      margin-top: 10px;
-      font-weight: 800;
-      letter-spacing: 0.5px;
-      color: #b8c7ff;
-      min-height: 20px;
-    }
-
-    .kv {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 10px;
-      margin-top: 6px;
-    }
-    .kv .cell {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px;
-      min-height: 58px;
-    }
-    .k { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    .v { font-size: 16px; font-weight: 700; }
-
-    .earnings {
-      margin-top: 14px;
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px;
-      max-height: 260px;
-      overflow: auto;
-    }
-    .earn-item { padding: 8px 0; border-bottom: 1px dashed var(--border); }
-    .earn-item:last-child { border-bottom: 0; }
-    .earn-item strong { color: #d5d9ff; }
-
-    footer { margin-top: 18px; color: var(--muted); font-size: 12px; }
-    a { color: #9ecaff; text-decoration: none; }
+    body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu}
+    .wrap{max-width:980px;margin:40px auto;padding:16px}
+    h1{font-weight:800;letter-spacing:.3px;text-align:center}
+    .status{display:flex;gap:8px;align-items:center;justify-content:center;margin:8px 0 24px}
+    .dot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 10px var(--ok)}
+    .grid{display:grid;grid-template-columns:1fr 0.9fr;gap:28px}
+    .card{background:var(--panel);border:1px solid #262b35;border-radius:16px;padding:18px;box-shadow:0 6px 18px rgba(0,0,0,.25)}
+    .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}
+    .k{background:#141722;border:1px solid #272c37;border-radius:12px;padding:10px 12px}
+    .k b{display:block;font-size:12px;color:var(--muted);margin-bottom:2px}
+    .k span{font-weight:700}
+    .row{display:flex;gap:12px;align-items:center}
+    input[type=text]{flex:1;background:#0f1119;border:1px solid #243a60;border-radius:10px;padding:10px 12px;color:var(--txt);outline:none}
+    button{background:var(--accent);border:none;border-radius:10px;padding:10px 14px;color:#fff;font-weight:700;cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    .err{color:var(--err)}
+    .ok{color:var(--ok)}
+    .wizard h3{margin:6px 0}
+    .wizard select,.wizard input[type=number]{width:100%;background:#0f1119;border:1px solid #243a60;border-radius:10px;padding:10px 12px;color:var(--txt);outline:none}
+    .pill{display:inline-block;background:#0f1119;border:1px solid #243a60;border-radius:14px;padding:4px 10px;margin-right:6px;color:var(--muted);font-size:12px}
+    .quote-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px}
+    .earn{margin-top:14px}
+    .earn div{padding:8px 10px;border-bottom:1px solid #212735}
+    canvas{width:100%;height:240px}
+    .footer{margin-top:16px;color:#7c8697;font-size:12px;text-align:center}
+    @media (max-width:960px){ .grid{grid-template-columns:1fr} }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <div class="wrap">
-    <header>
-      <div class="title">StackIQ</div>
-      <div class="pill"><span id="apiDot" class="dot"></span> <span id="apiText">API status</span></div>
-    </header>
+    <h1>StackIQ</h1>
+    <div class="status"><span class="dot"></span> <span>API is live</span></div>
 
     <div class="grid">
-      <!-- Left: Controls -->
+      <!-- LEFT: Controls -->
       <div class="card">
-        <h2>Enter Stock Ticker</h2>
-        <div class="row">
-          <input id="tickerInput" class="input" placeholder="AAPL, MSFT, NVDA…" />
-          <button id="fetchBtn" class="btn">Fetch</button>
+        <div class="label">Enter Stock Ticker</div>
+        <div class="row" style="margin-top:8px">
+          <input id="symbolInput" type="text" placeholder="AAPL, MSFT, NVDA…" />
+          <button id="fetchBtn">Fetch</button>
         </div>
-        <div class="hint">Tip: you can also open <code>/test/AAPL?pretty=1</code> directly.</div>
-        <div id="err" class="error"></div>
-
-        <h2 style="margin-top:18px;">Strategy Wizard</h2>
-        <div class="stack">
-          <div>
-            <div class="subtle">Investment Horizon</div>
-            <select id="horizon" class="select">
+        <div class="wizard" style="margin-top:18px">
+          <div class="label">Strategy Wizard</div>
+          <h3 class="pill">goal: decide buy / hold / avoid</h3>
+          <div style="margin-top:8px">
+            <div class="label">Investment Horizon</div>
+            <select id="horizon">
               <option value="short">Short (weeks)</option>
               <option value="medium" selected>Medium (months)</option>
-              <option value="long">Long (years)</option>
+              <option value="long">Long (year+)</option>
             </select>
           </div>
-          <div>
-            <div class="subtle">Risk Tolerance</div>
-            <select id="risk" class="select">
-              <option>Low</option>
-              <option selected>Medium</option>
-              <option>High</option>
+          <div style="margin-top:10px">
+            <div class="label">Risk Tolerance</div>
+            <select id="risk">
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
             </select>
           </div>
-          <div>
-            <div class="subtle">Conviction (0–10)</div>
-            <input id="conviction" type="number" min="0" max="10" step="1" value="5" class="input" />
+          <div style="margin-top:10px">
+            <div class="label">Conviction (0–10)</div>
+            <input id="conviction" type="number" min="0" max="10" value="5" />
           </div>
-          <div class="row" style="justify-content:flex-end;">
-            <button id="recBtn" class="btn">Get Recommendation</button>
+          <div style="margin-top:14px">
+            <button id="recBtn">Get Recommendation</button>
           </div>
-          <div id="rec" class="rec">Recommendation: —</div>
+          <div id="recOut" style="margin-top:10px" class="label">Recommendation: <b id="recText">HOLD</b></div>
         </div>
+        <div id="err" class="err" style="margin-top:10px"></div>
       </div>
 
-      <!-- Right: Quote / Earnings -->
+      <!-- RIGHT: Quote + Chart + Earnings -->
       <div class="card">
-        <h2>Quote</h2>
-        <div class="kv">
-          <div class="cell"><div class="k">Current Price</div><div class="v" id="currentPrice">—</div></div>
-          <div class="cell"><div class="k">Change</div><div class="v" id="change">—</div></div>
-          <div class="cell"><div class="k">% Change</div><div class="v" id="percentChange">—</div></div>
-          <div class="cell"><div class="k">Open</div><div class="v" id="open">—</div></div>
-          <div class="cell"><div class="k">High</div><div class="v" id="high">—</div></div>
-          <div class="cell"><div class="k">Low</div><div class="v" id="low">—</div></div>
-          <div class="cell"><div class="k">Prev Close</div><div class="v" id="prevClose">—</div></div>
-          <div class="cell"><div class="k">Volume</div><div class="v" id="volume">—</div></div>
+        <div class="label">Quote</div>
+        <div class="quote-grid">
+          <div class="k"><b>Current Price</b><span id="currentPrice">—</span></div>
+          <div class="k"><b>Change</b><span id="changePct">—</span></div>
+          <div class="k"><b>% Change</b><span id="percentChange">—</span></div>
+          <div class="k"><b>Open</b><span id="open">—</span></div>
+          <div class="k"><b>High</b><span id="high">—</span></div>
+          <div class="k"><b>Low</b><span id="low">—</span></div>
+          <div class="k"><b>Prev Close</b><span id="prevClose">—</span></div>
+          <div class="k"><b>Volume</b><span id="volume">—</span></div>
         </div>
 
-        <h2 style="margin-top:16px;">Earnings</h2>
-        <div id="earnings" class="earnings">No recent earnings in feed.</div>
+        <div style="margin-top:16px">
+          <canvas id="priceChart"></canvas>
+        </div>
+
+        <div class="earn">
+          <div class="label">Earnings</div>
+          <div id="earningsList"></div>
+        </div>
       </div>
     </div>
 
-    <footer>
-      UI runs from <code>/web</code>. Data served by <code>/test/:symbol</code>, <code>/quote/:symbol</code>, <code>/earnings/:symbol</code>. Health: <code>/health</code>.
-    </footer>
+    <div class="footer">UI runs from /web. Data served by /test/:symbol, /quote/:symbol, /earnings/:symbol, /history/:symbol. Health: /health.</div>
   </div>
 
-  <script>
-    const $ = (id) => document.getElementById(id);
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => (n==null ? "—" : Number(n).toLocaleString(undefined, {maximumFractionDigits:2}));
 
-    // --- API status poll ---
-    async function pollHealth() {
-      try {
-        const r = await fetch('/health');
-        const ok = r.ok && (await r.json()).ok === true;
-        $('apiDot').classList.toggle('ok', ok);
-        $('apiText').textContent = ok ? 'API is live' : 'API unreachable';
-      } catch {
-        $('apiDot').classList.remove('ok');
-        $('apiText').textContent = 'API unreachable';
-      }
+const input = $("symbolInput");
+const fetchBtn = $("fetchBtn");
+const err = $("err");
+
+let chart;
+function drawChart(candles) {
+  const ctx = $("priceChart").getContext("2d");
+  const labels = candles.map(d => new Date(d.t*1000).toLocaleDateString());
+  const data = candles.map(d => d.c);
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{ label: "Close", data, tension:.25, pointRadius:0 }]
+    },
+    options: {
+      responsive:true,
+      maintainAspectRatio:false,
+      scales:{ x:{display:false}, y:{display:true} },
+      plugins:{ legend:{display:false} }
     }
-    pollHealth();
-    setInterval(pollHealth, 15000);
+  });
+}
 
-    // --- Format helpers ---
-    const nf2 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
-    const nfi = new Intl.NumberFormat();
+async function load(symbol) {
+  err.textContent = "";
+  fetchBtn.disabled = true;
+  try {
+    const r = await fetch(`/test/${encodeURIComponent(symbol)}?pretty=1`);
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
 
-    function setQuote(q) {
-      $('currentPrice').textContent  = q?.current != null ? nf2.format(q.current) : '—';
-      $('change').textContent        = q?.change  != null ? nf2.format(q.change) : '—';
-      $('percentChange').textContent = q?.percent_change != null ? nf2.format(q.percent_change) + '%' : '—';
-      $('open').textContent          = q?.open    != null ? nf2.format(q.open) : '—';
-      $('high').textContent          = q?.high    != null ? nf2.format(q.high) : '—';
-      $('low').textContent           = q?.low     != null ? nf2.format(q.low) : '—';
-      $('prevClose').textContent     = q?.prev_close != null ? nf2.format(q.prev_close) : '—';
-      $('volume').textContent        = q?.volume  != null ? nfi.format(q.volume) : '—';
+    const q = data.quote || {};
+    $("currentPrice").textContent = fmt(q.current);
+    $("percentChange").textContent = q.percent_change==null ? "—" : `${fmt(q.percent_change)}%`;
+    $("open").textContent = fmt(q.open);
+    $("high").textContent = fmt(q.high);
+    $("low").textContent = fmt(q.low);
+    $("prevClose").textContent = fmt(q.prev_close);
+    $("changePct").textContent = q.percent_change==null || q.prev_close==null ? "—"
+      : fmt(((q.current||0) - (q.prev_close||0)));
+
+    // history chart
+    const hist = data.history?.candles || [];
+    if (hist.length) drawChart(hist);
+
+    // earnings list
+    const e = data.earnings?.items || [];
+    const el = $("earningsList");
+    el.innerHTML = "";
+    for (const row of e) {
+      const div = document.createElement("div");
+      div.innerHTML = `<b>${row.period}</b> — EPS Actual: <b>${fmt(row.epsActual)}</b>, Estimate: <b>${fmt(row.epsEstimate)}</b> , Surprise: ${fmt(row.surprise)}`;
+      el.appendChild(div);
     }
+  } catch (e) {
+    console.error(e);
+    err.textContent = "Failed to load data. " + (""+e).slice(0,160);
+  } finally {
+    fetchBtn.disabled = false;
+  }
+}
 
-    function setEarnings(earn) {
-      const box = $('earnings');
-      if (!earn?.items?.length) {
-        box.textContent = 'No recent earnings in feed.';
-        return;
-      }
-      box.innerHTML = earn.items.map(it => `
-        <div class="earn-item">
-          <strong>${it.period}</strong> — EPS Actual: <strong>${nf2.format(it.epsActual ?? it.actual ?? 0)}</strong>,
-          Estimate: ${nf2.format(it.epsEstimate ?? it.estimate ?? 0)}
-          ${it.surprise != null ? `, Surprise: ${nf2.format(it.surprise)}` : ''}
-        </div>
-      `).join('');
-    }
+fetchBtn.addEventListener("click", () => {
+  const s = input.value.trim().toUpperCase();
+  if (!s) { err.textContent = "Enter a ticker"; return; }
+  load(s);
+});
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") fetchBtn.click();
+});
 
-    // --- Fetch flow ---
-    async function fetchStock() {
-      $('err').textContent = '';
-      const symbol = $('tickerInput').value.trim().toUpperCase();
-      if (!symbol) { $('err').textContent = 'Enter a ticker (e.g., AAPL).'; return; }
-
-      $('fetchBtn').disabled = true;
-      try {
-        const r = await fetch(`/test/${encodeURIComponent(symbol)}`);
-        const data = await r.json();
-
-        if (!r.ok) {
-          $('err').textContent = (data && data.detail) ? data.detail : 'Fetch failed.';
-          setQuote(null); setEarnings(null);
-          return;
-        }
-
-        setQuote(data.quote);
-        setEarnings(data.earnings);
-        lastQuote = data.quote || null; // keep for recommendation
-      } catch (e) {
-        console.error(e);
-        $('err').textContent = 'Network error.';
-      } finally {
-        $('fetchBtn').disabled = false;
-      }
-    }
-
-    // --- Simple recommendation using quote + user inputs ---
-    let lastQuote = null;
-    function makeRecommendation() {
-      const risk = $('risk').value.toLowerCase();
-      const horizon = $('horizon').value.toLowerCase();
-      const conv = Math.max(0, Math.min(10, parseInt($('conviction').value || '5', 10)));
-      const pct = Number(lastQuote?.percent_change ?? 0);
-
-      let rec = 'HOLD';
-      if (pct > 0.75 && conv >= 6) rec = 'BUY';
-      if (pct < -0.75 && risk === 'low') rec = 'HOLD';
-      if (pct < -1.2 || (pct < -0.8 && conv <= 3)) rec = 'AVOID';
-
-      // small horizon nudge
-      if (horizon === 'long' && pct > 0 && conv >= 7) rec = 'BUY';
-      if (horizon === 'short' && Math.abs(pct) < 0.3) rec = 'HOLD';
-
-      $('rec').textContent = `Recommendation: ${rec}`;
-    }
-
-    // --- Wire up ---
-    $('fetchBtn').addEventListener('click', fetchStock);
-    $('recBtn').addEventListener('click', makeRecommendation);
-    $('tickerInput').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') fetchStock();
-    });
-  </script>
+// quick demo default
+input.value = "AAPL";
+</script>
 </body>
 </html>
 
