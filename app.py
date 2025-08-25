@@ -1,119 +1,78 @@
-# app.py
 import os
-import sys
-import json
-from typing import Any, Dict
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
+import data_fetcher as df
 
-import data_fetcher as df  # uses FINNHUB_API_KEY from env
+app = FastAPI(title="StackIQ", version="1.0.0")
 
-APP_NAME = "stackiq-web"
-APP_VERSION = "1.0.0"
+# CORS (optional, but harmless)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-app = FastAPI(title=APP_NAME, version=APP_VERSION)
-
-# Serve your frontend from /web (index.html lives in ./web)
-if os.path.isdir("web"):
-    app.mount("/web", StaticFiles(directory="web", html=True), name="web")
-
-
-def _pretty_or_json(content: Dict[str, Any], pretty: bool) -> Response:
-    if pretty:
-        return Response(
-            content=json.dumps(content, indent=2, ensure_ascii=False),
-            media_type="application/json",
-        )
-    return JSONResponse(content=content)
-
-
-# ---------- Health & version ----------
+# ---- Health & version ----
 @app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
-
+def health():
+    return {"ok": True}
 
 @app.get("/version")
-def version(pretty: bool = Query(False)) -> Response:
-    payload = {
-        "app": APP_NAME,
-        "version": APP_VERSION,
-        "python": sys.version.split()[0],
-        "finnhub_key_set": bool(os.getenv("FINNHUB_API_KEY")),
-    }
-    return _pretty_or_json(payload, pretty)
+def version():
+    return {"version": app.version}
 
-
-# ---------- Data endpoints ----------
+# ---- API endpoints used by web/index.html ----
 @app.get("/quote/{symbol}")
-def quote(symbol: str, pretty: bool = Query(False)) -> Response:
+def quote(symbol: str):
     try:
-        payload = df.fetch_quote(symbol)
-        return _pretty_or_json(payload, pretty)
+        return df.fetch_quote(symbol)
     except df.FinnhubError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"quote error: {e}")
-
 
 @app.get("/earnings/{symbol}")
-def earnings(symbol: str, limit: int = 4, pretty: bool = Query(False)) -> Response:
+def earnings(symbol: str, limit: int = 4):
     try:
-        payload = df.fetch_earnings(symbol, limit=limit)
-        return _pretty_or_json(payload, pretty)
+        return df.fetch_earnings(symbol, limit=limit)
     except df.FinnhubError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"earnings error: {e}")
-
 
 @app.get("/history/{symbol}")
-def history(symbol: str, range_days: int = 30, pretty: bool = Query(False)) -> Response:
+def history(symbol: str, range_days: int = 30):
     try:
-        payload = df.fetch_history(symbol, range_days=range_days)
-        return _pretty_or_json(payload, pretty)
+        return df.fetch_history(symbol, range_days=range_days)
     except df.FinnhubError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"history error: {e}")
 
-
+# Combined test endpoint used by your page’s JS: /test/{symbol}
 @app.get("/test/{symbol}")
-def test(symbol: str, pretty: bool = Query(False)) -> Response:
-    """
-    Combined payload the UI expects: { symbol, quote, earnings, history }
-    """
+def test(symbol: str):
     try:
-        sym = symbol.strip()
-        payload = {
-            "symbol": sym.upper(),
-            "quote": df.fetch_quote(sym),
-            "earnings": df.fetch_earnings(sym, limit=4),
-            "history": df.fetch_history(sym, range_days=30),
-        }
-        return _pretty_or_json(payload, pretty)
+        return df.get_quote_and_earnings(symbol)
     except df.FinnhubError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"test error: {e}")
 
+# ---- Static site (your /web/index.html) ----
+WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
+if os.path.isdir(WEB_DIR):
+    app.mount("/web", StaticFiles(directory=WEB_DIR, html=True), name="web")
 
-# Optional: run locally with `python app.py`
-if __name__ == "__main__":
-    import uvicorn
+# Root can show a tiny hint (optional)
+@app.get("/", response_class=HTMLResponse)
+def root():
+    if os.path.isdir(WEB_DIR):
+        return '<p>OK. UI is at <a href="/web/">/web/</a></p>'
+    return "<p>OK</p>"
 
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-        reload=True,
-    )
+# ---- Error handler (nicer JSON) ----
+@app.exception_handler(Exception)
+async def unhandled(request, exc):
+    # Don’t leak internals; log would go to stdout for Kudu
+    return JSONResponse(status_code=500, content={"error": "internal_error"})
 
-
-
-        )
 
 
 
