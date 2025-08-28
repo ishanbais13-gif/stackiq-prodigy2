@@ -1,86 +1,204 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>StackIQ — Live Quote</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StackIQ — Live Quote</title>
   <style>
-    body { font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
-    h1 { font-size: 20px; margin: 0 0 16px; }
-    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0 16px; }
-    input { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; min-width: 160px; }
-    button { padding: 8px 12px; border: 0; border-radius: 6px; background: #1e90ff; color: #fff; cursor: pointer; }
-    button:disabled { opacity: .6; cursor: default; }
-    .card { border: 1px solid #eee; border-radius: 10px; padding: 16px; }
-    .muted { color: #666; font-size: 14px; }
-    .error { color: #b00020; }
-    table { width: 100%; border-collapse: collapse; margin: 8px 0 12px; }
-    th, td { text-align: left; padding: 6px 8px; }
+    :root{
+      --bg:#f7f7fb;
+      --card:#ffffff;
+      --text:#0f172a;         /* slate-900 */
+      --muted:#475569;        /* slate-600 */
+      --border:#e5e7eb;       /* gray-200 */
+      --accent:#2563eb;       /* blue-600 */
+      --green:#059669;        /* emerald-600 */
+      --red:#dc2626;          /* red-600 */
+      --shadow:0 10px 20px rgba(2,6,23,.06), 0 2px 6px rgba(2,6,23,.04);
+      --radius:16px;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0; background:var(--bg); color:var(--text);
+      font:16px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji","Segoe UI Emoji";
+    }
+    .wrap{max-width:1100px; margin:48px auto; padding:0 20px}
+    header{display:flex; align-items:center; justify-content:space-between; margin-bottom:18px}
+    .brand{font-weight:800; letter-spacing:.2px}
+    .brand span{color:var(--accent)}
+    .search{
+      display:flex; gap:10px; align-items:center; width:100%; max-width:520px;
+      background:var(--card); padding:10px; border-radius:999px; border:1px solid var(--border);
+      box-shadow:var(--shadow);
+    }
+    input{
+      flex:1; border:0; outline:none; background:transparent; font-size:16px; padding:8px 10px;
+    }
+    button{
+      border:0; cursor:pointer; font-weight:700; padding:10px 16px; border-radius:999px;
+      color:#fff; background:var(--accent); transition:transform .05s ease;
+    }
+    button:active{transform:translateY(1px)}
+    .grid{display:grid; grid-template-columns:1.15fr .85fr; gap:18px; margin-top:18px}
+    @media (max-width:900px){ .grid{grid-template-columns:1fr} }
+    .card{
+      background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+      box-shadow:var(--shadow); padding:22px;
+    }
+    .ticker-row{display:flex; align-items:baseline; gap:12px; margin-bottom:6px}
+    .ticker{font-size:38px; font-weight:800; letter-spacing:.5px}
+    .chip{
+      font-weight:700; padding:4px 10px; border-radius:999px; font-size:14px; border:1px solid var(--border);
+    }
+    .chip.up{color:#fff; background:var(--green); border-color:transparent}
+    .chip.down{color:#fff; background:var(--red); border-color:transparent}
+    .price{font-size:42px; font-weight:900; margin:6px 0 14px}
+    .muted{color:var(--muted)}
+    .stats{display:grid; grid-template-columns:repeat(2,1fr); gap:12px}
+    .stat{
+      border:1px solid var(--border); border-radius:12px; padding:12px 14px; background:#fff;
+    }
+    .stat .k{font-size:12px; color:var(--muted); margin-bottom:6px}
+    .stat .v{font-size:18px; font-weight:800}
+    .summary{margin-top:14px; border-top:1px dashed var(--border); padding-top:14px; color:var(--muted)}
+    .api-hint{font-size:12px; color:var(--muted); margin-top:14px}
+    .error{color:var(--red); font-weight:700}
+    .loading{opacity:.6}
+    footer{margin-top:22px; text-align:center; color:var(--muted); font-size:12px}
+    a{color:var(--accent); text-decoration:none}
   </style>
 </head>
 <body>
-  <h1>StackIQ — Live Quote</h1>
-  <div class="row">
-    <input id="sym" value="AAPL" />
-    <button id="go">Get Quote</button>
-    <span id="err" class="error"></span>
-  </div>
+  <div class="wrap">
+    <header>
+      <div class="brand">Stack<span>IQ</span></div>
+      <form class="search" id="form">
+        <input id="symbolInput" placeholder="Search symbol (AAPL, MSFT, TSLA…)" value="AAPL" spellcheck="false" />
+        <button id="goBtn" type="submit">Get Quote</button>
+      </form>
+    </header>
 
-  <div id="out" class="card" hidden>
-    <table>
-      <tbody>
-        <tr><th>Symbol</th><td id="s"></td></tr>
-        <tr><th>Price</th><td id="c"></td></tr>
-        <tr><th>Change</th><td id="p"></td></tr>
-        <tr><th>Session High</th><td id="h"></td></tr>
-        <tr><th>Session Low</th><td id="l"></td></tr>
-        <tr><th>Open</th><td id="o"></td></tr>
-        <tr><th>Prev Close</th><td id="pc"></td></tr>
-      </tbody>
-    </table>
-    <div id="sum" class="muted"></div>
-  </div>
+    <div class="grid">
+      <!-- Left: Quote card -->
+      <section class="card" id="quoteCard">
+        <div class="ticker-row">
+          <div class="ticker" id="sym">—</div>
+          <div class="chip" id="chip">—</div>
+        </div>
+        <div class="price" id="price">—</div>
 
-  <div class="muted">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code></div>
+        <div class="stats">
+          <div class="stat"><div class="k">Session High</div><div class="v" id="high">—</div></div>
+          <div class="stat"><div class="k">Session Low</div> <div class="v" id="low">—</div></div>
+          <div class="stat"><div class="k">Open</div>        <div class="v" id="open">—</div></div>
+          <div class="stat"><div class="k">Prev Close</div>  <div class="v" id="prev">—</div></div>
+        </div>
+
+        <div class="summary" id="summaryText">Type a symbol and press “Get Quote”.</div>
+        <div class="api-hint">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code></div>
+      </section>
+
+      <!-- Right: Status / meta -->
+      <aside class="card">
+        <div style="font-weight:800; margin-bottom:10px">Status</div>
+        <div class="muted" id="statusLine">Ready.</div>
+        <div style="margin-top:12px" class="muted">
+          <div>Health: <code id="healthCode">—</code></div>
+          <div>Version: <code id="versionText">—</code></div>
+        </div>
+      </aside>
+    </div>
+
+    <footer>
+      © <span id="yr"></span> StackIQ • minimal market data UI
+    </footer>
+  </div>
 
   <script>
-    const $ = id => document.getElementById(id);
-    const go = $('go'), sym = $('sym'), out = $('out'), err = $('err');
+    const $ = (id) => document.getElementById(id);
+    const symEl   = $("sym");
+    const chipEl  = $("chip");
+    const priceEl = $("price");
+    const highEl  = $("high");
+    const lowEl   = $("low");
+    const openEl  = $("open");
+    const prevEl  = $("prev");
+    const summaryEl = $("summaryText");
+    const statusEl  = $("statusLine");
+    const healthCode = $("healthCode");
+    const versionText = $("versionText");
+    $("yr").textContent = new Date().getFullYear();
 
-    async function load() {
-      err.textContent = ''; out.hidden = true; go.disabled = true;
-      const symbol = sym.value.trim().toUpperCase();
-      try {
-        const [qRes, sRes] = await Promise.all([
-          fetch(`/quote/${encodeURIComponent(symbol)}?pretty=1`),
-          fetch(`/summary/${encodeURIComponent(symbol)}?pretty=1`)
+    async function getJSON(url){
+      const res = await fetch(url, { headers: { "accept":"application/json" } });
+      if(!res.ok) throw new Error(`${res.status}`);
+      return res.json();
+    }
+    function fmt(n){ return Number(n).toLocaleString(undefined, { maximumFractionDigits: 4 }); }
+    function setChip(dp){
+      const up = Number(dp) >= 0;
+      chipEl.className = "chip " + (up ? "up" : "down");
+      chipEl.textContent = (up ? "▲ " : "▼ ") + (Number(dp).toFixed(2)) + "%";
+    }
+    function setLoading(on){
+      const card = $("quoteCard");
+      card.classList.toggle("loading", !!on);
+    }
+
+    async function pingStatus(){
+      try{
+        const [health, version] = await Promise.all([
+          getJSON("/health"),
+          getJSON("/version")
         ]);
-        if (!qRes.ok) throw new Error(`Quote error ${qRes.status}`);
-        if (!sRes.ok) throw new Error(`Summary error ${sRes.status}`);
-        const quote = await qRes.json();
-        const summary = await sRes.json();
-
-        $('s').textContent = quote.symbol;
-        $('c').textContent = quote.current;
-        $('p').textContent = (quote.percent_change ?? 0).toFixed(2) + '%';
-        $('h').textContent = quote.high;
-        $('l').textContent = quote.low;
-        $('o').textContent = quote.open;
-        $('pc').textContent = quote.prev_close;
-        $('sum').textContent = summary.summary;
-        out.hidden = false;
-      } catch (e) {
-        err.textContent = 'Failed to load: ' + e.message;
-      } finally {
-        go.disabled = false;
+        healthCode.textContent = "200 OK";
+        versionText.textContent = `${version.app} v${version.version}`;
+      }catch(e){
+        healthCode.textContent = "unavailable";
+        versionText.textContent = "—";
       }
     }
 
-    go.addEventListener('click', load);
-    sym.addEventListener('keydown', e => e.key === 'Enter' && load());
+    async function load(symbol){
+      const sym = symbol.trim().toUpperCase();
+      if(!sym) return;
+      setLoading(true);
+      statusEl.textContent = "Fetching…";
+      summaryEl.textContent = "—";
+      try{
+        // Quote
+        const q = await getJSON(`/quote/${encodeURIComponent(sym)}`);
+        symEl.textContent   = q.symbol || sym;
+        priceEl.textContent = fmt(q.current ?? q.raw?.c ?? "—");
+        highEl.textContent  = fmt(q.high   ?? q.raw?.h ?? "—");
+        lowEl.textContent   = fmt(q.low    ?? q.raw?.l ?? "—");
+        openEl.textContent  = fmt(q.open   ?? q.raw?.o ?? "—");
+        prevEl.textContent  = fmt(q.prev_close ?? q.raw?.pc ?? "—");
+        setChip(q.percent_change ?? q.raw?.dp ?? 0);
 
-    // load once by default
-    load();
+        // Summary
+        const s = await getJSON(`/summary/${encodeURIComponent(sym)}`);
+        summaryEl.textContent = s.summary || "—";
+
+        statusEl.textContent = "Loaded.";
+      }catch(err){
+        statusEl.innerHTML = `<span class="error">Failed: ${err.message}</span>`;
+        summaryEl.textContent = "Could not load data. Try another symbol.";
+      }finally{
+        setLoading(false);
+      }
+    }
+
+    // Initial
+    pingStatus();
+    load(($("symbolInput").value || "AAPL"));
+
+    // Events
+    $("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      load($("symbolInput").value || "");
+    });
   </script>
 </body>
 </html>
