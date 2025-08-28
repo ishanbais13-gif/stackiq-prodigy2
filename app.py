@@ -3,61 +3,72 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 import os, requests
 
-app = FastAPI(title="StackIQ", version="1.0")
+app = FastAPI(title="stackiq-web", version="1.0.0")
 
-# --- Serve your frontend ---
-# /web/* will serve files from the web/ folder
-app.mount("/web", StaticFiles(directory="web", html=True), name="web")
+# --- static site ---
+BASE_DIR = os.path.dirname(__file__)
+WEB_DIR = os.path.join(BASE_DIR, "web")
+app.mount("/web", StaticFiles(directory=WEB_DIR, html=True), name="web")
 
-# Make the root URL load the UI
-@app.get("/", include_in_schema=False)
+@app.get("/")
 def root():
+    # send root to the UI
     return RedirectResponse(url="/web/")
 
-# --- Health ---
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# --- Simple quote & summary API (what you already have working) ---
-_API = "https://finnhub.io/api/v1"
-_KEY = os.getenv("FINNHUB_API_KEY")
+@app.get("/version")
+def version():
+    # simple version endpoint (you can wire this to git SHA later)
+    return {"app": "stackiq-web", "version": app.version}
 
-def _need_key():
-    if not _KEY:
-        raise HTTPException(status_code=500, detail="FINNHUB_API_KEY not set")
+# --- Finnhub quote helpers ---
+FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "")
 
-@app.get("/quote/{symbol}")
-def quote(symbol: str):
-    _need_key()
-    r = requests.get(f"{_API}/quote", params={"symbol": symbol, "token": _KEY})
-    if r.status_code != 200:
-        raise HTTPException(status_code=r.status_code, detail=f"Quote error {r.status_code}")
-    q = r.json()
+def _fetch_quote(symbol: str) -> dict:
+    if not FINNHUB_KEY:
+        raise HTTPException(status_code=500, detail="Missing FINNHUB_API_KEY")
+    url = "https://finnhub.io/api/v1/quote"
+    try:
+        r = requests.get(url, params={"symbol": symbol, "token": FINNHUB_KEY}, timeout=10)
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Upstream error: {e}")
+
+    j = r.json()
+    c, pc = j.get("c"), j.get("pc")
+    pct = round(((c - pc) / pc) * 100, 4) if (c is not None and pc) else None
     return {
         "symbol": symbol.upper(),
-        "current": q.get("c"),
-        "prev_close": q.get("pc"),
-        "high": q.get("h"),
-        "low": q.get("l"),
-        "open": q.get("o"),
-        "percent_change": q.get("dp"),
-        "volume": q.get("v"),
-        "raw": q,
+        "current": c,
+        "prev_close": pc,
+        "high": j.get("h"),
+        "low": j.get("l"),
+        "open": j.get("o"),
+        "percent_change": pct,
+        "volume": None,  # Finnhub 'quote' endpoint doesn’t return volume reliably here
+        "raw": j,
     }
 
+@app.get("/quote/{symbol}")
+def quote(symbol: str, pretty: int | None = None):
+    return _fetch_quote(symbol)
+
 @app.get("/summary/{symbol}")
-def summary(symbol: str):
-    data = quote(symbol)  # reuse the same call/format
-    c, pc, h, l = data["current"], data["prev_close"], data["high"], data["low"]
-    pct = data["percent_change"]
-    updown = "up" if (pct or 0) >= 0 else "down"
-    return {
-        "symbol": data["symbol"],
-        "summary": f"{data['symbol']}: {c} ({updown} {abs(pct or 0):.2f}% on the day). "
-                   f"Session range: {l}–{h}. Prev close: {pc}.",
-        "quote": data,
-    }
+def summary(symbol: str, pretty: int | None = None):
+    q = _fetch_quote(symbol)
+    pct = q["percent_change"]
+    updown = "up" if (pct is not None and pct >= 0) else "down"
+    text = (
+        f"{q['symbol']}: {q['current']} ({updown} {abs(pct):.2f}% on the day). "
+        f"Session range: {q['low']}–{q['high']}. Prev close: {q['prev_close']}."
+    )
+    return {"symbol": q["symbol"], "summary": text, "quote": q}
+
 
 
 
