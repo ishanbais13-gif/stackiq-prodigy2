@@ -1,95 +1,90 @@
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>StackIQ — Quote</title>
-    <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
-      .row { display:flex; gap:8px; align-items:center; }
-      input { padding:8px 10px; border:1px solid #bbb; border-radius:8px; min-width:220px; }
-      button { padding:8px 14px; border-radius:8px; border:1px solid #2a63e0; background:#2a63e0; color:#fff; font-weight:600; }
-      .card { margin-top:16px; padding:16px; border:1px solid #e5e5e5; border-radius:12px; }
-      .grid { display:grid; grid-template-columns: 160px 1fr; gap:6px 12px; }
-      .muted { color:#666; }
-      #err { color:#b00020; margin-top:10px; }
-      code { background:#f6f8fa; padding:2px 6px; border-radius:6px; }
-    </style>
-  </head>
-  <body>
-    <h2>StackIQ — Live Quote</h2>
+<head>
+  <meta charset="utf-8" />
+  <title>StackIQ — Live Quote</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font: 16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; }
+    h1 { font-size: 20px; margin: 0 0 16px; }
+    .row { display: flex; gap: 8px; align-items: center; margin: 8px 0 16px; }
+    input { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; min-width: 160px; }
+    button { padding: 8px 12px; border: 0; border-radius: 6px; background: #1e90ff; color: #fff; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: default; }
+    .card { border: 1px solid #eee; border-radius: 10px; padding: 16px; }
+    .muted { color: #666; font-size: 14px; }
+    .error { color: #b00020; }
+    table { width: 100%; border-collapse: collapse; margin: 8px 0 12px; }
+    th, td { text-align: left; padding: 6px 8px; }
+  </style>
+</head>
+<body>
+  <h1>StackIQ — Live Quote</h1>
+  <div class="row">
+    <input id="sym" value="AAPL" />
+    <button id="go">Get Quote</button>
+    <span id="err" class="error"></span>
+  </div>
 
-    <div class="row">
-      <input id="sym" placeholder="AAPL, MSFT, NVDA..." />
-      <button id="go">Get Quote</button>
-      <div id="err"></div>
-    </div>
+  <div id="out" class="card" hidden>
+    <table>
+      <tbody>
+        <tr><th>Symbol</th><td id="s"></td></tr>
+        <tr><th>Price</th><td id="c"></td></tr>
+        <tr><th>Change</th><td id="p"></td></tr>
+        <tr><th>Session High</th><td id="h"></td></tr>
+        <tr><th>Session Low</th><td id="l"></td></tr>
+        <tr><th>Open</th><td id="o"></td></tr>
+        <tr><th>Prev Close</th><td id="pc"></td></tr>
+      </tbody>
+    </table>
+    <div id="sum" class="muted"></div>
+  </div>
 
-    <div id="quote" class="card" style="display:none">
-      <div class="grid">
-        <div class="muted">Symbol</div><div id="qSymbol"></div>
-        <div class="muted">Price</div><div id="qPrice"></div>
-        <div class="muted">Change</div><div id="qChange"></div>
-        <div class="muted">Session High</div><div id="qHigh"></div>
-        <div class="muted">Session Low</div><div id="qLow"></div>
-        <div class="muted">Open</div><div id="qOpen"></div>
-        <div class="muted">Prev Close</div><div id="qPrev"></div>
-      </div>
-    </div>
+  <div class="muted">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code></div>
 
-    <div id="summary" class="card" style="display:none"></div>
+  <script>
+    const $ = id => document.getElementById(id);
+    const go = $('go'), sym = $('sym'), out = $('out'), err = $('err');
 
-    <p class="muted">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code></p>
+    async function load() {
+      err.textContent = ''; out.hidden = true; go.disabled = true;
+      const symbol = sym.value.trim().toUpperCase();
+      try {
+        const [qRes, sRes] = await Promise.all([
+          fetch(`/quote/${encodeURIComponent(symbol)}?pretty=1`),
+          fetch(`/summary/${encodeURIComponent(symbol)}?pretty=1`)
+        ]);
+        if (!qRes.ok) throw new Error(`Quote error ${qRes.status}`);
+        if (!sRes.ok) throw new Error(`Summary error ${sRes.status}`);
+        const quote = await qRes.json();
+        const summary = await sRes.json();
 
-    <script>
-      const $ = id => document.getElementById(id);
-      const fmt = x => (x == null ? "—" : Number(x).toLocaleString(undefined, {maximumFractionDigits: 2}));
-
-      async function run() {
-        const s = $("sym").value.trim().toUpperCase();
-        $("err").textContent = "";
-        $("quote").style.display = "none";
-        $("summary").style.display = "none";
-        if (!s) { $("err").textContent = "Enter a ticker"; return; }
-
-        try {
-          const [qRes, sRes] = await Promise.all([
-            fetch(`/quote/${encodeURIComponent(s)}`),
-            fetch(`/summary/${encodeURIComponent(s)}`)
-          ]);
-
-          if (!qRes.ok) throw new Error(`Quote error ${qRes.status}`);
-          if (!sRes.ok) throw new Error(`Summary error ${sRes.status}`);
-
-          const q = await qRes.json();
-          const summ = await sRes.json();
-
-          $("qSymbol").textContent = q.symbol || s;
-          $("qPrice").textContent = "$" + fmt(q.current);
-          const pct = q.percent_change;
-          $("qChange").textContent = (pct == null) ? "—" : (pct >= 0 ? "+" : "") + fmt(pct) + "%";
-          $("qHigh").textContent = "$" + fmt(q.high);
-          $("qLow").textContent = "$" + fmt(q.low);
-          $("qOpen").textContent = "$" + fmt(q.open);
-          $("qPrev").textContent = "$" + fmt(q.prev_close);
-
-          $("quote").style.display = "block";
-          $("summary").textContent = summ.summary || "";
-          $("summary").style.display = "block";
-        } catch (e) {
-          console.error(e);
-          $("err").textContent = "Failed to load: " + (e.message || e);
-        }
+        $('s').textContent = quote.symbol;
+        $('c').textContent = quote.current;
+        $('p').textContent = (quote.percent_change ?? 0).toFixed(2) + '%';
+        $('h').textContent = quote.high;
+        $('l').textContent = quote.low;
+        $('o').textContent = quote.open;
+        $('pc').textContent = quote.prev_close;
+        $('sum').textContent = summary.summary;
+        out.hidden = false;
+      } catch (e) {
+        err.textContent = 'Failed to load: ' + e.message;
+      } finally {
+        go.disabled = false;
       }
+    }
 
-      $("go").addEventListener("click", run);
-      $("sym").addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+    go.addEventListener('click', load);
+    sym.addEventListener('keydown', e => e.key === 'Enter' && load());
 
-      // nice default
-      $("sym").value = "AAPL";
-    </script>
-  </body>
+    // load once by default
+    load();
+  </script>
+</body>
 </html>
+
 
 
 
