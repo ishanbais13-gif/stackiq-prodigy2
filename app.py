@@ -1,79 +1,78 @@
-# app.py
-import os
-import os.path as op
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+import requests
+import os
 
-# uses your existing fetcher (requests + Stooq)
-from data_fetcher import fetch_quote
+app = FastAPI()
 
-APP_NAME = "stackiq-web"
-APP_VERSION = "1.0.0"
-
-app = FastAPI(title=APP_NAME, version=APP_VERSION)
-
-# ---- CORS (open/lenient) ----------------------------------------------------
+# Allow frontend to call backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ---- Serve the static UI at /web -------------------------------------------
-if op.isdir("web"):
-    app.mount("/web", StaticFiles(directory="web", html=True), name="web")
+# Mock / simple external API
+MOCK_API = "https://api.polygon.io/v2/aggs/ticker/{symbol}/prev?apiKey={api_key}"
 
-# Root -> redirect to the UI
-@app.get("/", include_in_schema=False)
-def root():
-    return RedirectResponse(url="/web/")
+API_KEY = os.getenv("POLYGON_API_KEY", "demo")  # Replace with real key in Azure env
 
-# ---- Health/version ---------------------------------------------------------
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-@app.get("/version")
-def version():
-    return {"app": APP_NAME, "version": APP_VERSION}
-
-# ---- API: /quote/{symbol} ---------------------------------------------------
 @app.get("/quote/{symbol}")
-def quote(symbol: str):
-    data = fetch_quote(symbol)
-    if not data:
-        raise HTTPException(status_code=404, detail="Symbol not found")
-    return [data, None]   # IMPORTANT: UI expects a list [data, null]
+def get_quote(symbol: str):
+    try:
+        url = MOCK_API.format(symbol=symbol.upper(), api_key=API_KEY)
+        r = requests.get(url)
+        if r.status_code != 200:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+        data = r.json()
 
-# ---- API: /summary/{symbol} -------------------------------------------------
+        # Handle Polygon format
+        if "results" not in data or not data["results"]:
+            raise HTTPException(status_code=404, detail="Symbol not found")
+
+        result = data["results"][0]
+        return {
+            "symbol": symbol.upper(),
+            "current": result.get("c"),
+            "prev_close": result.get("o"),
+            "high": result.get("h"),
+            "low": result.get("l"),
+            "open": result.get("o"),
+            "percent_change": (
+                ((result.get("c") - result.get("o")) / result.get("o")) * 100
+                if result.get("c") and result.get("o") else None
+            ),
+            "volume": result.get("v"),
+            "raw": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/summary/{symbol}")
-def summary(symbol: str):
-    data = fetch_quote(symbol)
-    if not data:
-        raise HTTPException(status_code=404, detail="Symbol not found")
+def get_summary(symbol: str):
+    try:
+        quote = get_quote(symbol)
 
-    pct = data.get("percent_change") or 0.0
-    updown = "up" if pct >= 0 else "down"
-    msg = (
-        f"{data['symbol']}: {data['current']} ({updown} {abs(pct):.2f}% on the day). "
-        f"Session range: {data['low']}–{data['high']}. Prev close: {data['prev_close']}."
-    )
+        # Defensive checks
+        if not quote or not quote.get("current"):
+            raise HTTPException(status_code=404, detail="Symbol not found")
 
-    return {
-        "symbol": data["symbol"],
-        "summary": msg,
-        "quote": data,
-    }
+        summary = {
+            "symbol": symbol.upper(),
+            "trend": "bullish" if quote["current"] > quote["prev_close"] else "bearish",
+            "support": round((quote["low"] + quote["open"]) / 2, 2) if quote["low"] and quote["open"] else None,
+            "resistance": round((quote["high"] + quote["prev_close"]) / 2, 2) if quote["high"] and quote["prev_close"] else None,
+            "momentum": "positive" if quote["percent_change"] and quote["percent_change"] > 0 else "negative",
+        }
+        return summary
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# ---- Optional: local run ----------------------------------------------------
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.environ.get("PORT", os.environ.get("WEBSITES_PORT", 8000)))
-    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=True)
 
 
 
