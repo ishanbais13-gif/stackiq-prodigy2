@@ -1,17 +1,17 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 
-from data_fetcher import fetch_quote
+from data_fetcher import fetch_quote, fetch_candles
 
 APP_NAME = "stackiq-web"
 APP_VERSION = "1.0.0"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-# CORS
+# CORS (lenient)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,10 +20,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve /web if present
+# Serve /web if a web folder exists
 if os.path.isdir("web"):
     app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
+# Root -> redirect to /web (if present), else show basic message
 @app.get("/", include_in_schema=False)
 def root():
     if os.path.isdir("web"):
@@ -32,7 +33,6 @@ def root():
 
 @app.get("/health")
 def health():
-    # never talk to providers here; health should always be OK if the app is up
     return {"status": "ok"}
 
 @app.get("/version")
@@ -42,23 +42,30 @@ def version():
 @app.get("/quote/{symbol}")
 def quote(symbol: str):
     data = fetch_quote(symbol)
-    if data is None:
+    if not data:
         raise HTTPException(status_code=404, detail="Symbol not found")
     return data
 
 @app.get("/summary/{symbol}")
 def summary(symbol: str):
     data = fetch_quote(symbol)
-    if data is None:
+    if not data:
         raise HTTPException(status_code=404, detail="Symbol not found")
 
-    pct = float(data.get("percent_change") or 0.0)
+    pct = data.get("percent_change") or 0.0
     updown = "up" if pct >= 0 else "down"
     msg = (
         f"{data['symbol']}: {data['current']} ({updown} {abs(pct):.2f}% on the day). "
         f"Session range: {data['low']}–{data['high']}. Prev close {data['prev_close']}."
     )
     return {"symbol": data["symbol"], "summary": msg, "quote": data}
+
+@app.get("/history/{symbol}")
+def history(symbol: str, range: str = Query("1M", pattern="^(1M|3M|6M|1Y)$")):
+    candles = fetch_candles(symbol, range)
+    # Return empty list (200) if none (keeps UI happy even if rate-limited/no key)
+    return candles or []
+
 
 
 
