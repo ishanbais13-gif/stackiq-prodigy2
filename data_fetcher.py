@@ -1,53 +1,63 @@
 import requests
-import logging
 
-log = logging.getLogger("stackiq-web")
+# Stooq CSV endpoint. We'll try both TLDs just in case one is flaky.
+_STOOQ_URLS = [
+    "https://stooq.com/q/l/?s={symbol}&i=d",
+    "https://stooq.pl/q/l/?s={symbol}&i=d",
+]
 
-# CSV endpoint; one row of latest daily data
-# Example: https://stooq.com/q/l/?s=aapl.us&i=d
-STOOQ_URL = "https://stooq.com/q/l/?s={symbol}&i=d"
-
+# Normalize a user symbol into what Stooq expects (e.g., aapl.us)
 def _normalize(symbol: str) -> str:
-    """
-    Stooq expects US tickers like aapl.us (lowercase).
-    If the user types AAPL or aapl, convert to aapl.us.
-    If a suffix (e.g., .us, .gb) is already present, keep it.
-    """
     s = (symbol or "").strip().lower()
     if not s:
         return ""
-    if "." in s:
-        return s
-    return f"{s}.us"
+    # If user didn't include a suffix (like .us / .uk etc), assume US
+    if "." not in s:
+        s = f"{s}.us"
+    return s
 
-def _parse_stooq_csv(text: str):
-    """
-    Stooq CSV (i=d) returns two lines:
-      1) header: Symbol,Date,Time,Open,High,Low,Close,Volume
-      2) data  : aapl.us,YYYY-MM-DD,HH:MM:SS,open,high,low,close,volume
-    """
-    if not text:
+def _try_fetch_csv(symbol_norm: str) -> str | None:
+    headers = {
+        "User-Agent": "stackiq/1.0 (+https://example.com)"
+    }
+    for url_tpl in _STOOQ_URLS:
+        url = url_tpl.format(symbol=symbol_norm)
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200 and r.text:
+                return r.text
+        except Exception:
+            continue
+    return None
+
+def fetch_quote(symbol: str) -> dict | None:
+    sym_norm = _normalize(symbol)
+    if not sym_norm:
         return None
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    csv_text = _try_fetch_csv(sym_norm)
+    if not csv_text:
+        return None
+
+    # CSV format (header then one line):
+    # Symbol,Date,Time,Open,High,Low,Close,Volume
+    lines = [ln.strip() for ln in csv_text.splitlines() if ln.strip()]
     if len(lines) < 2:
         return None
+
     parts = lines[1].split(",")
     if len(parts) < 8:
         return None
 
-    raw_symbol = parts[0]
-    try:
-        open_p = float(parts[3])
-        high = float(parts[4])
-        low = float(parts[5])
-        close = float(parts[6])
-    except Exception:
-        return None
-
-    # Stooq “i=d” doesn’t include prev close; use open as an approximation
+    raw_symbol = parts[0]            # e.g., aapl.us
+    open_p = float(parts[3])
+    high = float(parts[4])
+    low = float(parts[5])
+    close = float(parts[6])
+    # Stooq daily row doesn't give "prev close" directly; use open as a proxy
     prev_close = open_p
 
-    symbol_out = raw_symbol.split(".")[0].upper()
+    symbol_out = raw_symbol.split(".")[0].upper()  # AAPL
     current = close
     pct_change = ((current - prev_close) / prev_close * 100) if prev_close else 0.0
 
@@ -69,30 +79,6 @@ def _parse_stooq_csv(text: str):
         },
     }
 
-def fetch_quote(symbol: str):
-    sym_norm = _normalize(symbol)
-    if not sym_norm:
-        return None
-
-    headers = {
-        # Some free endpoints require a UA to avoid being blocked
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    }
-
-    try:
-        url = STOOQ_URL.format(symbol=sym_norm)
-        r = requests.get(url, timeout=8, headers=headers)
-        if r.status_code != 200 or not r.text:
-            log.warning("stooq bad response: code=%s body_len=%s", r.status_code, len(r.text or ""))
-            return None
-        parsed = _parse_stooq_csv(r.text)
-        if not parsed:
-            log.warning("stooq parse failed for %s:\n%s", sym_norm, r.text[:200])
-        return parsed
-    except Exception as e:
-        log.exception("fetch_quote error for %s: %s", sym_norm, e)
-        return None
 
 
 
