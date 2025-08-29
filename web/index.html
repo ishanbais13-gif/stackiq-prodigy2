@@ -1,104 +1,101 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>StackIQ — Live Quote</title>
-  <!-- Inter (optional, looks nice) -->
-  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-
-  <!-- Chart.js (CDN) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-
   <style>
     :root{
-      --bg:#f6f7fb; --card:#ffffff; --ink:#0b1020; --muted:#6b7280; --accent:#1a56db; --ok:#16a34a;
-      --stroke:#e5e7eb; --chip:#e8eefc; --shadow:0 10px 30px rgba(2,6,23,.08);
-      --chart-grid:#e5e7eb; --chart-line:#1a56db; --chip-ink:#1b3a8a;
+      --bg:#0f172a; --panel:#111827; --card:#0b1220; --text:#e5e7eb; --muted:#9ca3af; --brand:#2563eb; --good:#16a34a; --bad:#ef4444; --ring:#1f2937; --line:#334155;
+      --shadow:0 10px 30px rgba(0,0,0,.35);
     }
-    [data-theme="dark"]{
-      --bg:#0b1220; --card:#111827; --ink:#ecf0f6; --muted:#9aa3b2; --accent:#3b82f6; --ok:#22c55e;
-      --stroke:#1f2937; --chip:#11203d; --shadow:0 10px 30px rgba(0,0,0,.35);
-      --chart-grid:#1f2937; --chart-line:#60a5fa; --chip-ink:#c7d2fe;
+    :root.light{
+      --bg:#f6f7fb; --panel:#ffffff; --card:#ffffff; --text:#0f172a; --muted:#6b7280; --brand:#2563eb; --good:#16a34a; --bad:#dc2626; --ring:#e5e7eb; --line:#d1d5db;
+      --shadow:0 10px 24px rgba(0,0,0,.08);
     }
-    *{box-sizing:border-box} body{margin:0;background:var(--bg);font:500 16px/1.45 Inter,system-ui,-apple-system,Segoe UI,Roboto}
-    .wrap{max-width:1100px;margin:54px auto;padding:0 28px}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial}
+    .wrap{max-width:1100px;margin:48px auto;padding:0 20px}
+    .brand{font-weight:800;letter-spacing:.3px;margin-bottom:18px}
     .row{display:grid;grid-template-columns:1fr 360px;gap:24px}
-    .brand{font-weight:800;font-size:18px;letter-spacing:.4px;color:var(--accent)}
-    .querybar{display:flex;gap:10px;margin:18px 0 22px}
-    .input{flex:1;border:1px solid var(--stroke);background:var(--card);color:var(--ink);height:44px;padding:0 14px;border-radius:24px;outline:none}
-    .btn{height:44px;padding:0 16px;border-radius:24px;border:0;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
-    .iconbtn{width:44px;height:44px;border-radius:50%;border:1px solid var(--stroke);background:var(--card);color:var(--ink);cursor:pointer}
-    .card{background:var(--card);border:1px solid var(--stroke);border-radius:16px;box-shadow:var(--shadow)}
-    .pad{padding:22px}
-    .h1{font-size:40px;letter-spacing:.5px;color:var(--ink);margin:10px 0 8px}
-    .muted{color:var(--muted);font-weight:500}
-    .chip{display:inline-flex;gap:6px;align-items:center;padding:4px 10px;border-radius:999px;background:var(--chip);color:var(--chip-ink);font-size:12px;font-weight:700}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}
-    .box{border:1px solid var(--stroke);border-radius:10px;padding:12px}
-    .label{font-size:12px;color:var(--muted);margin-bottom:6px}
-    .api{font-size:12px;color:var(--muted);margin-top:10px}
-    .footer{margin:28px 0 24px;text-align:center;color:var(--muted);font-size:12px}
-    .tabs{display:flex;gap:12px;margin:14px 0 6px}
-    .tab{flex:1;border:1px solid var(--stroke);height:36px;border-radius:10px;background:var(--card);color:var(--muted);font-weight:700;cursor:pointer}
-    .tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
-    canvas{width:100%!important;height:280px!important}
-    .status p{margin:0 0 8px}
+    .panel{background:var(--panel);border-radius:16px;box-shadow:var(--shadow);padding:20px;border:1px solid var(--ring)}
+    .inputbar{display:flex;gap:12px;align-items:center;margin-bottom:16px}
+    input[type=text]{flex:1;border:1px solid var(--ring);background:var(--card);color:var(--text);border-radius:999px;padding:12px 16px;outline:none}
+    button.primary{border:none;background:var(--brand);color:#fff;border-radius:999px;padding:12px 16px;cursor:pointer}
+    .toggle{width:32px;height:32px;border-radius:50%;border:1px solid var(--ring);background:var(--card);display:inline-grid;place-items:center;cursor:pointer}
+    .card{background:var(--card);border:1px solid var(--ring);border-radius:16px;padding:16px;box-shadow:var(--shadow)}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}
+    .stat{border:1px solid var(--ring);border-radius:10px;padding:12px}
+    .big{font-size:44px;font-weight:800;letter-spacing:.5px;margin:12px 0}
+    .chip{display:inline-flex;gap:6px;align-items:center;font-size:12px;padding:4px 8px;border-radius:999px;background:rgba(37,99,235,.12);border:1px solid var(--ring);color:var(--text)}
+    .muted{color:var(--muted)}
+    canvas{width:100%;height:280px}
+    .footer{margin-top:10px;font-size:12px;color:var(--muted)}
+    a{color:var(--brand);text-decoration:none}
+    @media (max-width:980px){.row{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="brand">StackIQ</div>
 
-    <div class="querybar">
-      <input id="symbol" class="input" placeholder="AAPL" value="AAPL" />
-      <button id="getQuote" class="btn">Get Quote</button>
-      <button id="themeToggle" class="iconbtn" title="Toggle theme" aria-label="Toggle theme">🌙</button>
+    <div class="inputbar">
+      <input id="symbol" type="text" placeholder="AAPL" value="AAPL" />
+      <button id="go" class="primary">Get Quote</button>
+      <div id="theme" class="toggle" title="Toggle theme">🌗</div>
     </div>
 
     <div class="row">
-      <!-- Left: Quote card + Chart -->
-      <div class="card pad">
-        <div style="display:flex;align-items:center;gap:10px;">
-          <div id="sym" class="h1" style="font-size:28px;margin:0;">—</div>
-          <span id="deltaChip" class="chip" style="display:none">
-            <span id="deltaDir">▲</span><span id="deltaPct">0.00%</span>
-          </span>
+      <div class="panel">
+        <div class="card">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div id="sym" style="font-weight:800;font-size:24px;">—</div>
+            <span id="delta" class="chip muted">—</span>
+          </div>
+          <div id="price" class="big">—</div>
+
+          <div class="grid">
+            <div class="stat">
+              <div class="muted" style="font-size:12px;">Session High</div>
+              <div id="hi" style="font-weight:700;">—</div>
+            </div>
+            <div class="stat">
+              <div class="muted" style="font-size:12px;">Session Low</div>
+              <div id="lo" style="font-weight:700;">—</div>
+            </div>
+            <div class="stat">
+              <div class="muted" style="font-size:12px;">Open</div>
+              <div id="open" style="font-weight:700;">—</div>
+            </div>
+            <div class="stat">
+              <div class="muted" style="font-size:12px;">Prev Close</div>
+              <div id="pc" style="font-weight:700;">—</div>
+            </div>
+          </div>
+
+          <div id="blurb" class="muted" style="margin-top:6px;">—</div>
+
+          <div style="display:flex;gap:8px;margin:14px 0;">
+            <button class="primary" data-range="1m" style="background:transparent;color:var(--text);border:1px solid var(--ring)">1M</button>
+            <button class="primary" data-range="3m" style="background:var(--brand);">3M</button>
+            <button class="primary" data-range="6m" style="background:transparent;color:var(--text);border:1px solid var(--ring)">6M</button>
+            <button class="primary" data-range="1y" style="background:transparent;color:var(--text);border:1px solid var(--ring)">1Y</button>
+          </div>
+
+          <canvas id="chart"></canvas>
+
+          <div class="footer">
+            API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>
+          </div>
         </div>
-        <div id="price" class="h1">—</div>
-
-        <div class="grid">
-          <div class="box"><div class="label">Session High</div><div id="high">—</div></div>
-          <div class="box"><div class="label">Session Low</div><div id="low">—</div></div>
-          <div class="box"><div class="label">Open</div><div id="open">—</div></div>
-          <div class="box"><div class="label">Prev Close</div><div id="prev">—</div></div>
-        </div>
-
-        <div class="muted" id="blurb">—</div>
-
-        <!-- Range tabs -->
-        <div class="tabs">
-          <button class="tab active" data-range="1M">1M</button>
-          <button class="tab" data-range="3M">3M</button>
-          <button class="tab" data-range="6M">6M</button>
-          <button class="tab" data-range="1Y">1Y</button>
-        </div>
-
-        <!-- Chart -->
-        <div class="card" style="border:none;background:transparent;box-shadow:none;padding:6px 0 0;">
-          <canvas id="priceChart"></canvas>
-        </div>
-
-        <div class="api">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code> (history mocked for now)</div>
       </div>
 
-      <!-- Right: Status -->
-      <div class="card pad status">
-        <p class="muted" style="font-weight:800;color:var(--ink)">Status</p>
-        <p id="statusLine">Loading…</p>
-        <p class="muted">Health: <span id="health">—</span></p>
-        <p class="muted">Version: <code id="version">—</code></p>
+      <div class="panel">
+        <div class="card">
+          <div style="font-weight:800;margin-bottom:6px;">Status</div>
+          <div class="muted" id="status">Loading…</div>
+          <div class="muted" id="ver" style="margin-top:8px;"></div>
+        </div>
       </div>
     </div>
 
@@ -106,176 +103,96 @@
   </div>
 
   <script>
-    // ---------- THEME ----------
+    // Theme toggle (persists)
     const root = document.documentElement;
-    const themeToggle = document.getElementById('themeToggle');
-    const savedTheme = localStorage.getItem('theme');
-    if (savedTheme) document.documentElement.setAttribute('data-theme', savedTheme);
-    syncThemeIcon();
-
-    themeToggle.addEventListener('click', () => {
-      const t = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-      root.setAttribute('data-theme', t);
-      localStorage.setItem('theme', t);
-      syncThemeIcon();
-      recolorChartGrid();
-    });
-    function syncThemeIcon(){
-      const dark = root.getAttribute('data-theme') === 'dark';
-      themeToggle.textContent = dark ? '🌞' : '🌙';
-    }
-
-    // ---------- ELEMENTS ----------
-    const el = (id)=>document.getElementById(id);
-    const out = {
-      sym:  el('sym'), price: el('price'), high: el('high'), low: el('low'),
-      open: el('open'), prev: el('prev'), blurb: el('blurb'),
-      deltaChip: document.getElementById('deltaChip'),
-      deltaDir: document.getElementById('deltaDir'),
-      deltaPct: document.getElementById('deltaPct'),
-      status: el('statusLine'), health: el('health'), version: el('version'),
+    const themeBtn = document.getElementById('theme');
+    const saved = localStorage.getItem('theme') || 'light';
+    if (saved === 'light') root.classList.add('light'); else root.classList.remove('light');
+    themeBtn.onclick = () => {
+      const isLight = root.classList.toggle('light');
+      localStorage.setItem('theme', isLight ? 'light' : 'dark');
     };
-    const input = el('symbol');
-    const getBtn = el('getQuote');
 
-    // ---------- CHART ----------
-    let chart;
-    const ctx = document.getElementById('priceChart').getContext('2d');
-
-    function makeChart(labels, values){
-      if (chart) chart.destroy();
-      chart = new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels,
-          datasets: [{
-            label: 'Close',
-            data: values,
-            borderColor: getComputedStyle(root).getPropertyValue('--chart-line').trim(),
-            backgroundColor: 'transparent',
-            fill: false,
-            tension: .25,
-            pointRadius: 0,
-            borderWidth: 2
-          }]
-        },
-        options: {
-          animation:false,
-          maintainAspectRatio:false,
-          plugins:{ legend:{ display:false }, tooltip:{ mode:'index', intersect:false } },
-          scales:{
-            x:{ grid:{ color:getComputedStyle(root).getPropertyValue('--chart-grid').trim() }, ticks:{ maxTicksLimit:6 } },
-            y:{ grid:{ color:getComputedStyle(root).getPropertyValue('--chart-grid').trim() } }
-          }
-        }
+    // Basic line chart (no libs)
+    const ctx = document.getElementById('chart').getContext('2d');
+    function drawChart(points) {
+      const w = ctx.canvas.width = ctx.canvas.clientWidth * window.devicePixelRatio;
+      const h = ctx.canvas.height = ctx.canvas.clientHeight * window.devicePixelRatio;
+      ctx.clearRect(0,0,w,h);
+      ctx.lineWidth = 2; ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--brand').trim();
+      const xs = points.map((_,i)=> i/(points.length-1));
+      const min = Math.min(...points), max = Math.max(...points);
+      const ys = points.map(v => (1-(v-min)/(max-min+1e-9)) * (h-20) + 10);
+      ctx.beginPath();
+      xs.forEach((x,i)=>{
+        const px = 20 + x*(w-40);
+        const py = ys[i];
+        if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
       });
+      ctx.stroke();
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--line').trim();
+      ctx.lineWidth = 1; ctx.strokeRect(20,10,w-40,h-20);
     }
-    function recolorChartGrid(){
-      if (!chart) return;
-      const styles = getComputedStyle(root);
-      chart.options.scales.x.grid.color = styles.getPropertyValue('--chart-grid').trim();
-      chart.options.scales.y.grid.color = styles.getPropertyValue('--chart-grid').trim();
-      chart.data.datasets[0].borderColor = styles.getPropertyValue('--chart-line').trim();
-      chart.update();
+    const mock = (n, base=150) => Array.from({length:n},(_,i)=> base + Math.sin(i/4)*5 + Math.random()*3);
+
+    // UI bits
+    const $ = id => document.getElementById(id);
+    const symInp = $('symbol'), goBtn = $('go');
+    const fields = { sym:$('sym'), delta:$('delta'), price:$('price'), hi:$('hi'), lo:$('lo'), open:$('open'), pc:$('pc'), blurb:$('blurb'), status:$('status'), ver:$('ver') };
+
+    async function loadStatus() {
+      try {
+        const h = await fetch('/health').then(r=>r.json());
+        fields.status.textContent = h.status === 'ok' ? 'Loaded.' : 'Loading…';
+      } catch { fields.status.textContent = 'Unavailable'; }
+      try {
+        const v = await fetch('/version').then(r=>r.json());
+        fields.ver.textContent = `Version: ${v.app} ${v.version}`;
+      } catch { fields.ver.textContent = ''; }
     }
 
-    // ---------- MOCK HISTORY (swap later for real API) ----------
-    function mockHistory(symbol, range){
-      const today = new Date();
-      const pointsByRange = { '1M':22, '3M':66, '6M':132, '1Y':260 };
-      const n = pointsByRange[range] ?? 22;
-
-      let seed = Array.from(symbol).reduce((s,c)=>s + c.charCodeAt(0), 0) % 97 + 3;
-      function rand(){ seed = (seed * 9301 + 49297) % 233280; return seed / 233280; }
-
-      let start = Number(out.price.dataset.val || 150);
-      const labels = [];
-      const values = [];
-      for(let i=n-1;i>=0;i--){
-        const d = new Date(today); d.setDate(today.getDate()-i);
-        const chg = (rand()-.48) * (range==='1Y'?2.0:range==='6M'?1.4:range==='3M'?1.0:0.7);
-        start = Math.max(1, start + chg);
-        labels.push(d.toLocaleDateString(undefined,{month:'short', day:'numeric'}));
-        values.push(Number(start.toFixed(2)));
+    async function loadQuote(symbol) {
+      const s = (symbol||'').trim();
+      if (!s) return;
+      try {
+        const q = await fetch(`/quote/${encodeURIComponent(s)}`).then(r=>{
+          if (!r.ok) throw new Error(`Failed to load quote: /quote/${s} -> ${r.status}`);
+          return r.json();
+        });
+        const up = (q.percent_change||0) >= 0;
+        fields.sym.textContent = q.symbol;
+        fields.price.textContent = q.current.toFixed(3);
+        fields.hi.textContent = q.high.toFixed(2);
+        fields.lo.textContent = q.low.toFixed(2);
+        fields.open.textContent = q.open.toFixed(2);
+        fields.pc.textContent = q.prev_close.toFixed(2);
+        fields.delta.textContent = `${up? '▲':'▼'} ${Math.abs(q.percent_change).toFixed(2)}%`;
+        fields.delta.style.background = `rgba(${up?'22,163,74':'239,68,68'},.15)`;
+        fields.delta.style.borderColor = 'var(--ring)';
+        fields.blurb.textContent = `${q.symbol}: ${q.current} (${up?'up':'down'} ${Math.abs(q.percent_change).toFixed(2)}% on the day). `
+          + `Session range: ${q.low}–${q.high}. Prev close: ${q.prev_close}.`;
+      } catch (e) {
+        fields.blurb.textContent = String(e.message || e);
+        fields.price.textContent = '—';
+        fields.hi.textContent = fields.lo.textContent = fields.open.textContent = fields.pc.textContent = '—';
+        fields.delta.textContent = '—';
       }
-      return {labels, values};
     }
 
-    async function getJSON(url){
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`${url} -> ${res.status}`);
-      return res.json();
-    }
+    function setRange(n){ drawChart(mock(42, 150 + (Math.random()*6-3))); }
+    document.querySelectorAll('button[data-range]').forEach(b=> b.onclick = ()=> setRange(b.dataset.range));
 
-    async function loadStatus(){
-      try{
-        const health = await getJSON('/health');
-        out.health.textContent = health.status === 'ok' ? '200 OK' : 'unknown';
-      }catch{ out.health.textContent = '—'; }
-      try{
-        const ver = await getJSON('/version');
-        out.version.textContent = `${ver.app} ${ver.version}`;
-        out.status.textContent = 'Loaded.';
-      }catch{ out.version.textContent = '—'; out.status.textContent = 'Loaded.'; }
-    }
+    goBtn.onclick = () => loadQuote(symInp.value);
+    symInp.addEventListener('keydown', e => { if (e.key === 'Enter') loadQuote(symInp.value); });
 
-    async function loadQuote(sym){
-      const data = await getJSON(`/quote/${encodeURIComponent(sym)}`);
-      const pct = Number(data.percent_change ?? 0);
-      out.sym.textContent = sym.toUpperCase();
-      out.price.textContent = (data.current ?? data.c ?? 0).toFixed(3);
-      out.price.dataset.val = data.current ?? data.c ?? 0;
-      out.high.textContent = (data.high ?? data.h ?? 0).toFixed(2);
-      out.low.textContent  = (data.low ?? data.l ?? 0).toFixed(2);
-      out.open.textContent = (data.open ?? data.o ?? 0).toFixed(1);
-      out.prev.textContent = (data.prev_close ?? data.pc ?? 0).toFixed(2);
-      out.deltaChip.style.display = 'inline-flex';
-      const up = pct >= 0;
-      out.deltaDir.textContent = up ? '▲' : '▼';
-      out.deltaPct.textContent = `${Math.abs(pct).toFixed(2)}%`;
-      out.deltaChip.style.background = up ? 'var(--chip)' : 'rgba(239,68,68,.12)';
-      out.deltaChip.style.color = up ? 'var(--chip-ink)' : '#ef4444';
-      out.blurb.textContent = `${sym.toUpperCase()}: ${out.price.textContent} (${pct>=0?'+':''}${pct.toFixed(2)}% on the day).`
-        + ` Session range: ${out.low.textContent}–${out.high.textContent}. Prev close: ${out.prev.textContent}.`;
-    }
-
-    const tabs = Array.from(document.querySelectorAll('.tab'));
-    let currentRange = '1M';
-
-    function setActive(range){
-      tabs.forEach(t => t.classList.toggle('active', t.dataset.range === range));
-    }
-
-    async function refreshAll(range){
-      const sym = input.value.trim().toUpperCase() || 'AAPL';
-      try{
-        await loadQuote(sym);
-      }catch(e){
-        out.blurb.textContent = `Failed to load quote: ${e.message}`;
-      }
-      const {labels, values} = mockHistory(sym, range);
-      makeChart(labels, values);
-    }
-
-    tabs.forEach(t => {
-      t.addEventListener('click', () => {
-        currentRange = t.dataset.range;
-        setActive(currentRange);
-        refreshAll(currentRange);
-      });
-    });
-
-    getBtn.addEventListener('click', ()=> refreshAll(currentRange));
-    input.addEventListener('keydown', e => { if(e.key==='Enter') refreshAll(currentRange); });
-
-    (async function init(){
-      setActive(currentRange);
-      await loadStatus();
-      await refreshAll(currentRange);
-    })();
+    // initial
+    loadStatus();
+    setRange('3m');
+    loadQuote(symInp.value);
   </script>
 </body>
 </html>
+
 
 
 
