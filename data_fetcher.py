@@ -1,89 +1,39 @@
-import os
-import time
-import requests
+import yfinance as yf
 
-class FinnhubError(Exception):
-    pass
-
-API_BASE = "https://finnhub.io/api/v1"
-API_KEY = os.getenv("FINNHUB_API_KEY", "")
-
-def _check_key():
-    if not API_KEY:
-        raise FinnhubError("FINNHUB_API_KEY is not set")
-
-def _get(path: str, params: dict):
-    _check_key()
-    p = dict(params or {})
-    p["token"] = API_KEY
-    try:
-        r = requests.get(f"{API_BASE}{path}", params=p, timeout=10)
-    except requests.RequestException as e:
-        raise FinnhubError("Network error to Finnhub") from e
-
-    if r.status_code == 429:
-        raise FinnhubError("Finnhub rate limit (429)")
-    if not r.ok:
-        # short slice of body for debugging
-        msg = r.text[:200] if r.text else r.reason
-        raise FinnhubError(f"Finnhub HTTP {r.status_code}: {msg}")
-    return r.json()
-
-# --- micro cache (keeps us from hammering the API while testing)
-_CACHE = {}  # key -> (expires_at, data)
-
-def _cache_get(key):
-    item = _CACHE.get(key)
-    if not item:
-        return None
-    exp, data = item
-    if time.time() > exp:
-        _CACHE.pop(key, None)
-        return None
-    return data
-
-def _cache_set(key, data, ttl=15):
-    _CACHE[key] = (time.time() + ttl, data)
-
-# --- public fetchers
-
-def fetch_quote(symbol: str) -> dict:
-    """
-    Normalized quote for a symbol.
-    Returns:
-    {
-      "symbol": "AAPL",
-      "current": 226.71,
-      "prev_close": 227.16,
-      "high": 227.30,
-      "low": 224.69,
-      "open": 226.48,
-      "percent_change": -0.20,
-      "volume": null,
-      "raw": {... original Finnhub payload ...}
+def get_quote(symbol: str):
+    ticker = yf.Ticker(symbol)
+    info = ticker.info
+    return {
+        "symbol": symbol.upper(),
+        "current": info.get("currentPrice", 0),
+        "high": info.get("dayHigh", 0),
+        "low": info.get("dayLow", 0),
+        "open": info.get("open", 0),
+        "prev_close": info.get("previousClose", 0),
+        "percent_change": round(
+            ((info.get("currentPrice", 0) - info.get("previousClose", 0)) / info.get("previousClose", 1)) * 100, 2
+        ) if info.get("previousClose") else 0,
     }
-    """
-    s = symbol.upper().strip()
-    key = ("quote", s)
-    hit = _cache_get(key)
-    if hit:
-        return hit
 
-    data = _get("/quote", {"symbol": s})
-    # Finnhub /quote fields: c(current), d(change), dp(percent), h, l, o, pc(prev close), t
-    payload = {
-        "symbol": s,
-        "current": data.get("c"),
-        "prev_close": data.get("pc"),
-        "high": data.get("h"),
-        "low": data.get("l"),
-        "open": data.get("o"),
-        "percent_change": data.get("dp"),
-        "volume": None,   # Finnhub /quote doesn’t include volume
-        "raw": data,
+def get_summary(symbol: str):
+    ticker = yf.Ticker(symbol)
+    hist = ticker.history(period="1d")
+    if hist.empty:
+        return {"symbol": symbol.upper(), "summary": "No data"}
+    last = hist.iloc[-1]
+    return {
+        "symbol": symbol.upper(),
+        "summary": f"{symbol.upper()} {last['Close']:.2f}",
+        "quote": get_quote(symbol)
     }
-    _cache_set(key, payload, ttl=10)
-    return payload
+
+def get_history(symbol: str, range: str = "3mo"):
+    ticker = yf.Ticker(symbol)
+    hist = ticker.history(period=range)
+    return [
+        {"date": str(idx.date()), "price": row["Close"]}
+        for idx, row in hist.iterrows()
+    ]
 
 
 
