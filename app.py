@@ -1,22 +1,17 @@
 import os
-import logging
+import os.path as p
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse, JSONResponse
-
-from data_fetcher import fetch_quote, fetch_debug
+from fastapi.responses import RedirectResponse
+from data_fetcher import fetch_quote
 
 APP_NAME = "stackiq-web"
 APP_VERSION = "1.0.0"
 
-# Basic logging to stdout (shows in Azure "Log stream")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("stackiq")
-
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-# Permissive CORS (simple)
+# CORS (keep simple/lenient for now)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,19 +20,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the static web UI at /web
-if os.path.isdir("web"):
+# Serve the web UI at /web/
+if p.isdir("web"):
+    # html=True lets /web/ serve index.html automatically
     app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
 
-# Root -> redirect to /web/
+# Root -> redirect to /web/ (so you never see raw JSON unless you go to an API)
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse(url="/web/")
+    if p.isdir("web"):
+        return RedirectResponse(url="/web/")
+    return {"app": APP_NAME, "version": APP_VERSION}
 
 
 @app.get("/health")
 def health():
+    # Keep health endpoint minimal and always OK if app booted.
     return {"status": "ok"}
 
 
@@ -50,7 +49,7 @@ def version():
 def quote(symbol: str):
     data = fetch_quote(symbol)
     if not data:
-        # If upstream failed or symbol unknown, return 404 for the UI
+        # Keep 404 but with stable JSON body. The UI watches for this.
         raise HTTPException(status_code=404, detail="Symbol not found")
     return data
 
@@ -61,21 +60,16 @@ def summary(symbol: str):
     if not data:
         raise HTTPException(status_code=404, detail="Symbol not found")
 
-    pct = data.get("percent_change", 0.0)
-    updown = "up" if pct >= 0 else "down"
+    pct = data.get("percent_change")
+    updown = "up" if pct is not None and pct >= 0 else "down"
+    pct_abs = abs(pct) if pct is not None else 0.0
+
     msg = (
-        f"{data['symbol']}: {data['current']} ({updown} {abs(pct):.2f}% on the day). "
+        f"{data['symbol']}: {data['current']} ({updown} {pct_abs:.2f}% on the day). "
         f"Session range: {data['low']}–{data['high']}. Prev close: {data['prev_close']}."
     )
     return {"symbol": data["symbol"], "summary": msg, "quote": data}
 
-
-@app.get("/debug/{symbol}")
-def debug(symbol: str):
-    """Returns detailed info about upstream calls. Use this to see why a symbol fails."""
-    info = fetch_debug(symbol)
-    # 200 even if no result — this endpoint is for diagnostics.
-    return JSONResponse(info)
 
 
 
