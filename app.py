@@ -1,17 +1,20 @@
 import os
-import os.path as path
+import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from data_fetcher import fetch_quote
 
 APP_NAME = "stackiq-web"
 APP_VERSION = "1.0.0"
 
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger(APP_NAME)
+
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-# CORS (keep simple)
+# CORS (keep open for now)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,17 +25,18 @@ app.add_middleware(
 
 # Serve the web UI at /web
 if os.path.isdir("web"):
-    # html=True allows serving index.html automatically
     app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
-# Root -> redirect to /web (so we never show a blank page)
+# Root -> redirect to /web
 @app.get("/", include_in_schema=False)
 def root():
-    return RedirectResponse(url="/web/")
+    # If /web exists, go there; otherwise show minimal message
+    if os.path.isdir("web"):
+        return RedirectResponse(url="/web/")
+    return JSONResponse({"app": APP_NAME, "version": APP_VERSION})
 
 @app.get("/health")
 def health():
-    # simple liveness check; avoid any network calls here
     return {"status": "ok"}
 
 @app.get("/version")
@@ -43,8 +47,7 @@ def version():
 def quote(symbol: str):
     data = fetch_quote(symbol)
     if not data:
-        # IMPORTANT: we intentionally return 404 with JSON,
-        # NOT an unhandled error, so Azure never shows its error page.
+        # Keep this message stable so the UI can show a friendly error
         raise HTTPException(status_code=404, detail="Symbol not found")
     return data
 
@@ -54,13 +57,14 @@ def summary(symbol: str):
     if not data:
         raise HTTPException(status_code=404, detail="Symbol not found")
 
-    pct = data.get("percent_change") or 0.0
-    updown = "up" if pct >= 0 else "down"
+    pct = data.get("percent_change", 0.0)
+    updown = "up" if pct or 0 >= 0 else "down"
     msg = (
         f"{data['symbol']}: {data['current']} ({updown} {abs(pct):.2f}% on the day). "
         f"Session range: {data['low']}–{data['high']}. Prev close: {data['prev_close']}."
     )
     return {"symbol": data["symbol"], "summary": msg, "quote": data}
+
 
 
 
