@@ -4,126 +4,238 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>StackIQ — Live Quote</title>
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+
+    <!-- Inline styles so we only need this one file -->
     <style>
-      :root { --bg:#0b1020; --card:#121a2c; --text:#e9eefc; --muted:#9db0d8; --accent:#4e8cff; --danger:#ff6464; }
-      *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 Inter,system-ui,Segoe UI,Roboto}
-      .wrap{max-width:1100px;margin:48px auto;padding:0 20px}
-      h1{font-size:22px;margin:0 0 16px 0}
-      .grid{display:grid;grid-template-columns:1fr 360px;gap:24px}
-      .card{background:var(--card);border-radius:16px;padding:18px;box-shadow:0 10px 28px rgba(0,0,0,.25)}
-      .row{display:flex;gap:12px;align-items:center}
-      input{flex:1;padding:10px 12px;border-radius:10px;border:1px solid #24314f;background:#0d1426;color:var(--text)}
-      button{background:var(--accent);color:#fff;border:0;padding:10px 14px;border-radius:12px;font-weight:700;cursor:pointer}
-      .kpi{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin-top:14px}
-      .k{background:#0d1426;border:1px solid #24314f;padding:10px;border-radius:12px;height:62px}
-      .k small{display:block;color:var(--muted)}
-      .k b{font-size:18px}
-      .status small{display:block;color:var(--muted)}
-      .err{color:var(--danger);font-weight:700;margin-top:8px}
-      footer{color:#7e8fb9;text-align:center;margin:26px 0}
-      canvas{width:100%;height:160px;background:linear-gradient(180deg,#0e162c,transparent);border-radius:12px;border:1px solid #24314f}
+      :root {
+        --bg: #0b1220;
+        --card: #121b2c;
+        --muted: #a8b3cf;
+        --text: #e9eefb;
+        --accent: #4f8cff;
+        --good: #3ecf8e;
+        --bad: #ff6b6b;
+        --line: #2a3650;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+        background: var(--bg);
+        color: var(--text);
+      }
+      .container {
+        max-width: 1100px;
+        margin: 48px auto;
+        padding: 0 20px;
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 24px;
+      }
+      .card {
+        background: var(--card);
+        border-radius: 14px;
+        padding: 20px;
+        box-shadow: 0 10px 30px rgba(0,0,0,.25);
+      }
+      .header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 16px;
+      }
+      h1 { margin: 0; font-size: 22px; }
+      .version { color: var(--muted); font-size: 13px; }
+      .row { display: flex; gap: 10px; margin-bottom: 16px; }
+      .input {
+        flex: 1; padding: 12px 14px; border-radius: 10px;
+        border: 1px solid var(--line); background: #0e172a; color: var(--text); outline: none;
+      }
+      .btn {
+        padding: 12px 14px; border-radius: 10px; border: 0;
+        color: white; background: var(--accent); cursor: pointer; font-weight: 600;
+      }
+      .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-bottom: 16px; }
+      .stat { background: #0e172a; border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+      .label { color: var(--muted); font-size: 12px; }
+      .value { font-size: 18px; margin-top: 6px; }
+      .chart-card { background: #0e172a; border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
+      .api-note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+      .status-card h2 { margin: 0 0 12px 0; font-size: 18px; }
+      .badge {
+        display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 700;
+        background: #222b44; border: 1px solid var(--line);
+      }
+      .badge.ok { background: rgba(62,207,142,.2); border-color: var(--good); color: var(--good); }
+      .badge.fail { background: rgba(255,107,107,.2); border-color: var(--bad); color: var(--bad); }
+      .status-log {
+        margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line);
+        color: var(--muted); font-size: 13px; white-space: pre-wrap; word-break: break-word;
+        max-height: 240px; overflow: auto;
+      }
+      @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
     </style>
   </head>
+
   <body>
-    <div class="wrap">
-      <h1>StackIQ</h1>
-      <div class="grid">
-        <div class="card">
-          <div class="row">
-            <input id="sym" placeholder="AAPL" value="AAPL"/>
-            <button id="go">Get Quote</button>
-          </div>
-
-          <div class="kpi">
-            <div class="k"><small>Session High</small><b id="hi">—</b></div>
-            <div class="k"><small>Session Low</small><b id="lo">—</b></div>
-            <div class="k"><small>Open</small><b id="op">—</b></div>
-            <div class="k"><small>Prev Close</small><b id="pc">—</b></div>
-          </div>
-
-          <div style="margin-top:14px"><canvas id="spark"></canvas></div>
-          <div id="apiNote" style="margin-top:8px;color:#7e8fb9">API: /quote/{symbol}, /summary/{symbol}</div>
+    <main class="container">
+      <section class="card query-card">
+        <div class="header">
+          <h1>StackIQ</h1>
+          <div class="version" id="version">Loading…</div>
         </div>
 
-        <div class="card status">
-          <small>Status</small>
-          <div id="statusOk">Loaded.</div>
-          <div style="margin-top:6px"><small>Version:</small> <span id="ver">—</span></div>
-          <div id="err" class="err" style="display:none"></div>
+        <div class="row">
+          <input id="symbolInput" class="input" placeholder="AAPL" value="AAPL" autocomplete="off" spellcheck="false" />
+          <button id="getQuoteBtn" class="btn">Get Quote</button>
         </div>
-      </div>
-      <footer>© 2025 StackIQ · minimal market data UI</footer>
-    </div>
 
-    <script>
-      const $ = (id) => document.getElementById(id);
+        <div class="grid">
+          <div class="stat"><div class="label">Session High</div><div class="value" id="high">—</div></div>
+          <div class="stat"><div class="label">Session Low</div><div class="value" id="low">—</div></div>
+          <div class="stat"><div class="label">Open</div><div class="value" id="open">—</div></div>
+          <div class="stat"><div class="label">Prev Close</div><div class="value" id="prevClose">—</div></div>
+        </div>
 
-      async function ping() {
+        <div class="chart-card">
+          <canvas id="chart" height="140"></canvas>
+          <div class="api-note">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code></div>
+        </div>
+      </section>
+
+      <section class="card status-card">
+        <h2>Status</h2>
+        <div id="healthBadge" class="badge">Loading…</div>
+        <div id="statusLog" class="status-log"></div>
+      </section>
+    </main>
+
+    <!-- Inline JS -->
+    <script type="module">
+      const els = {
+        version: document.getElementById("version"),
+        healthBadge: document.getElementById("healthBadge"),
+        log: document.getElementById("statusLog"),
+        input: document.getElementById("symbolInput"),
+        btn: document.getElementById("getQuoteBtn"),
+        high: document.getElementById("high"),
+        low: document.getElementById("low"),
+        open: document.getElementById("open"),
+        prevClose: document.getElementById("prevClose"),
+        chart: document.getElementById("chart"),
+      };
+
+      const log = (msg) => {
+        const ts = new Date().toLocaleTimeString();
+        els.log.textContent = \`[\${ts}] \${msg}\n\` + els.log.textContent;
+      };
+
+      async function getJSON(path) {
+        const res = await fetch(path, { cache: "no-store" });
+        if (!res.ok) throw new Error(\`\${res.status} \${res.statusText}\`);
+        return res.json();
+      }
+
+      async function refreshVersion() {
         try {
-          const r = await fetch("/version");
-          if (!r.ok) throw new Error("version failed");
-          const j = await r.json();
-          $("ver").textContent = `${j.app} ${j.version}`;
-        } catch {}
-      }
-
-      function showErr(msg) {
-        const e = $("err");
-        e.style.display = "block";
-        e.textContent = msg;
-      }
-      function clearErr() { $("err").style.display = "none"; }
-
-      async function loadQuote() {
-        clearErr();
-        const raw = $("sym").value.trim() || "AAPL";
-        const sym = raw.toUpperCase();
-
-        const r = await fetch(`/quote/${encodeURIComponent(sym)}`);
-        if (!r.ok) {
-          showErr(`Failed to load quote: /quote/${sym} → ${r.status} ${r.statusText}`);
-          ["hi","lo","op","pc"].forEach(id => $(id).textContent = "—");
-          draw([0,1,0.5,1.2,0.9,1.4]); // dummy spark
-          return;
+          const data = await getJSON("/version");
+          els.version.textContent = \`\${data.app} \${data.version}\`;
+        } catch {
+          els.version.textContent = "version: n/a";
         }
-        const q = await r.json();
-
-        $("hi").textContent = q.high?.toFixed(3) ?? "—";
-        $("lo").textContent = q.low?.toFixed(3) ?? "—";
-        $("op").textContent = q.open?.toFixed(3) ?? "—";
-        $("pc").textContent = q.prev_close?.toFixed(3) ?? "—";
-
-        // quick fake sparkline from OHLC (history mocked)
-        draw([q.open, q.low, q.high, q.current, (q.current+q.low)/2, q.high]);
       }
 
-      function draw(data) {
-        const c = $("spark");
-        const ctx = c.getContext("2d");
-        const w = c.width = c.clientWidth;
-        const h = c.height = c.clientHeight;
-        ctx.clearRect(0,0,w,h);
-        if (!data || data.length < 2) return;
+      async function refreshHealth() {
+        try {
+          const data = await getJSON("/health");
+          const ok = data && data.status === "ok";
+          els.healthBadge.textContent = ok ? "Loaded." : "Degraded";
+          els.healthBadge.classList.toggle("ok", ok);
+          els.healthBadge.classList.toggle("fail", !ok);
+        } catch {
+          els.healthBadge.textContent = "Down";
+          els.healthBadge.classList.remove("ok");
+          els.healthBadge.classList.add("fail");
+        }
+      }
 
-        const min = Math.min(...data), max = Math.max(...data);
-        const nx = (i) => (i/(data.length-1))*w;
-        const ny = (v) => h - ((v-min)/(max-min || 1))*h;
+      function setStats(q) {
+        const fmt = (x) => (x == null ? "—" : Number(x).toFixed(3));
+        els.high.textContent = fmt(q?.high);
+        els.low.textContent = fmt(q?.low);
+        els.open.textContent = fmt(q?.open);
+        els.prevClose.textContent = fmt(q?.prev_close ?? q?.prevClose);
+      }
 
-        ctx.lineWidth = 2;
+      function drawChart(values) {
+        const canvas = els.chart;
+        const ctx = canvas.getContext("2d");
+        const w = canvas.width = canvas.clientWidth * devicePixelRatio;
+        const h = canvas.height = canvas.clientHeight * devicePixelRatio;
+
+        ctx.clearRect(0, 0, w, h);
+        ctx.lineWidth = 2 * devicePixelRatio;
+        ctx.strokeStyle = "#4f8cff";
         ctx.beginPath();
-        ctx.moveTo(nx(0), ny(data[0]));
-        for (let i=1;i<data.length;i++) ctx.lineTo(nx(i), ny(data[i]));
-        ctx.strokeStyle = "#4e8cff";
+
+        if (!values || values.length === 0) return;
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const span = max - min || 1;
+
+        values.forEach((v, i) => {
+          const x = (i / (values.length - 1)) * (w - 20) + 10;
+          const y = h - ((v - min) / span) * (h - 20) - 10;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
         ctx.stroke();
       }
 
-      $("go").addEventListener("click", loadQuote);
-      window.addEventListener("DOMContentLoaded", () => { ping(); loadQuote(); });
+      // small synthetic history from quote numbers so chart isn't empty
+      function synthHistory(q) {
+        if (!q) return [];
+        const base = Number(q.current ?? q.prev_close ?? 100);
+        const arr = [base * 0.995, base * 0.99, base * 1.02, base * 1.005, base * 0.996, base * 1.01];
+        return arr.map((x) => Number(x.toFixed(3)));
+      }
+
+      async function loadQuote(symbol) {
+        const sym = (symbol || "").trim().toUpperCase();
+        if (!sym) return;
+
+        try {
+          const q = await getJSON(\`/quote/\${encodeURIComponent(sym)}\`);
+          setStats(q);
+          drawChart(synthHistory(q));
+          log(\`Loaded /quote/\${sym}\`);
+        } catch (e) {
+          setStats(null);
+          drawChart([]);
+          log(\`Failed to load quote: /quote/\${sym} -> \${e.message}\`);
+        }
+
+        // optional: log summary if available
+        try {
+          const s = await getJSON(\`/summary/\${encodeURIComponent(sym)}\`);
+          log(\`Summary: \${s.summary}\`);
+        } catch {}
+      }
+
+      // Wire up UI
+      els.btn.addEventListener("click", () => loadQuote(els.input.value));
+      els.input.addEventListener("keydown", (e) => { if (e.key === "Enter") loadQuote(els.input.value); });
+
+      // boot
+      refreshVersion();
+      refreshHealth();
+      setInterval(refreshHealth, 15000);
+      loadQuote(els.input.value);
     </script>
   </body>
 </html>
+
 
 
 
