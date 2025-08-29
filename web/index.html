@@ -1,303 +1,265 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="en" data-theme="auto">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>StackIQ — Live Quote</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
+    /* ---------- Theme tokens (light / dark via [data-theme]) ---------- */
+    :root {
+      --bg: #f7f7fb;
+      --card: #ffffff;
+      --text: #0b1020;
+      --muted: #6b7280;
+      --border: #e7e7f0;
+      --brand: #1a57ff;
+      --brand-weak: #e6eeff;
+      --good: #12b886;
+      --bad: #ef4444;
+      --shadow: 0 10px 24px rgba(16, 24, 40, 0.08);
+      --radius: 14px;
+    }
+    html[data-theme="dark"] {
+      --bg: #0c111b;
+      --card: #111827;
+      --text: #f2f5f9;
+      --muted: #a0aec0;
+      --border: #1f2a37;
+      --brand: #3b82f6;
+      --brand-weak: #0b1d3d;
+      --good: #10b981;
+      --bad: #f87171;
+      --shadow: 0 10px 24px rgba(0,0,0,0.45);
+    }
+
+    /* ---------- Base ---------- */
+    * { box-sizing: border-box; }
     body {
-      font-family: system-ui, sans-serif;
-      background: #f9fafb;
-      margin: 0;
-      padding: 2rem;
-      color: #111827;
+      margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      background: var(--bg); color: var(--text);
     }
+    .wrap { max-width: 1140px; margin: 56px auto; padding: 0 24px; }
     header {
-      font-weight: 700;
-      font-size: 1.5rem;
-      margin-bottom: 1rem;
-      color: #111827;
+      display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px;
     }
-    header span {
-      color: #2563eb;
+    .brand { font-weight: 800; letter-spacing: .2px; }
+    .brand span { color: var(--brand); }
+    .toolbar { display: flex; gap: 10px; align-items: center; }
+
+    /* ---------- Inputs / buttons ---------- */
+    .input {
+      width: 420px; max-width: 56vw;
+      background: var(--card); color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 999px; padding: 12px 16px; outline: none;
+      box-shadow: var(--shadow);
     }
-    .layout {
-      display: grid;
-      grid-template-columns: 2fr 1fr;
-      gap: 1.5rem;
+    .btn {
+      background: var(--brand); color: #fff; border: none; cursor: pointer;
+      padding: 12px 16px; border-radius: 999px; font-weight: 600;
+      box-shadow: var(--shadow);
+    }
+    .btn:disabled { opacity: .7; cursor: default; }
+    .ghost {
+      background: transparent; color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    /* ---------- Layout ---------- */
+    .grid {
+      display: grid; grid-template-columns: 1fr 360px; gap: 18px;
     }
     .card {
-      background: white;
-      border-radius: 1rem;
-      padding: 1.5rem;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: var(--shadow);
     }
-    .quote-header {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
+    .pad { padding: 22px; }
+    .muted { color: var(--muted); }
+
+    /* ---------- Quote card ---------- */
+    .headline { display:flex; align-items: center; gap: 14px; }
+    .symbol { font-size: 32px; font-weight: 800; letter-spacing:.6px; }
+    .chip {
+      display:inline-flex; align-items:center; gap:6px;
+      background: var(--brand-weak); color: var(--good);
+      border: 1px solid var(--border); padding: 4px 8px; border-radius: 999px; font-weight:700; font-size:12px;
     }
-    .quote-header h2 {
-      margin: 0;
-      font-size: 1.5rem;
-      font-weight: 700;
+    .price { font-size: 44px; font-weight: 900; margin: 8px 0 16px; }
+
+    .kgrid {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 6px;
     }
-    .pill {
-      font-size: 0.85rem;
-      font-weight: 600;
-      padding: 0.2rem 0.6rem;
-      border-radius: 9999px;
+    .kv {
+      background: transparent; border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px;
     }
-    .price {
-      font-size: 2rem;
-      font-weight: 700;
-      margin: 0.5rem 0;
-    }
-    .grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-      margin-top: 1rem;
-    }
-    .label {
-      font-size: 0.85rem;
-      color: #6b7280;
-    }
-    .val {
-      font-size: 1.1rem;
-      font-weight: 600;
-    }
-    .status-line {
-      font-size: 0.9rem;
-      margin-top: 0.5rem;
-      color: #6b7280;
-    }
-    .segmented {
-      display: flex;
-      gap: 0.5rem;
-      margin: 1rem 0;
-    }
-    .segmented button {
-      flex: 1;
-      padding: 0.4rem 0.8rem;
-      border-radius: 0.5rem;
-      border: 1px solid #d1d5db;
-      background: white;
-      cursor: pointer;
-      font-weight: 500;
-    }
-    .segmented button.active {
-      background: #2563eb;
-      color: white;
-      border-color: #2563eb;
-    }
-    footer {
-      margin-top: 2rem;
-      font-size: 0.8rem;
-      color: #9ca3af;
-      text-align: center;
+    .k { font-size: 12px; color: var(--muted); }
+    .v { font-weight: 800; margin-top: 4px; }
+
+    .api { font-size: 12px; color: var(--muted); border-top: 1px dashed var(--border); margin-top: 14px; padding-top: 12px; }
+
+    /* ---------- Status card ---------- */
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+    /* ---------- Footer ---------- */
+    footer { text-align: center; color: var(--muted); font-size: 12px; padding: 22px 0 8px; }
+
+    /* Mobile */
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: 1fr; }
+      .input { width: 100%; max-width: 100%; }
     }
   </style>
 </head>
 <body>
-  <header>Stack<span>IQ</span></header>
-  <div class="layout">
-    <!-- Left: Quote + Chart -->
-    <div>
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <input id="symInp" placeholder="AAPL" value="AAPL" 
-                 style="padding:0.4rem 0.8rem;border:1px solid #d1d5db;border-radius:0.5rem;" />
-          <button id="go" 
-                  style="margin-left:0.5rem;padding:0.5rem 1rem;border:none;border-radius:0.5rem;background:#2563eb;color:white;cursor:pointer;">
-            Get Quote
-          </button>
-        </div>
-        <div class="quote-header" style="margin-top:1rem;">
-          <h2 id="sym">—</h2>
-          <span id="chgPill" class="pill" style="display:none;"></span>
-        </div>
-        <div class="price" id="px">—</div>
-        <div class="grid">
-          <div><div class="label">Session High</div><div class="val" id="hi">—</div></div>
-          <div><div class="label">Session Low</div><div class="val" id="lo">—</div></div>
-          <div><div class="label">Open</div><div class="val" id="op">—</div></div>
-          <div><div class="label">Prev Close</div><div class="val" id="pc">—</div></div>
-        </div>
-        <div id="blurb" style="margin-top:1rem;font-size:0.9rem;color:#374151;">—</div>
-        <div class="segmented">
-          <button data-range="1mo" class="active">1M</button>
-          <button data-range="3mo">3M</button>
-          <button data-range="6mo">6M</button>
-          <button data-range="1y">1Y</button>
-        </div>
-        <canvas id="chart" height="120"></canvas>
+  <div class="wrap">
+    <header>
+      <div class="brand">Stack<span>IQ</span></div>
+      <div class="toolbar">
+        <input id="ticker" class="input" placeholder="AAPL" value="AAPL" />
+        <button id="go" class="btn">Get Quote</button>
+        <button id="themeToggle" class="btn ghost" title="Toggle theme">🌙</button>
       </div>
-    </div>
+    </header>
 
-    <!-- Right: Status -->
-    <div>
-      <div class="card">
-        <h3>Status</h3>
-        <div id="statusLine">Idle.</div>
-        <div style="margin-top:1rem;font-size:0.85rem;">
-          Health: <span id="health">—</span><br/>
-          Version: <span id="ver">—</span>
+    <section class="grid">
+      <!-- Quote -->
+      <div class="card pad">
+        <div class="headline">
+          <div class="symbol" id="sym">—</div>
+          <div id="deltaChip" class="chip" style="display:none;">
+            <span id="deltaPct">0.00%</span>
+          </div>
         </div>
+        <div class="price" id="price">—</div>
+
+        <div class="kgrid">
+          <div class="kv"><div class="k">Session High</div><div class="v" id="hi">—</div></div>
+          <div class="kv"><div class="k">Session Low</div><div class="v" id="lo">—</div></div>
+          <div class="kv"><div class="k">Open</div><div class="v" id="open">—</div></div>
+          <div class="kv"><div class="k">Prev Close</div><div class="v" id="pc">—</div></div>
+        </div>
+
+        <div id="summary" class="muted" style="margin-top:14px;">Enter a symbol and hit “Get Quote”.</div>
+        <div class="api">API: <span class="mono">/quote/{symbol}</span>, <span class="mono">/summary/{symbol}</span></div>
       </div>
-    </div>
+
+      <!-- Status -->
+      <div class="card pad">
+        <h3 style="margin:0 0 12px 0;">Status</h3>
+        <div class="muted" id="status">Idle.</div>
+        <div class="muted" style="margin-top:12px;">Health: <span id="health">—</span></div>
+        <div class="muted">Version: <span id="version" class="mono">stackiq-web v1.0.0</span></div>
+      </div>
+    </section>
+
+    <footer>© 2025 StackIQ • minimal market data UI</footer>
   </div>
-  <footer>© 2025 StackIQ • minimal market data UI</footer>
 
   <script>
+    // -------------------- THEME TOGGLE --------------------
+    const root = document.documentElement;
+    const toggleBtn = document.getElementById('themeToggle');
+
+    function applyTheme(theme) {
+      // theme: 'light' | 'dark' | 'auto'
+      if (theme === 'auto') {
+        root.setAttribute('data-theme', window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      } else {
+        root.setAttribute('data-theme', theme);
+      }
+      toggleBtn.textContent = root.getAttribute('data-theme') === 'dark' ? '☀️' : '🌙';
+    }
+
+    // Load preference or system
+    const saved = localStorage.getItem('stackiq-theme') || 'auto';
+    applyTheme(saved);
+
+    // Watch system changes when in auto
+    if (saved === 'auto') {
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme('auto'));
+    }
+
+    toggleBtn.addEventListener('click', () => {
+      const cur = root.getAttribute('data-theme');
+      const next = cur === 'dark' ? 'light' : 'dark';
+      localStorage.setItem('stackiq-theme', next);
+      applyTheme(next);
+    });
+
+    // -------------------- QUOTE LOGIC --------------------
     const $ = (id) => document.getElementById(id);
-    const symInp = $("symInp");
-    let chart;
+    const input = $('ticker'), go = $('go');
 
-    function segBtns() {
-      return Array.from(document.querySelectorAll(".segmented button"));
-    }
-
-    function ensureChart(ctx) {
-      if (chart) return chart;
-      chart = new Chart(ctx, {
-        type: "line",
-        data: {
-          labels: [],
-          datasets: [{
-            label: "Price",
-            data: [],
-            borderColor: "#2563eb",
-            backgroundColor: "rgba(37,99,235,0.1)",
-            fill: true,
-            tension: 0.25
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          scales: {
-            x: { display: true, ticks: { maxTicksLimit: 6 } },
-            y: { display: true, beginAtZero: false }
-          },
-          plugins: {
-            legend: { display: false },
-            tooltip: { mode: "index", intersect: false }
-          }
-        }
-      });
-      return chart;
-    }
+    function setStatus(msg) { $('status').textContent = msg; }
+    function setHealth(ok) { $('health').textContent = ok ? '200 OK' : 'error'; }
 
     async function fetchJSON(url) {
-      const r = await fetch(url);
+      const r = await fetch(url, { cache: 'no-store' });
       if (!r.ok) throw new Error(`${url} -> ${r.status}`);
       return r.json();
     }
 
-    function setStatus(msg) {
-      $("statusLine").textContent = msg;
+    function formatPct(x) {
+      const sign = x > 0 ? '+' : (x < 0 ? '' : '');
+      return `${sign}${x.toFixed(2)}%`;
     }
 
-    async function loadMeta() {
+    async function load(symbol) {
+      symbol = (symbol || '').trim().toUpperCase();
+      if (!symbol) return;
+
+      setStatus('Loading...');
+      go.disabled = true;
+
       try {
-        const [h, v] = await Promise.all([
-          fetch("/health").then(r => r.status),
-          fetchJSON("/version")
+        // Health & version
+        const healthP = fetchJSON('/health').then(_=>true).catch(_=>false);
+        const versionP = fetchJSON('/version').catch(_=>({app:'stackiq-web',version:'v1.0.0'}));
+
+        // Data
+        const [q, s, healthy, ver] = await Promise.all([
+          fetchJSON(`/quote/${encodeURIComponent(symbol)}`),
+          fetchJSON(`/summary/${encodeURIComponent(symbol)}`),
+          healthP,
+          versionP
         ]);
-        $("health").textContent = h;
-        $("ver").textContent = `${v.app} v${v.version}`;
-      } catch (e) {
-        $("health").textContent = "error";
-        $("ver").textContent = "—";
+
+        // Fill UI
+        $('sym').textContent   = symbol;
+        $('price').textContent = (q.current ?? q.c ?? 0).toFixed(3);
+        $('hi').textContent    = (q.high ?? q.h ?? 0).toFixed(2);
+        $('lo').textContent    = (q.low ?? q.l ?? 0).toFixed(2);
+        $('open').textContent  = (q.open ?? q.o ?? 0).toFixed(1);
+        $('pc').textContent    = (q.prev_close ?? q.pc ?? 0).toFixed(2);
+
+        const pct = Number(q.percent_change ?? q.dp ?? 0);
+        const chip = $('deltaChip'), pctNode = $('deltaPct');
+        pctNode.textContent = formatPct(pct);
+        chip.style.display = 'inline-flex';
+        chip.style.color = pct >= 0 ? 'var(--good)' : 'var(--bad)';
+
+        $('summary').textContent = s.summary || `${symbol}: loaded.`;
+        setStatus('Loaded.');
+        setHealth(healthy);
+        $('version').textContent = `${ver.app || 'stackiq-web'} ${ver.version || 'v1.0.0'}`;
+      } catch (err) {
+        console.error(err);
+        setStatus(String(err.message || err));
+        setHealth(false);
+      } finally {
+        go.disabled = false;
       }
     }
 
-    function renderQuote(payload) {
-      const q = payload.quote;
-      $("sym").textContent = payload.symbol;
-      $("px").textContent  = (q.current ?? "—");
-      $("hi").textContent  = (q.high ?? "—");
-      $("lo").textContent  = (q.low ?? "—");
-      $("op").textContent  = (q.open ?? "—");
-      $("pc").textContent  = (q.prev_close ?? "—");
-      $("blurb").textContent = payload.summary;
+    go.addEventListener('click', () => load(input.value));
+    input.addEventListener('keydown', (e) => (e.key === 'Enter') && load(input.value));
 
-      // change pill
-      const pill = $("chgPill");
-      const pc = Number(q.percent_change ?? 0);
-      if (!Number.isNaN(pc)) {
-        pill.style.display = "";
-        pill.textContent = `${pc >= 0 ? "▲" : "▼"} ${Math.abs(pc).toFixed(2)}%`;
-        pill.style.background = pc >= 0 ? "#eafff1" : "#ffecec";
-        pill.style.color = pc >= 0 ? "#16a34a" : "#b91c1c";
-      } else {
-        pill.style.display = "none";
-      }
-    }
-
-    async function loadQuoteAndSummary(symbol) {
-      setStatus("Loading…");
-      try {
-        const payload = await fetchJSON(`/summary/${encodeURIComponent(symbol)}`);
-        renderQuote(payload);
-        setStatus("Loaded.");
-      } catch (e) {
-        setStatus(`Quote error: ${e.message}`);
-      }
-    }
-
-    function renderHistory(points) {
-      const ctx = $("chart").getContext("2d");
-      const c = ensureChart(ctx);
-
-      const labels = points.map(p => new Date(p.t));
-      const data = points.map(p => p.c);
-
-      c.data.labels = labels;
-      c.data.datasets[0].data = data;
-      c.update();
-    }
-
-    async function loadHistory(symbol, range) {
-      try {
-        const h = await fetchJSON(`/history/${encodeURIComponent(symbol)}?range=${range}`);
-        renderHistory(h.points);
-      } catch (e) {
-        setStatus(`History error: ${e.message}`);
-      }
-    }
-
-    function activeRange() {
-      const active = segBtns().find(b => b.classList.contains("active"));
-      return active ? active.dataset.range : "1y";
-    }
-
-    async function run(symbol) {
-      await loadQuoteAndSummary(symbol);
-      await loadHistory(symbol, activeRange());
-    }
-
-    // UI wiring
-    $("go").addEventListener("click", () => run(symInp.value.trim() || "AAPL"));
-    symInp.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") $("go").click();
-    });
-    segBtns().forEach(btn => {
-      btn.addEventListener("click", () => {
-        segBtns().forEach(b => b.classList.remove("active"));
-        btn.classList.add("active");
-        run(symInp.value.trim() || "AAPL");
-      });
-    });
-
-    // boot
-    loadMeta();
-    run(symInp.value.trim() || "AAPL");
+    // Initial
+    load(input.value || 'AAPL');
   </script>
 </body>
 </html>
+
 
 
 
