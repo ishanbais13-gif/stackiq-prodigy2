@@ -11,7 +11,7 @@ APP_VERSION = "1.0.0"
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-# CORS (lenient)
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,11 +20,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve /web if a web folder exists
+# Serve /web if present
 if os.path.isdir("web"):
     app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
-# Root -> redirect to /web (if present), else show basic message
 @app.get("/", include_in_schema=False)
 def root():
     if os.path.isdir("web"):
@@ -33,6 +32,7 @@ def root():
 
 @app.get("/health")
 def health():
+    # never talk to providers here; health should always be OK if the app is up
     return {"status": "ok"}
 
 @app.get("/version")
@@ -42,18 +42,17 @@ def version():
 @app.get("/quote/{symbol}")
 def quote(symbol: str):
     data = fetch_quote(symbol)
-    if not data:
-        # If Finnhub gave us nothing, return 404 so the UI shows a clean error
+    if data is None:
         raise HTTPException(status_code=404, detail="Symbol not found")
     return data
 
 @app.get("/summary/{symbol}")
 def summary(symbol: str):
     data = fetch_quote(symbol)
-    if not data:
+    if data is None:
         raise HTTPException(status_code=404, detail="Symbol not found")
 
-    pct = data.get("percent_change") or 0.0
+    pct = float(data.get("percent_change") or 0.0)
     updown = "up" if pct >= 0 else "down"
     msg = (
         f"{data['symbol']}: {data['current']} ({updown} {abs(pct):.2f}% on the day). "
