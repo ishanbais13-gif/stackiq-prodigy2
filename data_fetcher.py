@@ -1,19 +1,23 @@
- import requests
+import requests
 
 STOOQ_URL = "https://stooq.com/q/l/?s={symbol}&i=d"
+REQ_HEADERS = {
+    # Some hosts return empty/HTML without a UA on cloud IPs
+    "User-Agent": "Mozilla/5.0 (StackIQ; +https://example.com)"
+}
 
 def _normalize(symbol: str) -> str:
     """
-    Stooq expects US tickers like aapl.us (lowercase).
+    Stooq expects tickers like aapl.us (lowercase).
     If the user types AAPL or aapl, convert to aapl.us.
     If the user already includes a suffix (e.g., .us, .gb), keep it.
     """
     s = (symbol or "").strip().lower()
     if not s:
         return ""
-    if "." in s:
-        return s
-    return f"{s}.us"
+    if "." not in s:
+        return f"{s}.us"
+    return s
 
 def fetch_quote(symbol: str):
     sym_norm = _normalize(symbol)
@@ -21,26 +25,30 @@ def fetch_quote(symbol: str):
         return None
 
     try:
-        r = requests.get(STOOQ_URL.format(symbol=sym_norm), timeout=10)
+        r = requests.get(
+            STOOQ_URL.format(symbol=sym_norm),
+            headers=REQ_HEADERS,
+            timeout=10
+        )
         if r.status_code != 200 or not r.text:
             return None
 
-        # CSV header: Symbol,Date,Time,Open,High,Low,Close,Volume
+        # Expect CSV: header line then data line
         lines = [ln.strip() for ln in r.text.splitlines() if ln.strip()]
         if len(lines) < 2:
             return None
-
         parts = lines[1].split(",")
         if len(parts) < 8:
             return None
 
         # Parse fields
-        raw_symbol = parts[0]           # e.g., aapl.us
+        raw_symbol = parts[0]    # e.g., aapl.us
         open_p = float(parts[3])
         high = float(parts[4])
-        low = float(parts[5])
+        low  = float(parts[5])
         close = float(parts[6])
-        # Stooq "d" interval doesn’t include prev close; use open as an approximation
+
+        # Stooq daily row doesn’t include prev close; use open as approx
         prev_close = open_p
 
         symbol_out = raw_symbol.split(".")[0].upper()
@@ -66,6 +74,7 @@ def fetch_quote(symbol: str):
         }
     except Exception:
         return None
+
 
 
 
