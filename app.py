@@ -1,151 +1,66 @@
-# app.py
 import os
-import math
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
-
-import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
 
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
-if not FINNHUB_API_KEY:
-    # Fail fast with a clear message in logs and a friendly 500 at runtime.
-    raise RuntimeError("Set FINNHUB_API_KEY environment variable.")
+from data_fetcher import fetch_quote
 
-FINNHUB_BASE = "https://finnhub.io/api/v1"
+APP_NAME = "stackiq-web"
+APP_VERSION = "1.0.0"
 
-app = FastAPI(title="stackiq-web", version="1.0.0")
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-# CORS (allow your web app to call these endpoints)
+# CORS (lenient)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # lock down if you have a specific domain
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- tiny in-memory cache to avoid rate limits (free tier) ---
-_cache: Dict[str, Dict[str, Any]] = {}  # key -> {"data":..., "exp": datetime}
-CACHE_SECS = 5
+# Serve /web if a web folder exists
+if os.path.isdir("web"):
+    app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
-def _get_cache(key: str) -> Optional[Dict[str, Any]]:
-    item = _cache.get(key)
-    if not item:
-        return None
-    if datetime.utcnow() >= item["exp"]:
-        _cache.pop(key, None)
-        return None
-    return item["data"]
-
-def _set_cache(key: str, data: Dict[str, Any]):
-    _cache[key] = {"data": data, "exp": datetime.utcnow() + timedelta(seconds=CACHE_SECS)}
-
-def _pretty(resp: Any, pretty: bool) -> JSONResponse:
-    return JSONResponse(resp, media_type="application/json")
-
+# Root -> redirect to /web (if present), else show basic message
+@app.get("/", include_in_schema=False)
+def root():
+    if os.path.isdir("web"):
+        return RedirectResponse(url="/web/")
+    return {"app": APP_NAME, "version": APP_VERSION}
 
 @app.get("/health")
-async def health():
+def health():
     return {"status": "ok"}
 
-
-async def _finnhub_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    params = {**params, "token": FINNHUB_API_KEY}
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.get(f"{FINNHUB_BASE}{path}", params=params)
-        # Finnhub returns 200 even for some errors; normalize it.
-        if r.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Finnhub error {r.status_code}")
-        data = r.json()
-        if isinstance(data, dict) and data.get("error"):
-            # Finnhub explicit error
-            raise HTTPException(status_code=502, detail=data["error"])
-        return data
-
-
-def _normalize_quote(symbol: str, q: Dict[str, Any]) -> Dict[str, Any]:
-    # Finnhub quote fields: c (current), pc (prev close), h, l, o, t (ts)
-    c = q.get("c")
-    pc = q.get("pc")
-    h = q.get("h")
-    l = q.get("l")
-    o = q.get("o")
-
-    # If symbol invalid, Finnhub often returns zeros/None
-    if c in (None, 0) and pc in (None, 0) and h in (None, 0) and l in (None, 0) and o in (None, 0):
-        raise HTTPException(status_code=404, detail="Symbol not found")
-
-    pct = None
-    try:
-        if c is not None and pc not in (None, 0):
-            pct = ((float(c) - float(pc)) / float(pc)) * 100.0
-    except Exception:
-        pct = None
-
-    return {
-        "symbol": symbol.upper(),
-        "current": c,
-        "prev_close": pc,
-        "high": h,
-        "low": l,
-        "open": o,
-        "percent_change": None if pct is None or math.isnan(pct) else round(pct, 3),
-        "volume": None,  # Finnhub's quote endpoint doesn't include volume; keep field for UI
-        "raw": {"c": c, "pc": pc, "h": h, "l": l, "o": o},
-    }
-
+@app.get("/version")
+def version():
+    return {"app": APP_NAME, "version": APP_VERSION}
 
 @app.get("/quote/{symbol}")
-async def quote(symbol: str, pretty: int = Query(default=0, ge=0, le=1)):
-    key = f"quote:{symbol.upper()}"
-    cached = _get_cache(key)
-    if cached:
-        return _pretty(cached, bool(pretty))
-
-    data = await _finnhub_get("/quote", {"symbol": symbol.upper()})
-    payload = _normalize_quote(symbol, data)
-    _set_cache(key, payload)
-    return _pretty(payload, bool(pretty))
-
+def quote(symbol: str):
+    data = fetch_quote(symbol)
+    if not data:
+        # If Finnhub gave us nothing, return 404 so the UI shows a clean error
+        raise HTTPException(status_code=404, detail="Symbol not found")
+    return data
 
 @app.get("/summary/{symbol}")
-async def summary(symbol: str, pretty: int = Query(default=0, ge=0, le=1)):
-    key = f"summary:{symbol.upper()}"
-    cached = _get_cache(key)
-    if cached:
-        return _pretty(cached, bool(pretty))
+def summary(symbol: str):
+    data = fetch_quote(symbol)
+    if not data:
+        raise HTTPException(status_code=404, detail="Symbol not found")
 
-    q = await _finnhub_get("/quote", {"symbol": symbol.upper()})
-    normalized = _normalize_quote(symbol, q)
-
-    # Build a small human summary using the quote
-    cur = normalized["current"]
-    pc = normalized["prev_close"]
-    h = normalized["high"]
-    l = normalized["low"]
-    pct = normalized["percent_change"]
-
-    # Defensive formatting
-    def fmt(x):
-        return "-" if x in (None, 0) else f"{x:.3f}"
-
-    pct_str = "-" if pct is None else f"{pct:.3f}%"
-    text = (
-        f"{symbol.upper()}: {fmt(cur)} "
-        f"({pct_str} vs prev close). "
-        f"Session range: {fmt(l)}–{fmt(h)}. "
-        f"Prev close: {fmt(pc)}."
+    pct = data.get("percent_change") or 0.0
+    updown = "up" if pct >= 0 else "down"
+    msg = (
+        f"{data['symbol']}: {data['current']} ({updown} {abs(pct):.2f}% on the day). "
+        f"Session range: {data['low']}–{data['high']}. Prev close {data['prev_close']}."
     )
+    return {"symbol": data["symbol"], "summary": msg, "quote": data}
 
-    payload = {
-        "symbol": symbol.upper(),
-        "summary": text,
-        "quote": normalized,
-    }
-    _set_cache(key, payload)
-    return _pretty(payload, bool(pretty))
 
 
 
