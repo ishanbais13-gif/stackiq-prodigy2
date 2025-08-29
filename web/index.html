@@ -1,101 +1,91 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>StackIQ — Live Quote</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     :root{
-      --bg:#0f172a; --panel:#111827; --card:#0b1220; --text:#e5e7eb; --muted:#9ca3af; --brand:#2563eb; --good:#16a34a; --bad:#ef4444; --ring:#1f2937; --line:#334155;
-      --shadow:0 10px 30px rgba(0,0,0,.35);
+      --bg:#f7f8fb;--card:#ffffff;--text:#14171a;--muted:#54616d;--ring:#e5e7eb;--accent:#2563eb;--good:#16a34a;--bad:#ef4444;--chip:#e9efff;
     }
-    :root.light{
-      --bg:#f6f7fb; --panel:#ffffff; --card:#ffffff; --text:#0f172a; --muted:#6b7280; --brand:#2563eb; --good:#16a34a; --bad:#dc2626; --ring:#e5e7eb; --line:#d1d5db;
-      --shadow:0 10px 24px rgba(0,0,0,.08);
+    [data-theme="dark"]{
+      --bg:#0f1720;--card:#121a24;--text:#eef2f7;--muted:#93a1b2;--ring:#223043;--accent:#3b82f6;--good:#22c55e;--bad:#f87171;--chip:#1c2a44;
     }
     *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial}
-    .wrap{max-width:1100px;margin:48px auto;padding:0 20px}
-    .brand{font-weight:800;letter-spacing:.3px;margin-bottom:18px}
-    .row{display:grid;grid-template-columns:1fr 360px;gap:24px}
-    .panel{background:var(--panel);border-radius:16px;box-shadow:var(--shadow);padding:20px;border:1px solid var(--ring)}
-    .inputbar{display:flex;gap:12px;align-items:center;margin-bottom:16px}
-    input[type=text]{flex:1;border:1px solid var(--ring);background:var(--card);color:var(--text);border-radius:999px;padding:12px 16px;outline:none}
-    button.primary{border:none;background:var(--brand);color:#fff;border-radius:999px;padding:12px 16px;cursor:pointer}
-    .toggle{width:32px;height:32px;border-radius:50%;border:1px solid var(--ring);background:var(--card);display:inline-grid;place-items:center;cursor:pointer}
-    .card{background:var(--card);border:1px solid var(--ring);border-radius:16px;padding:16px;box-shadow:var(--shadow)}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:18px 0}
-    .stat{border:1px solid var(--ring);border-radius:10px;padding:12px}
-    .big{font-size:44px;font-weight:800;letter-spacing:.5px;margin:12px 0}
-    .chip{display:inline-flex;gap:6px;align-items:center;font-size:12px;padding:4px 8px;border-radius:999px;background:rgba(37,99,235,.12);border:1px solid var(--ring);color:var(--text)}
+    body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial,"Apple Color Emoji","Segoe UI Emoji";}
+    .wrap{max-width:1100px;margin:64px auto;padding:0 20px}
+    .brand{font-weight:800;letter-spacing:.2px}
+    .grid{display:grid;grid-template-columns:1fr 360px;gap:28px;margin-top:20px}
+    .card{background:var(--card);border:1px solid var(--ring);border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.05)}
+    .pad{padding:22px}
+    .search{display:flex;gap:8px;align-items:center}
+    .search input{flex:1;padding:12px 14px;border:1px solid var(--ring);background:transparent;border-radius:999px;color:var(--text);outline:none}
+    .btn{padding:10px 14px;border-radius:999px;background:var(--accent);color:#fff;border:none;font-weight:600;cursor:pointer}
+    .chip{display:inline-flex;align-items:center;gap:6px;background:var(--chip);padding:6px 10px;border-radius:999px;font-size:12px}
+    .kpis{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0}
+    .kpi{border:1px solid var(--ring);border-radius:12px;padding:12px}
     .muted{color:var(--muted)}
-    canvas{width:100%;height:280px}
-    .footer{margin-top:10px;font-size:12px;color:var(--muted)}
-    a{color:var(--brand);text-decoration:none}
-    @media (max-width:980px){.row{grid-template-columns:1fr}}
+    .tabs{display:flex;gap:12px;margin:12px 0}
+    .tab{padding:8px 16px;border:1px solid var(--ring);border-radius:999px;background:transparent;color:var(--text);cursor:pointer}
+    .tab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+    .row{display:flex;justify-content:space-between;align-items:center}
+    .toggle{width:28px;height:28px;border-radius:50%;border:1px solid var(--ring);display:inline-grid;place-items:center;background:var(--card);cursor:pointer}
+    .error{color:var(--bad);font-weight:600}
+    .footer{margin-top:26px;color:var(--muted);font-size:12px;text-align:center}
+    @media (max-width:1024px){.grid{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
   <div class="wrap">
-    <div class="brand">StackIQ</div>
-
-    <div class="inputbar">
-      <input id="symbol" type="text" placeholder="AAPL" value="AAPL" />
-      <button id="go" class="primary">Get Quote</button>
-      <div id="theme" class="toggle" title="Toggle theme">🌗</div>
+    <div class="row">
+      <div class="brand">StackIQ</div>
+      <div class="toggle" id="themeBtn" title="Toggle theme">🌙</div>
     </div>
 
-    <div class="row">
-      <div class="panel">
-        <div class="card">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <div id="sym" style="font-weight:800;font-size:24px;">—</div>
-            <span id="delta" class="chip muted">—</span>
+    <div class="grid">
+      <div class="card pad" id="quoteCard">
+        <div class="search">
+          <input id="symbol" placeholder="AAPL" value="AAPL" />
+          <button class="btn" id="go">Get Quote</button>
+        </div>
+
+        <div style="margin:14px 0 6px 0">
+          <div class="row">
+            <div id="title" style="font-size:28px;font-weight:800;letter-spacing:.2px;">—</div>
+            <div id="changeChip" class="chip muted">—</div>
           </div>
-          <div id="price" class="big">—</div>
+          <div id="price" style="font-size:42px;font-weight:800;margin-top:6px;">—</div>
+        </div>
 
-          <div class="grid">
-            <div class="stat">
-              <div class="muted" style="font-size:12px;">Session High</div>
-              <div id="hi" style="font-weight:700;">—</div>
-            </div>
-            <div class="stat">
-              <div class="muted" style="font-size:12px;">Session Low</div>
-              <div id="lo" style="font-weight:700;">—</div>
-            </div>
-            <div class="stat">
-              <div class="muted" style="font-size:12px;">Open</div>
-              <div id="open" style="font-weight:700;">—</div>
-            </div>
-            <div class="stat">
-              <div class="muted" style="font-size:12px;">Prev Close</div>
-              <div id="pc" style="font-weight:700;">—</div>
-            </div>
-          </div>
+        <div class="kpis">
+          <div class="kpi"><div class="muted" style="font-size:12px">Session High</div><div id="kHigh" style="font-weight:700;margin-top:4px">—</div></div>
+          <div class="kpi"><div class="muted" style="font-size:12px">Session Low</div><div id="kLow" style="font-weight:700;margin-top:4px">—</div></div>
+          <div class="kpi"><div class="muted" style="font-size:12px">Open</div><div id="kOpen" style="font-weight:700;margin-top:4px">—</div></div>
+          <div class="kpi"><div class="muted" style="font-size:12px">Prev Close</div><div id="kPrev" style="font-weight:700;margin-top:4px">—</div></div>
+        </div>
 
-          <div id="blurb" class="muted" style="margin-top:6px;">—</div>
+        <div class="tabs">
+          <button class="tab active">1M</button>
+          <button class="tab">3M</button>
+          <button class="tab">6M</button>
+          <button class="tab">1Y</button>
+        </div>
 
-          <div style="display:flex;gap:8px;margin:14px 0;">
-            <button class="primary" data-range="1m" style="background:transparent;color:var(--text);border:1px solid var(--ring)">1M</button>
-            <button class="primary" data-range="3m" style="background:var(--brand);">3M</button>
-            <button class="primary" data-range="6m" style="background:transparent;color:var(--text);border:1px solid var(--ring)">6M</button>
-            <button class="primary" data-range="1y" style="background:transparent;color:var(--text);border:1px solid var(--ring)">1Y</button>
-          </div>
+        <canvas id="stubChart" height="180" style="width:100%;border:1px solid var(--ring);border-radius:12px;background:transparent"></canvas>
 
-          <canvas id="chart"></canvas>
-
-          <div class="footer">
-            API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>
-          </div>
+        <div id="apiLine" class="muted" style="margin-top:12px;font-size:12px">
+          API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>
         </div>
       </div>
 
-      <div class="panel">
-        <div class="card">
-          <div style="font-weight:800;margin-bottom:6px;">Status</div>
-          <div class="muted" id="status">Loading…</div>
-          <div class="muted" id="ver" style="margin-top:8px;"></div>
-        </div>
+      <div class="card pad">
+        <div class="muted" style="font-weight:700;margin-bottom:8px">Status</div>
+        <div id="status">Loaded.</div>
+        <div class="muted" style="margin-top:8px">Version: <span id="version">—</span></div>
+        <div id="err" class="error" style="margin-top:10px"></div>
       </div>
     </div>
 
@@ -103,95 +93,89 @@
   </div>
 
   <script>
-    // Theme toggle (persists)
-    const root = document.documentElement;
-    const themeBtn = document.getElementById('theme');
-    const saved = localStorage.getItem('theme') || 'light';
-    if (saved === 'light') root.classList.add('light'); else root.classList.remove('light');
-    themeBtn.onclick = () => {
-      const isLight = root.classList.toggle('light');
-      localStorage.setItem('theme', isLight ? 'light' : 'dark');
-    };
+    // theme
+    (function(){
+      const key="stackiq-theme";
+      const btn=document.getElementById("themeBtn");
+      const root=document.documentElement;
+      const set=(t)=>{root.setAttribute("data-theme",t);localStorage.setItem(key,t);btn.textContent=t==="dark"?"☀️":"🌙"};
+      set(localStorage.getItem(key)||"light");
+      btn.onclick=()=>set(root.getAttribute("data-theme")==="dark"?"light":"dark");
+    })();
 
-    // Basic line chart (no libs)
-    const ctx = document.getElementById('chart').getContext('2d');
-    function drawChart(points) {
-      const w = ctx.canvas.width = ctx.canvas.clientWidth * window.devicePixelRatio;
-      const h = ctx.canvas.height = ctx.canvas.clientHeight * window.devicePixelRatio;
-      ctx.clearRect(0,0,w,h);
-      ctx.lineWidth = 2; ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--brand').trim();
-      const xs = points.map((_,i)=> i/(points.length-1));
-      const min = Math.min(...points), max = Math.max(...points);
-      const ys = points.map(v => (1-(v-min)/(max-min+1e-9)) * (h-20) + 10);
-      ctx.beginPath();
-      xs.forEach((x,i)=>{
-        const px = 20 + x*(w-40);
-        const py = ys[i];
-        if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
-      });
-      ctx.stroke();
-      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--line').trim();
-      ctx.lineWidth = 1; ctx.strokeRect(20,10,w-40,h-20);
-    }
-    const mock = (n, base=150) => Array.from({length:n},(_,i)=> base + Math.sin(i/4)*5 + Math.random()*3);
-
-    // UI bits
-    const $ = id => document.getElementById(id);
-    const symInp = $('symbol'), goBtn = $('go');
-    const fields = { sym:$('sym'), delta:$('delta'), price:$('price'), hi:$('hi'), lo:$('lo'), open:$('open'), pc:$('pc'), blurb:$('blurb'), status:$('status'), ver:$('ver') };
-
-    async function loadStatus() {
-      try {
-        const h = await fetch('/health').then(r=>r.json());
-        fields.status.textContent = h.status === 'ok' ? 'Loaded.' : 'Loading…';
-      } catch { fields.status.textContent = 'Unavailable'; }
-      try {
-        const v = await fetch('/version').then(r=>r.json());
-        fields.ver.textContent = `Version: ${v.app} ${v.version}`;
-      } catch { fields.ver.textContent = ''; }
-    }
-
-    async function loadQuote(symbol) {
-      const s = (symbol||'').trim();
-      if (!s) return;
-      try {
-        const q = await fetch(`/quote/${encodeURIComponent(s)}`).then(r=>{
-          if (!r.ok) throw new Error(`Failed to load quote: /quote/${s} -> ${r.status}`);
-          return r.json();
+    // tiny line stub so the card isn’t empty; not a real chart lib
+    (function(){
+      const el=document.getElementById("stubChart");
+      const ctx=el.getContext("2d");
+      const H=el.height, W=el.clientWidth;
+      el.width=W;
+      function draw(values){
+        ctx.clearRect(0,0,W,H);
+        const min=Math.min(...values), max=Math.max(...values);
+        const scale=(v)=> H-( (v-min)/(max-min||1) )*(H-16)-8;
+        ctx.beginPath();
+        values.forEach((v,i)=>{
+          const x = (W/(values.length-1))*i;
+          const y = scale(v);
+          if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
         });
-        const up = (q.percent_change||0) >= 0;
-        fields.sym.textContent = q.symbol;
-        fields.price.textContent = q.current.toFixed(3);
-        fields.hi.textContent = q.high.toFixed(2);
-        fields.lo.textContent = q.low.toFixed(2);
-        fields.open.textContent = q.open.toFixed(2);
-        fields.pc.textContent = q.prev_close.toFixed(2);
-        fields.delta.textContent = `${up? '▲':'▼'} ${Math.abs(q.percent_change).toFixed(2)}%`;
-        fields.delta.style.background = `rgba(${up?'22,163,74':'239,68,68'},.15)`;
-        fields.delta.style.borderColor = 'var(--ring)';
-        fields.blurb.textContent = `${q.symbol}: ${q.current} (${up?'up':'down'} ${Math.abs(q.percent_change).toFixed(2)}% on the day). `
-          + `Session range: ${q.low}–${q.high}. Prev close: ${q.prev_close}.`;
-      } catch (e) {
-        fields.blurb.textContent = String(e.message || e);
-        fields.price.textContent = '—';
-        fields.hi.textContent = fields.lo.textContent = fields.open.textContent = fields.pc.textContent = '—';
-        fields.delta.textContent = '—';
+        ctx.lineWidth=2; ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--accent'); ctx.stroke();
+      }
+      // random stub
+      draw([5,9,7,6,8,12,10,11,9,8,10,13,12,9]);
+      window.__drawStub = draw;
+    })();
+
+    async function getJSON(url){
+      const r = await fetch(url);
+      if(!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
+    }
+
+    async function refresh(){
+      const sym = (document.getElementById("symbol").value || "AAPL").trim();
+      document.getElementById("err").textContent = "";
+      try{
+        const [q, meta] = await Promise.all([
+          getJSON(`/quote/${encodeURIComponent(sym)}`),
+          getJSON(`/version`)
+        ]);
+
+        // paint
+        document.getElementById("version").textContent = `stackiq-web ${meta.version}`;
+        document.getElementById("title").textContent = q.symbol;
+        document.getElementById("price").textContent = q.current?.toFixed(3);
+        document.getElementById("kHigh").textContent = q.high?.toFixed(3);
+        document.getElementById("kLow").textContent  = q.low?.toFixed(3);
+        document.getElementById("kOpen").textContent = q.open?.toFixed(3);
+        document.getElementById("kPrev").textContent = q.prev_close?.toFixed(3);
+
+        const chip = document.getElementById("changeChip");
+        const dir = (q.percent_change||0) >= 0 ? "▲" : "▼";
+        const color = (q.percent_change||0) >= 0 ? "var(--good)" : "var(--bad)";
+        chip.textContent = `${dir} ${q.percent_change?.toFixed(2)}%`;
+        chip.style.color = color;
+
+        // simple fake values so the stub chart has a trend close to price
+        window.__drawStub([q.open, (q.open+q.low)/2, q.low, (q.low+q.high)/2, q.high, (q.high+q.current)/2, q.current].map(v=>Number(v||0)));
+      }catch(e){
+        // show version anyway so you can tell the backend is alive
+        try{
+          const meta = await getJSON(`/version`);
+          document.getElementById("version").textContent = `stackiq-web ${meta.version}`;
+        }catch(_){}
+        document.getElementById("err").textContent = `Failed to load quote: /quote/${sym} → ${e.message}`;
       }
     }
 
-    function setRange(n){ drawChart(mock(42, 150 + (Math.random()*6-3))); }
-    document.querySelectorAll('button[data-range]').forEach(b=> b.onclick = ()=> setRange(b.dataset.range));
-
-    goBtn.onclick = () => loadQuote(symInp.value);
-    symInp.addEventListener('keydown', e => { if (e.key === 'Enter') loadQuote(symInp.value); });
-
+    document.getElementById("go").onclick = refresh;
+    document.getElementById("symbol").addEventListener("keydown",(e)=>{if(e.key==="Enter"){refresh();}});
     // initial
-    loadStatus();
-    setRange('3m');
-    loadQuote(symInp.value);
+    refresh();
   </script>
 </body>
 </html>
+
 
 
 
