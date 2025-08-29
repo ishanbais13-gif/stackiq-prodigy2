@@ -1,73 +1,95 @@
-import json
 import os
-import ssl
-import urllib.parse
-import urllib.request
+import time
+import requests
 
-# Finnhub only. NO Yahoo. This file must never crash at import time.
+FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
-
-# Build a very safe SSL context (Azure can be picky on some stacks)
-_ssl_ctx = ssl.create_default_context()
-
-def _http_get_json(url: str):
-    """Tiny helper that returns parsed JSON or None (never raises)."""
+def _get(url: str, params: dict):
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "stackiq-web/1.0"})
-        with urllib.request.urlopen(req, context=_ssl_ctx, timeout=10) as resp:
-            data = resp.read()
-        return json.loads(data.decode("utf-8"))
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            return None
+        return r.json()
     except Exception:
         return None
 
 def fetch_quote(symbol: str):
     """
-    Return a normalized dict for the given symbol (AAPL, MSFT, etc.) using Finnhub.
-    If anything fails (no key, bad symbol, network), return None.
+    Returns a normalized quote dict or None.
+    Uses Finnhub's /quote endpoint.
     """
-    if not symbol:
+    if not FINNHUB_KEY:
         return None
 
-    sym = symbol.upper().strip()
-
-    # Need a key to call Finnhub. If missing, fail gracefully (UI will show 404).
-    if not FINNHUB_API_KEY:
+    url = "https://finnhub.io/api/v1/quote"
+    params = {"symbol": symbol.upper(), "token": FINNHUB_KEY}
+    data = _get(url, params)
+    if not data or "c" not in data:
         return None
 
-    # Finnhub quote endpoint: fields: c (current), pc (prev close),
-    # h (high), l (low), o (open). A valid response also has "t" timestamp.
-    qs = urllib.parse.urlencode({"symbol": sym, "token": FINNHUB_API_KEY})
-    url = f"https://finnhub.io/api/v1/quote?{qs}"
-
-    payload = _http_get_json(url)
-    if not payload or not isinstance(payload, dict):
+    try:
+        current = float(data.get("c") or 0)
+        prev_close = float(data.get("pc") or 0)
+        high = float(data.get("h") or 0)
+        low = float(data.get("l") or 0)
+        open_ = float(data.get("o") or 0)
+        pct = ((current - prev_close) / prev_close * 100) if prev_close else 0.0
+    except Exception:
         return None
-
-    # When symbol is invalid, Finnhub often returns zeros; guard against that.
-    c = float(payload.get("c") or 0.0)
-    pc = float(payload.get("pc") or 0.0)
-    h = float(payload.get("h") or 0.0)
-    l = float(payload.get("l") or 0.0)
-    o = float(payload.get("o") or 0.0)
-
-    # If everything is zero, treat as not found.
-    if c == 0.0 and pc == 0.0 and h == 0.0 and l == 0.0 and o == 0.0:
-        return None
-
-    pct = ( (c - pc) / pc * 100.0 ) if pc else 0.0
 
     return {
-        "symbol": sym,
-        "current": round(c, 3),
-        "prev_close": round(pc, 3),
-        "high": round(h, 3),
-        "low": round(l, 3),
-        "open": round(o, 3),
+        "symbol": symbol.upper(),
+        "current": current,
+        "prev_close": prev_close,
+        "high": high,
+        "low": low,
+        "open": open_,
         "percent_change": round(pct, 3),
-        "volume": None,  # Finnhub /quote doesn't include volume; leave None.
-        "raw": {"c": c, "pc": pc, "h": h, "l": l, "o": o},
+        "volume": None,
+        "raw": {"c": current, "pc": prev_close, "h": high, "l": low, "o": open_},
     }
+
+def fetch_candles(symbol: str, range_: str = "1M"):
+    """
+    Return daily candles for the symbol as list of {t, o, h, l, c, v}.
+    Supported ranges: 1M, 3M, 6M, 1Y
+    """
+    if not FINNHUB_KEY:
+        return []
+
+    rng = (range_ or "1M").upper()
+    days = {"1M": 30, "3M": 90, "6M": 180, "1Y": 365}.get(rng, 30)
+
+    now = int(time.time())
+    _from = now - days * 24 * 60 * 60
+
+    url = "https://finnhub.io/api/v1/stock/candle"
+    params = {
+        "symbol": symbol.upper(),
+        "resolution": "D",
+        "from": _from,
+        "to": now,
+        "token": FINNHUB_KEY,
+    }
+    data = _get(url, params)
+    if not data or data.get("s") != "ok":
+        return []
+
+    candles = []
+    try:
+        for i in range(len(data["t"])):
+            candles.append({
+                "t": data["t"][i],
+                "o": data["o"][i],
+                "h": data["h"][i],
+                "l": data["l"][i],
+                "c": data["c"][i],
+                "v": data["v"][i],
+            })
+    except Exception:
+        return []
+
+    return candles
 
 
 
