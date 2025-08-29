@@ -1,80 +1,74 @@
+import json
 import os
-import requests
-from typing import Optional, Dict, Any
+import ssl
+import urllib.parse
+import urllib.request
+
+# Finnhub only. NO Yahoo. This file must never crash at import time.
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
-FINNHUB_URL = "https://finnhub.io/api/v1/quote"
 
-def _normalize(symbol: str) -> str:
-    """
-    Accepts 'AAPL', 'aapl', 'AAPL.US', etc. Returns the raw ticker FINNHUB expects.
-    For US tickers, FINNHUB just wants 'AAPL'.
-    If the user gave 'AAPL.US', return 'AAPL'.
-    """
-    s = (symbol or "").strip().upper()
-    if not s:
-        return ""
-    if s.endswith(".US"):
-        s = s[:-3]
-    return s
+# Build a very safe SSL context (Azure can be picky on some stacks)
+_ssl_ctx = ssl.create_default_context()
 
-def fetch_quote(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    Calls Finnhub /quote and maps fields to a consistent structure.
-    Returns None on any failure we can't recover from.
-    """
-    sym = _normalize(symbol)
-    if not sym or not FINNHUB_API_KEY:
-        return None
-
+def _http_get_json(url: str):
+    """Tiny helper that returns parsed JSON or None (never raises)."""
     try:
-        r = requests.get(
-            FINNHUB_URL,
-            params={"symbol": sym, "token": FINNHUB_API_KEY},
-            timeout=10,
-        )
+        req = urllib.request.Request(url, headers={"User-Agent": "stackiq-web/1.0"})
+        with urllib.request.urlopen(req, context=_ssl_ctx, timeout=10) as resp:
+            data = resp.read()
+        return json.loads(data.decode("utf-8"))
     except Exception:
         return None
 
-    if r.status_code != 200:
+def fetch_quote(symbol: str):
+    """
+    Return a normalized dict for the given symbol (AAPL, MSFT, etc.) using Finnhub.
+    If anything fails (no key, bad symbol, network), return None.
+    """
+    if not symbol:
         return None
 
-    data = r.json() or {}
-    # Finnhub returns: c (current), pc (prev close), h, l, o, t (unix time)
-    # On error it may return all zeros.
-    if not isinstance(data, dict) or ("c" not in data):
+    sym = symbol.upper().strip()
+
+    # Need a key to call Finnhub. If missing, fail gracefully (UI will show 404).
+    if not FINNHUB_API_KEY:
         return None
 
-    try:
-        current = float(data.get("c") or 0.0)
-        prev_close = float(data.get("pc") or 0.0)
-        high = float(data.get("h") or 0.0)
-        low = float(data.get("l") or 0.0)
-        open_p = float(data.get("o") or 0.0)
-    except Exception:
+    # Finnhub quote endpoint: fields: c (current), pc (prev close),
+    # h (high), l (low), o (open). A valid response also has "t" timestamp.
+    qs = urllib.parse.urlencode({"symbol": sym, "token": FINNHUB_API_KEY})
+    url = f"https://finnhub.io/api/v1/quote?{qs}"
+
+    payload = _http_get_json(url)
+    if not payload or not isinstance(payload, dict):
         return None
 
-    if current == 0.0 and prev_close == 0.0 and high == 0.0 and low == 0.0:
-        # Finnhub sometimes returns zeros for unknown symbols / off-hours + no data
+    # When symbol is invalid, Finnhub often returns zeros; guard against that.
+    c = float(payload.get("c") or 0.0)
+    pc = float(payload.get("pc") or 0.0)
+    h = float(payload.get("h") or 0.0)
+    l = float(payload.get("l") or 0.0)
+    o = float(payload.get("o") or 0.0)
+
+    # If everything is zero, treat as not found.
+    if c == 0.0 and pc == 0.0 and h == 0.0 and l == 0.0 and o == 0.0:
         return None
 
-    pct_change = 0.0
-    if prev_close:
-        pct_change = ((current - prev_close) / prev_close) * 100.0
+    pct = ( (c - pc) / pc * 100.0 ) if pc else 0.0
 
     return {
         "symbol": sym,
-        "current": round(current, 3),
-        "prev_close": round(prev_close, 3),
-        "high": round(high, 3),
-        "low": round(low, 3),
-        "open": round(open_p, 3),
-        "percent_change": round(pct_change, 3),
-        "volume": None,  # not in /quote response; leave None for now
-        "raw": {
-            "c": current, "pc": prev_close, "h": high, "l": low, "o": open_p,
-        },
+        "current": round(c, 3),
+        "prev_close": round(pc, 3),
+        "high": round(h, 3),
+        "low": round(l, 3),
+        "open": round(o, 3),
+        "percent_change": round(pct, 3),
+        "volume": None,  # Finnhub /quote doesn't include volume; leave None.
+        "raw": {"c": c, "pc": pc, "h": h, "l": l, "o": o},
     }
+
 
 
 
