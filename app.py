@@ -1,20 +1,19 @@
 import os
-import logging
+import os.path as p
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse, JSONResponse
+
 from data_fetcher import fetch_quote
 
 APP_NAME = "stackiq-web"
 APP_VERSION = "1.0.0"
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(APP_NAME)
-
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-# CORS (keep open for now)
+# CORS (simple/lenient)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,15 +22,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the web UI at /web
-if os.path.isdir("web"):
+# Serve the web UI at /web/
+if p.isdir("web"):
     app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
-# Root -> redirect to /web
+# Root -> redirect to /web/
 @app.get("/", include_in_schema=False)
 def root():
-    # If /web exists, go there; otherwise show minimal message
-    if os.path.isdir("web"):
+    if p.isdir("web"):
         return RedirectResponse(url="/web/")
     return JSONResponse({"app": APP_NAME, "version": APP_VERSION})
 
@@ -47,7 +45,7 @@ def version():
 def quote(symbol: str):
     data = fetch_quote(symbol)
     if not data:
-        # Keep this message stable so the UI can show a friendly error
+        # Keep it 404 so the UI shows a clean “not found” msg (no app error page)
         raise HTTPException(status_code=404, detail="Symbol not found")
     return data
 
@@ -58,12 +56,15 @@ def summary(symbol: str):
         raise HTTPException(status_code=404, detail="Symbol not found")
 
     pct = data.get("percent_change", 0.0)
-    updown = "up" if pct or 0 >= 0 else "down"
+    updown = "up" if pct >= 0 else "down"
     msg = (
-        f"{data['symbol']}: {data['current']} ({updown} {abs(pct):.2f}% on the day). "
-        f"Session range: {data['low']}–{data['high']}. Prev close: {data['prev_close']}."
+        f"{data['symbol']}: {data['current']:.3f} "
+        f"({updown} {abs(pct):.2f}% on the day). "
+        f"Session range: {data['low']:.3f}–{data['high']:.3f}. "
+        f"Prev close: {data['prev_close']:.3f}."
     )
     return {"symbol": data["symbol"], "summary": msg, "quote": data}
+
 
 
 
