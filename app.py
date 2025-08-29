@@ -1,12 +1,9 @@
 import os
-from pathlib import Path
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
-
-from data_fetcher import fetch_quote
+from data_fetcher import fetch_quote, debug_stooq
 
 APP_NAME = "stackiq-web"
 APP_VERSION = "1.0.0"
@@ -22,14 +19,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the web UI at /web/ (absolute path so it works on Azure)
-WEB_DIR = (Path(__file__).resolve().parent / "web")
-if WEB_DIR.exists():
-    app.mount(
-        "/web/",
-        StaticFiles(directory=str(WEB_DIR), html=True),
-        name="web",
-    )
+# Serve the web UI at /web/
+if os.path.isdir("web"):
+    # html=True lets /web/ serve index.html automatically
+    app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
 # Root → redirect to /web/
 @app.get("/", include_in_schema=False)
@@ -56,16 +49,19 @@ def summary(symbol: str):
     data = fetch_quote(symbol)
     if not data:
         raise HTTPException(status_code=404, detail="Symbol not found")
-
-    pct = data.get("percent_change")
-    updown = "up" if (pct or 0) >= 0 else "down"
+    pct = data.get("percent_change", 0)
+    updown = "up" if pct or 0 >= 0 else "down"
     msg = (
-        f"{data['symbol']}: {data['current']} "
-        f"({updown} {abs(pct):.2f}% on the day). "
-        f"Session range: {data['low']}–{data['high']}. "
-        f"Prev close: {data['prev_close']}."
+        f"{data['symbol']}: {data['current']} ({updown} {abs(pct):.2f}% on the day). "
+        f"Session range: {data['low']}–{data['high']}. Prev close: {data['prev_close']}."
     )
     return {"symbol": data["symbol"], "summary": msg, "quote": data}
+
+# --- Debug helper (optional; helps when provider misbehaves) ---
+@app.get("/debug/stooq/{symbol}")
+def debug_stooq_endpoint(symbol: str):
+    return debug_stooq(symbol)
+
 
 
 
