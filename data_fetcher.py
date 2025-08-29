@@ -1,23 +1,13 @@
-import csv
-import io
 import requests
 
-# Try both stooq domains and request the classic CSV with explicit fields
-STOOQ_URLS = [
-    "https://stooq.com/q/l/?s={sym}&f=sd2t2ohlcv&h&e=csv",
-    "https://stooq.pl/q/l/?s={sym}&f=sd2t2ohlcv&h&e=csv",
-]
-
-UA = {
-    "User-Agent": "Mozilla/5.0 (compatible; StackIQ/1.0; +https://example.com)"
-}
+STOOQ_URL = "https://stooq.com/q/l/?s={symbol}&i=d"
 
 
 def _normalize(symbol: str) -> str:
     """
-    Normalize to stooq US ticker format.
-      - lowercase
-      - append '.us' if no region suffix present
+    Stooq expects tickers like aapl.us (lowercase).
+    If user types AAPL or aapl, convert to aapl.us.
+    If the user already includes a suffix (e.g., .us, .gb), keep it.
     """
     s = (symbol or "").strip().lower()
     if not s:
@@ -28,57 +18,56 @@ def _normalize(symbol: str) -> str:
 
 
 def fetch_quote(symbol: str):
+    """
+    Returns a dict like:
+    {
+      "symbol": "AAPL",
+      "current": 232.56,
+      "prev_close": 230.49,
+      "high": 233.41,
+      "low": 229.335,
+      "open": 230.82,
+      "percent_change": 0.89,
+      "volume": None,
+      "raw": { "c": ..., "pc": ..., "h": ..., "l": ..., "o": ... }
+    }
+    or None if not found / bad response.
+    """
     sym_norm = _normalize(symbol)
     if not sym_norm:
         return None
 
-    text = None
-    # Try both URLs (and succeed fast)
-    for url in STOOQ_URLS:
-        try:
-            r = requests.get(url.format(sym=sym_norm), headers=UA, timeout=10)
-            if r.status_code == 200 and r.text and "Symbol" in r.text:
-                text = r.text
-                break
-        except Exception:
-            continue
-
-    if not text:
-        return None
-
-    # Parse CSV
     try:
-        reader = csv.DictReader(io.StringIO(text))
-        row = next(reader, None)
-        if not row:
+        r = requests.get(STOOQ_URL.format(symbol=sym_norm), timeout=10)
+        if r.status_code != 200 or not r.text:
             return None
 
-        # Stooq returns 'N/D' when data isn't available
-        def _num(v):
-            if v is None:
-                return None
-            v = v.strip()
-            if not v or v.upper() == "N/D":
-                return None
-            return float(v)
-
-        raw_symbol = (row.get("Symbol") or "").upper()
-        open_p = _num(row.get("Open"))
-        high = _num(row.get("High"))
-        low = _num(row.get("Low"))
-        close = _num(row.get("Close"))
-
-        if not raw_symbol or open_p is None or high is None or low is None or close is None:
+        # CSV lines; example:
+        # Symbol,Date,Time,Open,High,Low,Close,Volume
+        # aapl.us,2024-08-28,22:00:05,230.82,233.41,229.335,232.56,0
+        lines = [ln.strip() for ln in r.text.splitlines() if ln.strip()]
+        if len(lines) < 2:
             return None
 
-        # Stooq CSV here does not include prior close; use open as an approximation
+        parts = lines[1].split(",")
+        if len(parts) < 7:
+            return None
+
+        raw_symbol = parts[0]      # e.g., aapl.us
+        open_p = float(parts[3])
+        high = float(parts[4])
+        low = float(parts[5])
+        close = float(parts[6])
+
+        # Stooq "d" interval doesn’t include prev close; use open as approx.
         prev_close = open_p
 
+        symbol_out = raw_symbol.split(".")[0].upper()
         current = close
         pct_change = ((current - prev_close) / prev_close * 100) if prev_close else 0.0
 
         return {
-            "symbol": raw_symbol.split(".")[0],  # e.g., AAPL from AAPL.US
+            "symbol": symbol_out,
             "current": round(current, 3),
             "prev_close": round(prev_close, 3),
             "high": round(high, 3),
