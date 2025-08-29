@@ -1,121 +1,81 @@
 import os
-import time
-from typing import Optional, Dict, Any
 import requests
+from typing import Optional, Dict, Any
 
-# ===== Config =====
-# Set your key in the environment as FINNHUB_KEY (Azure App Settings → Configuration)
-_FINNHUB_KEY = os.getenv("FINNHUB_KEY", "").strip()
-_FINNHUB_URL = "https://finnhub.io/api/v1/quote?symbol={symbol}&token={token}"
-
-# short cache to smooth over transient errors / rate limits
-_CACHE: Dict[str, Any] = {}  # key -> (expires_at_epoch, payload)
-_TTL_SECONDS = 12
-
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+FINNHUB_URL = "https://finnhub.io/api/v1/quote"
 
 def _normalize(symbol: str) -> str:
     """
-    Finnhub expects plain tickers like AAPL, MSFT, TSLA.
-    Uppercase and trim. If user typed 'aapl.us', keep AAPL part.
+    Accepts 'AAPL', 'aapl', 'AAPL.US', etc. Returns the raw ticker FINNHUB expects.
+    For US tickers, FINNHUB just wants 'AAPL'.
+    If the user gave 'AAPL.US', return 'AAPL'.
     """
     s = (symbol or "").strip().upper()
-    # strip common suffixes users might type
-    for suf in (".US", "-US", ".NYSE", ".NASDAQ"):
-        if s.endswith(suf):
-            s = s[: -len(suf)]
-    if "." in s:  # e.g., "AAPL.US" -> "AAPL"
-        s = s.split(".")[0]
+    if not s:
+        return ""
+    if s.endswith(".US"):
+        s = s[:-3]
     return s
 
-
-def _fetch_finnhub(symbol: str, timeout: float = 8.0) -> Optional[Dict[str, Any]]:
+def fetch_quote(symbol: str) -> Optional[Dict[str, Any]]:
     """
-    Call Finnhub's /quote endpoint and map to our unified schema.
-    Returns None on failure or if no data.
+    Calls Finnhub /quote and maps fields to a consistent structure.
+    Returns None on any failure we can't recover from.
     """
-    if not _FINNHUB_KEY:
-        # Not configured – treat as no data so API returns 404 instead of 500
+    sym = _normalize(symbol)
+    if not sym or not FINNHUB_API_KEY:
         return None
 
-    url = _FINNHUB_URL.format(symbol=symbol, token=_FINNHUB_KEY)
-    headers = {"User-Agent": "stackiq-web/1.0"}
     try:
-        r = requests.get(url, headers=headers, timeout=timeout)
+        r = requests.get(
+            FINNHUB_URL,
+            params={"symbol": sym, "token": FINNHUB_API_KEY},
+            timeout=10,
+        )
     except Exception:
         return None
 
     if r.status_code != 200:
         return None
 
+    data = r.json() or {}
+    # Finnhub returns: c (current), pc (prev close), h, l, o, t (unix time)
+    # On error it may return all zeros.
+    if not isinstance(data, dict) or ("c" not in data):
+        return None
+
     try:
-        q = r.json() or {}
-        # Finnhub fields: c=current, d=change, dp=percent, h=high, l=low, o=open, pc=prev close, t=ts
-        c = q.get("c")
-        pc = q.get("pc")
-        if c in (None, 0) and pc in (None, 0):
-            return None
-
-        high = q.get("h")
-        low = q.get("l")
-        open_p = q.get("o")
-        dp = q.get("dp")  # Finnhub already gives percent change
-        if dp is None and (c is not None and pc not in (None, 0)):
-            try:
-                dp = ((float(c) - float(pc)) / float(pc)) * 100.0
-            except Exception:
-                dp = 0.0
-
-        out = {
-            "symbol": symbol,
-            "current": round(float(c), 3) if c is not None else None,
-            "prev_close": round(float(pc), 3) if pc is not None else None,
-            "high": round(float(high), 3) if high is not None else None,
-            "low": round(float(low), 3) if low is not None else None,
-            "open": round(float(open_p), 3) if open_p is not None else None,
-            "percent_change": round(float(dp), 3) if dp is not None else 0.0,
-            "volume": None,  # Finnhub /quote does not return volume
-            "raw": {
-                "c": c,
-                "pc": pc,
-                "h": high,
-                "l": low,
-                "o": open_p,
-                "dp": dp,
-                "t": q.get("t"),
-            },
-        }
-        return out
+        current = float(data.get("c") or 0.0)
+        prev_close = float(data.get("pc") or 0.0)
+        high = float(data.get("h") or 0.0)
+        low = float(data.get("l") or 0.0)
+        open_p = float(data.get("o") or 0.0)
     except Exception:
         return None
 
-
-def fetch_quote(symbol: str) -> Optional[Dict[str, Any]]:
-    """
-    Public function used by API routes.
-    - normalize input
-    - short cache
-    - quick retry against Finnhub to ride out hiccups
-    """
-    sym = _normalize(symbol)
-    if not sym:
+    if current == 0.0 and prev_close == 0.0 and high == 0.0 and low == 0.0:
+        # Finnhub sometimes returns zeros for unknown symbols / off-hours + no data
         return None
 
-    now = time.time()
-    cached = _CACHE.get(sym)
-    if cached and cached[0] > now:
-        return cached[1]
+    pct_change = 0.0
+    if prev_close:
+        pct_change = ((current - prev_close) / prev_close) * 100.0
 
-    last = None
-    for _ in range(2):  # tiny retry
-        data = _fetch_finnhub(sym)
-        if data:
-            last = data
-            break
-        time.sleep(0.25)
+    return {
+        "symbol": sym,
+        "current": round(current, 3),
+        "prev_close": round(prev_close, 3),
+        "high": round(high, 3),
+        "low": round(low, 3),
+        "open": round(open_p, 3),
+        "percent_change": round(pct_change, 3),
+        "volume": None,  # not in /quote response; leave None for now
+        "raw": {
+            "c": current, "pc": prev_close, "h": high, "l": low, "o": open_p,
+        },
+    }
 
-    if last:
-        _CACHE[sym] = (now + _TTL_SECONDS, last)
-    return last
 
 
 
