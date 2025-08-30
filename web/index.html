@@ -1,240 +1,339 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>StackIQ — Live Quote</title>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>StackIQ — Live Quote</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --panel-2: #0b1220;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #3b82f6;
+      --ok: #10b981;
+      --bad: #ef4444;
+      --card-radius: 16px;
+    }
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    .container {
+      max-width: 1100px;
+      margin: 48px auto;
+      padding: 0 16px;
+    }
+    h1 { font-size: 22px; letter-spacing: .3px; margin: 0 0 18px; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr .9fr;
+      gap: 24px;
+    }
+    .card {
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: var(--card-radius);
+      box-shadow: 0 10px 24px rgba(0,0,0,.25);
+      padding: 18px;
+    }
+    .row { display: flex; align-items: center; gap: 10px; }
+    .grow { flex: 1 1 auto; }
+    input[type="text"]{
+      width: 100%;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.08);
+      background: rgba(255,255,255,.04);
+      color: var(--text);
+      outline: none;
+    }
+    button {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 10px 14px;
+      border-radius: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,.12);
+      color: var(--text);
+    }
+    .kv {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 14px;
+      margin-bottom: 12px;
+    }
+    .kv .box {
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 12px;
+      padding: 12px;
+      min-height: 62px;
+    }
+    .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .val { font-size: 18px; font-weight: 700; }
+    .api-note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+    .status .ok { color: var(--ok); }
+    .status .bad { color: var(--bad); }
+    .range {
+      display: flex; gap: 8px; margin: 12px 0 8px;
+      flex-wrap: wrap;
+    }
+    .range button { padding: 6px 10px; border-radius: 999px; font-size: 12px; }
+    .range button.active { background: rgba(59,130,246,.2); border: 1px solid var(--accent); }
+    canvas { width: 100%; height: 240px; display: block; }
+    .footer { margin-top: 20px; color: var(--muted); font-size: 12px; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>StackIQ</h1>
 
-    <!-- Inline styles so we only need this one file -->
-    <style>
-      :root {
-        --bg: #0b1220;
-        --card: #121b2c;
-        --muted: #a8b3cf;
-        --text: #e9eefb;
-        --accent: #4f8cff;
-        --good: #3ecf8e;
-        --bad: #ff6b6b;
-        --line: #2a3650;
-      }
-      * { box-sizing: border-box; }
-      html, body { height: 100%; }
-      body {
-        margin: 0;
-        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-        background: var(--bg);
-        color: var(--text);
-      }
-      .container {
-        max-width: 1100px;
-        margin: 48px auto;
-        padding: 0 20px;
-        display: grid;
-        grid-template-columns: 1.2fr 0.8fr;
-        gap: 24px;
-      }
-      .card {
-        background: var(--card);
-        border-radius: 14px;
-        padding: 20px;
-        box-shadow: 0 10px 30px rgba(0,0,0,.25);
-      }
-      .header {
-        display: flex;
-        align-items: baseline;
-        justify-content: space-between;
-        margin-bottom: 16px;
-      }
-      h1 { margin: 0; font-size: 22px; }
-      .version { color: var(--muted); font-size: 13px; }
-      .row { display: flex; gap: 10px; margin-bottom: 16px; }
-      .input {
-        flex: 1; padding: 12px 14px; border-radius: 10px;
-        border: 1px solid var(--line); background: #0e172a; color: var(--text); outline: none;
-      }
-      .btn {
-        padding: 12px 14px; border-radius: 10px; border: 0;
-        color: white; background: var(--accent); cursor: pointer; font-weight: 600;
-      }
-      .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-bottom: 16px; }
-      .stat { background: #0e172a; border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
-      .label { color: var(--muted); font-size: 12px; }
-      .value { font-size: 18px; margin-top: 6px; }
-      .chart-card { background: #0e172a; border: 1px solid var(--line); border-radius: 12px; padding: 10px; }
-      .api-note { color: var(--muted); font-size: 12px; margin-top: 6px; }
-      .status-card h2 { margin: 0 0 12px 0; font-size: 18px; }
-      .badge {
-        display: inline-block; padding: 6px 10px; border-radius: 999px; font-size: 12px; font-weight: 700;
-        background: #222b44; border: 1px solid var(--line);
-      }
-      .badge.ok { background: rgba(62,207,142,.2); border-color: var(--good); color: var(--good); }
-      .badge.fail { background: rgba(255,107,107,.2); border-color: var(--bad); color: var(--bad); }
-      .status-log {
-        margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line);
-        color: var(--muted); font-size: 13px; white-space: pre-wrap; word-break: break-word;
-        max-height: 240px; overflow: auto;
-      }
-      @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
-    </style>
-  </head>
-
-  <body>
-    <main class="container">
-      <section class="card query-card">
-        <div class="header">
-          <h1>StackIQ</h1>
-          <div class="version" id="version">Loading…</div>
-        </div>
-
+    <div class="grid">
+      <!-- Left: quote + chart -->
+      <div class="card">
         <div class="row">
-          <input id="symbolInput" class="input" placeholder="AAPL" value="AAPL" autocomplete="off" spellcheck="false" />
-          <button id="getQuoteBtn" class="btn">Get Quote</button>
+          <input id="symbol" type="text" placeholder="AAPL" value="AAPL" class="grow" />
+          <button id="getQuoteBtn">Get Quote</button>
+          <button id="sparkBtn" class="secondary" title="Refresh chart only">↻</button>
         </div>
 
-        <div class="grid">
-          <div class="stat"><div class="label">Session High</div><div class="value" id="high">—</div></div>
-          <div class="stat"><div class="label">Session Low</div><div class="value" id="low">—</div></div>
-          <div class="stat"><div class="label">Open</div><div class="value" id="open">—</div></div>
-          <div class="stat"><div class="label">Prev Close</div><div class="value" id="prevClose">—</div></div>
+        <div class="kv">
+          <div class="box">
+            <div class="label">Session High</div>
+            <div class="val" id="high">—</div>
+          </div>
+          <div class="box">
+            <div class="label">Session Low</div>
+            <div class="val" id="low">—</div>
+          </div>
+          <div class="box">
+            <div class="label">Open</div>
+            <div class="val" id="open">—</div>
+          </div>
+          <div class="box">
+            <div class="label">Prev Close</div>
+            <div class="val" id="prev">—</div>
+          </div>
         </div>
 
-        <div class="chart-card">
-          <canvas id="chart" height="140"></canvas>
-          <div class="api-note">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code></div>
+        <div class="range" id="rangeBtns">
+          <button data-range="1M" class="active">1M</button>
+          <button data-range="3M">3M</button>
+          <button data-range="6M">6M</button>
+          <button data-range="1Y">1Y</button>
         </div>
-      </section>
 
-      <section class="card status-card">
-        <h2>Status</h2>
-        <div id="healthBadge" class="badge">Loading…</div>
-        <div id="statusLog" class="status-log"></div>
-      </section>
-    </main>
+        <canvas id="chart" width="900" height="260" aria-label="Price chart"></canvas>
+        <div class="api-note">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>, <code>/history/{symbol}</code></div>
+      </div>
 
-    <!-- Inline JS -->
-    <script type="module">
-      const els = {
-        version: document.getElementById("version"),
-        healthBadge: document.getElementById("healthBadge"),
-        log: document.getElementById("statusLog"),
-        input: document.getElementById("symbolInput"),
-        btn: document.getElementById("getQuoteBtn"),
-        high: document.getElementById("high"),
-        low: document.getElementById("low"),
-        open: document.getElementById("open"),
-        prevClose: document.getElementById("prevClose"),
-        chart: document.getElementById("chart"),
-      };
+      <!-- Right: status -->
+      <div class="card status">
+        <div class="label">Status</div>
+        <div id="statusLine" class="ok">Loaded.</div>
+        <div class="label" style="margin-top:12px">Version</div>
+        <div id="version">—</div>
+        <div class="label" style="margin-top:12px">Summary</div>
+        <div id="summary">—</div>
+      </div>
+    </div>
 
-      const log = (msg) => {
-        const ts = new Date().toLocaleTimeString();
-        els.log.textContent = \`[\${ts}] \${msg}\n\` + els.log.textContent;
-      };
+    <div class="footer">© 2025 StackIQ · minimal market data UI</div>
+  </div>
 
-      async function getJSON(path) {
-        const res = await fetch(path, { cache: "no-store" });
-        if (!res.ok) throw new Error(\`\${res.status} \${res.statusText}\`);
-        return res.json();
+  <script>
+    // ---------- helpers ----------
+    async function getJSON(url) {
+      const r = await fetch(url, { headers: { "Accept": "application/json" } });
+      if (!r.ok) {
+        let detail = "Request failed";
+        try {
+          const j = await r.json();
+          detail = j?.detail || detail;
+        } catch (_) {}
+        const err = new Error(`${r.status}: ${detail}`);
+        err.status = r.status;
+        throw err;
+      }
+      return r.json();
+    }
+
+    function fmt(n) {
+      if (n == null || isNaN(n)) return "—";
+      return Number(n).toFixed(3);
+    }
+
+    function setStatus(msg, isErr=false) {
+      const el = document.getElementById("statusLine");
+      el.textContent = msg;
+      el.className = isErr ? "bad" : "ok";
+    }
+
+    function drawChart(points) {
+      const canvas = document.getElementById("chart");
+      const ctx = canvas.getContext("2d");
+      // clear
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      if (!points || points.length === 0) {
+        ctx.fillStyle = "rgba(255,255,255,.4)";
+        ctx.font = "14px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+        ctx.fillText("No data", 12, 24);
+        return;
       }
 
-      async function refreshVersion() {
+      const W = canvas.width;
+      const H = canvas.height;
+      const pad = 20;
+      const min = Math.min(...points);
+      const max = Math.max(...points);
+      const span = (max - min) || 1;
+
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(59,130,246,0.9)";
+      ctx.beginPath();
+
+      points.forEach((v, i) => {
+        const x = pad + (i * (W - pad*2)) / (points.length - 1 || 1);
+        const y = H - pad - ((v - min) / span) * (H - pad*2);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // baseline
+      ctx.strokeStyle = "rgba(255,255,255,.08)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(pad, H - pad);
+      ctx.lineTo(W - pad, H - pad);
+      ctx.stroke();
+    }
+
+    // Fallback synthetic sparkline from a quote
+    function synthHistory(q) {
+      if (!q) return [];
+      const base = q.prev_close || q.open || q.current || 100;
+      const hi = q.high || base * 1.01;
+      const lo = q.low || base * 0.99;
+      const pts = [base * 0.995, lo, base * 1.02, base * 1.01, base * 0.998, base * 0.99, q.current || base];
+      // clamp to session range
+      return pts.map(p => Math.min(hi, Math.max(lo, p)));
+    }
+
+    async function loadHistory(symbol, range = "1M") {
+      try {
+        return await getJSON(`/history/${encodeURIComponent(symbol)}?range=${range}`);
+      } catch (_) {
+        return [];
+      }
+    }
+
+    // ---------- main behaviors ----------
+    async function loadVersion() {
+      try {
+        const v = await getJSON("/version");
+        document.getElementById("version").textContent = `${v.app} ${v.version}`;
+      } catch {
+        document.getElementById("version").textContent = "unknown";
+      }
+    }
+
+    async function loadQuote(symbol) {
+      const sym = (symbol || "").trim().toUpperCase();
+      if (!sym) return;
+
+      setStatus("Loading…");
+      document.getElementById("summary").textContent = "—";
+
+      try {
+        const q = await getJSON(`/quote/${encodeURIComponent(sym)}`);
+
+        // fill stat boxes
+        document.getElementById("high").textContent = fmt(q.high);
+        document.getElementById("low").textContent  = fmt(q.low);
+        document.getElementById("open").textContent = fmt(q.open);
+        document.getElementById("prev").textContent = fmt(q.prev_close);
+
+        // summary (nice to have; if summary fails we keep going)
         try {
-          const data = await getJSON("/version");
-          els.version.textContent = \`\${data.app} \${data.version}\`;
+          const s = await getJSON(`/summary/${encodeURIComponent(sym)}`);
+          document.getElementById("summary").textContent = s.summary || "—";
         } catch {
-          els.version.textContent = "version: n/a";
+          document.getElementById("summary").textContent = `${sym}: ${fmt(q.current)} (${fmt(q.percent_change)}%)`;
         }
-      }
 
-      async function refreshHealth() {
-        try {
-          const data = await getJSON("/health");
-          const ok = data && data.status === "ok";
-          els.healthBadge.textContent = ok ? "Loaded." : "Degraded";
-          els.healthBadge.classList.toggle("ok", ok);
-          els.healthBadge.classList.toggle("fail", !ok);
-        } catch {
-          els.healthBadge.textContent = "Down";
-          els.healthBadge.classList.remove("ok");
-          els.healthBadge.classList.add("fail");
-        }
-      }
+        // range button state
+        const activeBtn = document.querySelector('.range button.active');
+        const selRange = activeBtn ? activeBtn.dataset.range : "1M";
 
-      function setStats(q) {
-        const fmt = (x) => (x == null ? "—" : Number(x).toFixed(3));
-        els.high.textContent = fmt(q?.high);
-        els.low.textContent = fmt(q?.low);
-        els.open.textContent = fmt(q?.open);
-        els.prevClose.textContent = fmt(q?.prev_close ?? q?.prevClose);
-      }
-
-      function drawChart(values) {
-        const canvas = els.chart;
-        const ctx = canvas.getContext("2d");
-        const w = canvas.width = canvas.clientWidth * devicePixelRatio;
-        const h = canvas.height = canvas.clientHeight * devicePixelRatio;
-
-        ctx.clearRect(0, 0, w, h);
-        ctx.lineWidth = 2 * devicePixelRatio;
-        ctx.strokeStyle = "#4f8cff";
-        ctx.beginPath();
-
-        if (!values || values.length === 0) return;
-        const min = Math.min(...values);
-        const max = Math.max(...values);
-        const span = max - min || 1;
-
-        values.forEach((v, i) => {
-          const x = (i / (values.length - 1)) * (w - 20) + 10;
-          const y = h - ((v - min) / span) * (h - 20) - 10;
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-      }
-
-      // small synthetic history from quote numbers so chart isn't empty
-      function synthHistory(q) {
-        if (!q) return [];
-        const base = Number(q.current ?? q.prev_close ?? 100);
-        const arr = [base * 0.995, base * 0.99, base * 1.02, base * 1.005, base * 0.996, base * 1.01];
-        return arr.map((x) => Number(x.toFixed(3)));
-      }
-
-      async function loadQuote(symbol) {
-        const sym = (symbol || "").trim().toUpperCase();
-        if (!sym) return;
-
-        try {
-          const q = await getJSON(\`/quote/\${encodeURIComponent(sym)}\`);
-          setStats(q);
+        // try real history; else fallback
+        const hist = await loadHistory(sym, selRange);
+        if (hist.length) {
+          drawChart(hist.map(p => p.c));
+        } else {
           drawChart(synthHistory(q));
-          log(\`Loaded /quote/\${sym}\`);
-        } catch (e) {
-          setStats(null);
-          drawChart([]);
-          log(\`Failed to load quote: /quote/\${sym} -> \${e.message}\`);
         }
 
-        // optional: log summary if available
-        try {
-          const s = await getJSON(\`/summary/\${encodeURIComponent(sym)}\`);
-          log(\`Summary: \${s.summary}\`);
-        } catch {}
+        setStatus("Loaded.");
+      } catch (err) {
+        setStatus(`Failed to load quote: ${err.message}`, true);
+        // clear values
+        ["high","low","open","prev"].forEach(id => document.getElementById(id).textContent = "—");
+        drawChart([]);
       }
+    }
 
-      // Wire up UI
-      els.btn.addEventListener("click", () => loadQuote(els.input.value));
-      els.input.addEventListener("keydown", (e) => { if (e.key === "Enter") loadQuote(els.input.value); });
+    // ---------- wiring ----------
+    window.addEventListener("DOMContentLoaded", () => {
+      loadVersion();
 
-      // boot
-      refreshVersion();
-      refreshHealth();
-      setInterval(refreshHealth, 15000);
-      loadQuote(els.input.value);
-    </script>
-  </body>
+      const input = document.getElementById("symbol");
+      const btn = document.getElementById("getQuoteBtn");
+      const sparkBtn = document.getElementById("sparkBtn");
+
+      btn.addEventListener("click", () => loadQuote(input.value));
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") loadQuote(input.value);
+      });
+
+      // refresh chart only (keeps stats)
+      sparkBtn.addEventListener("click", async () => {
+        const sym = document.getElementById("symbol").value.trim().toUpperCase();
+        if (!sym) return;
+        const activeBtn = document.querySelector('.range button.active');
+        const selRange = activeBtn ? activeBtn.dataset.range : "1M";
+        const hist = await loadHistory(sym, selRange);
+        if (hist.length) drawChart(hist.map(p => p.c));
+      });
+
+      // range switches
+      document.getElementById("rangeBtns").addEventListener("click", (e) => {
+        if (e.target.tagName !== "BUTTON") return;
+        document.querySelectorAll(".range button").forEach(b => b.classList.remove("active"));
+        e.target.classList.add("active");
+        // reload with new range
+        loadQuote(document.getElementById("symbol").value);
+      });
+
+      // initial load
+      loadQuote(input.value);
+    });
+  </script>
+</body>
 </html>
+
 
 
 
