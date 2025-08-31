@@ -1,418 +1,290 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1, maximum-scale=1"
-  />
-  <title>StackIQ — minimal market data UI</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link
-    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-    rel="stylesheet"
-  />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"/>
+  <title>StackIQ — Markets</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
   <style>
-    :root {
-      --bg: #0b1320;
-      --panel: #111a2e;
-      --muted: #7f8ba6;
-      --text: #e6ecff;
-      --brand: #6aa3ff;
-      --brand-2: #8c6bff;
-      --success: #25d0a2;
-      --danger: #ff7a7a;
-      --shadow: 0 10px 40px rgba(0,0,0,.45);
-      --radius: 16px;
+    :root{
+      --bg:#0b1320;--panel:#111a2e;--muted:#7f8ba6;--text:#e6ecff;
+      --brand:#63a3ff;--brand2:#8cb6ff;--ok:#25d0a2;--bad:#f77baa;
+      --shadow:0 10px 40px rgba(0,0,0,.45);--r:16px
     }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
-      color: var(--text);
-      background: radial-gradient(1200px 700px at 85% 20%, rgba(96, 70, 255, .20), transparent),
-                  radial-gradient(900px 600px at 15% 10%, rgba(74, 168, 255, .18), transparent),
-                  var(--bg);
-    }
-    .page {
-      max-width: 1120px;
-      margin: 48px auto 80px;
-      padding: 0 20px;
-    }
-    header {
-      display:flex; align-items:center; gap:14px; margin-bottom:18px;
-    }
-    .logo-dot {
-      width: 18px; height: 18px; border-radius: 6px;
-      background: linear-gradient(135deg, var(--brand), var(--brand-2));
-      box-shadow: 0 6px 20px rgba(106,163,255,.35), inset 0 0 16px rgba(255,255,255,.18);
-    }
-    .brand { font-weight: 700; font-size: 22px; letter-spacing:.2px; }
-    .sublabel { font-size: 12px; color: var(--muted); margin-left: 2px; }
-
-    .grid {
-      display:grid;
-      grid-template-columns: 1.15fr .85fr;
-      gap: 26px;
-    }
-    @media (max-width: 980px) {
-      .grid { grid-template-columns: 1fr; }
-    }
-
-    .card {
-      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015));
-      border: 1px solid rgba(255,255,255,.06);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-    }
-
-    .pad { padding: 18px; }
-    .row { display:flex; align-items:center; gap:10px; }
-    .grow { flex: 1; }
-    .muted { color: var(--muted); }
-
-    .input {
-      width: 100%; height: 42px; border-radius: 10px;
-      background: rgba(255,255,255,.04);
-      border: 1px solid rgba(255,255,255,.08);
-      color: var(--text); padding: 0 14px; font-size:14px;
-      outline: none;
-    }
-    .btn {
-      height: 42px; padding: 0 14px; border-radius: 10px; border: 0; cursor: pointer;
-      font-weight: 600; color: #0b1320; background: linear-gradient(135deg, var(--brand), var(--brand-2));
-      box-shadow: 0 6px 22px rgba(106,163,255,.35);
-    }
-    .btn-ghost {
-      height: 42px; padding: 0 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.08); cursor: pointer;
-      color: var(--text); background: rgba(255,255,255,.03);
-    }
-
-    .stats { display:grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
-    @media (max-width: 640px) {
-      .stats { grid-template-columns: repeat(2, 1fr); }
-    }
-    .stat {
-      background: rgba(255,255,255,.03);
-      border: 1px solid rgba(255,255,255,.06);
-      border-radius: 12px; padding: 10px 12px;
-    }
-    .stat .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-    .stat .val { font-size: 16px; font-weight: 700; letter-spacing:.2px; }
-
-    .ranges { display:flex; gap: 8px; margin: 12px 0 2px; }
-    .chip {
-      padding: 6px 10px; border-radius: 999px;
-      background: rgba(255,255,255,.03);
-      border: 1px solid rgba(255,255,255,.08);
-      color: var(--text); font-weight: 600; font-size: 12px; cursor: pointer;
-    }
-    .chip.active {
-      background: rgba(106,163,255,.14);
-      border-color: rgba(106,163,255,.45);
-      box-shadow: inset 0 0 0 1px rgba(106,163,255,.3);
-    }
-
-    .chart-wrap { margin-top: 12px; border-radius: 14px; overflow: hidden; border:1px solid rgba(255,255,255,.06); }
-    canvas { display:block; width: 100%; height: 300px; background: rgba(2,12,30,.45); }
-
-    .aside .title { font-weight: 700; }
-    .aside .kv { margin-top: 8px; }
-    .kv .k { font-size:12px; color: var(--muted); }
-    .kv .v { font-size:14px; font-weight: 600; }
-
-    .api-note {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-      font-size: 12px; color: rgba(230,236,255,.6);
-      margin: 10px 2px 0;
-    }
-
-    .tooltip {
-      position: absolute;
-      pointer-events:none;
-      padding: 6px 8px;
-      font-size: 12px;
-      background: #0b1320;
-      border: 1px solid rgba(255,255,255,.1);
-      border-radius: 6px;
-      box-shadow: var(--shadow);
-      color: var(--text);
-      display:none;
-      transform: translate(-50%, -120%);
-      white-space: nowrap;
-    }
-
-    footer { text-align:center; color: var(--muted); font-size: 12px; margin-top: 16px; }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica Neue,Arial,Noto Sans,sans-serif;color:var(--text);
+      background:radial-gradient(1200px 700px at 85% 20%,rgba(96,70,255,.20),transparent),
+                 radial-gradient(900px 600px at 15% 10%,rgba(74,166,255,.18),transparent),var(--bg)}
+    .page{max-width:1120px;margin:36px auto 80px;padding:0 20px}
+    header{display:flex;align-items:center;gap:12px;margin-bottom:18px}
+    .logo{width:18px;height:18px;border-radius:6px;background:linear-gradient(135deg,var(--brand),var(--brand2));
+      box-shadow:0 6px 20px rgba(106,163,255,.35),inset 0 0 16px rgba(255,255,255,.18)}
+    .brand{font-weight:700;font-size:22px;letter-spacing:.2px}
+    .sub{font-size:12px;color:var(--muted)}
+    .grid{display:grid;grid-template-columns:1.15fr .85fr;gap:26px}
+    @media (max-width:980px){.grid{grid-template-columns:1fr}}
+    .card{background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,.015));
+      border:1px solid rgba(255,255,255,.06);border-radius:var(--r);box-shadow:var(--shadow)}
+    .pad{padding:18px}
+    .row{display:flex;align-items:center;gap:10px}
+    .grow{flex:1}
+    .muted{color:var(--muted)}
+    .input{width:100%;height:42px;border-radius:10px;background:rgba(255,255,255,.04);
+      border:1px solid rgba(255,255,255,.08);color:var(--text);padding:0 14px;font-size:14px;outline:none}
+    .btn{height:42px;padding:0 14px;border-radius:10px;border:0;cursor:pointer;font-weight:700;color:#0b1320;
+      background:linear-gradient(135deg,var(--brand),var(--brand2));box-shadow:0 6px 22px rgba(106,163,255,.35)}
+    .btn-ghost{height:42px;padding:0 12px;border-radius:10px;border:1px solid rgba(255,255,255,.08);
+      color:var(--text);background:rgba(255,255,255,.03);cursor:pointer}
+    .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px}
+    @media (max-width:640px){.stats{grid-template-columns:repeat(2,1fr)}}
+    .stat{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:12px}
+    .stat .label{font-size:12px;color:var(--muted);margin-bottom:4px}
+    .stat .val{font-size:16px;font-weight:700;letter-spacing:.2px}
+    .ranges{display:flex;gap:8px;margin:12px 0 2px}
+    .chip{padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.03);
+      border:1px solid rgba(255,255,255,.08);color:var(--text);font-weight:700;font-size:12px;cursor:pointer}
+    .chip.active{background:rgba(106,163,255,.14);border-color:rgba(106,163,255,.45);
+      box-shadow:inset 0 0 1px rgba(106,163,255,.3)}
+    .chart-wrap{margin-top:12px;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.06);position:relative}
+    canvas{display:block;width:100%;height:320px;background:rgba(2,12,30,.45)}
+    .tooltip{position:absolute;left:0;top:0;pointer-events:none;padding:6px 8px;font-size:12px;background:#0b1320;
+      border:1px solid rgba(255,255,255,.1);border-radius:6px;color:var(--text);box-shadow:0 6px 20px rgba(0,0,0,.35);
+      transform:translate(-50%,-120%);white-space:nowrap;display:none}
+    .kv{margin-top:8px}.kv .k{font-size:12px;color:var(--muted)}.kv .v{font-size:14px;font-weight:600}
+    footer{text-align:center;color:var(--muted);font-size:12px;margin-top:16px}
+    .api-note{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:rgba(230,236,255,.6);margin-top:10px}
   </style>
 </head>
 <body>
-  <div class="page">
-    <header>
-      <div class="logo-dot"></div>
-      <div class="brand">StackIQ</div>
-      <div class="sublabel">Minimal market data UI</div>
-    </header>
+<div class="page">
+  <header>
+    <div class="logo"></div>
+    <div class="brand">StackIQ</div>
+    <div class="sub">Live quote · summary · chart</div>
+  </header>
 
-    <div class="grid">
-      <!-- LEFT: quote + chart -->
-      <section class="card pad">
-        <div class="row" style="gap:8px;">
-          <input id="symbolInput" class="input grow" value="AAPL" spellcheck="false" />
-          <button id="getBtn" class="btn">Get Quote</button>
-          <button id="refreshBtn" class="btn-ghost" title="Refresh">⟳</button>
-        </div>
+  <div class="grid">
+    <section class="card pad">
+      <div class="row" style="gap:8px;">
+        <input id="symbolInput" class="input grow" value="AAPL" spellcheck="false"/>
+        <button id="goBtn" class="btn">Get Quote</button>
+        <button id="refreshBtn" class="btn-ghost">Refresh</button>
+      </div>
 
-        <div class="stats">
-          <div class="stat"><div class="label">Session High</div><div id="statHigh" class="val">—</div></div>
-          <div class="stat"><div class="label">Session Low</div><div id="statLow" class="val">—</div></div>
-          <div class="stat"><div class="label">Open</div><div id="statOpen" class="val">—</div></div>
-          <div class="stat"><div class="label">Prev Close</div><div id="statClose" class="val">—</div></div>
-        </div>
+      <div class="stats">
+        <div class="stat"><div class="label">Session High</div><div id="statHigh" class="val">–</div></div>
+        <div class="stat"><div class="label">Session Low</div><div id="statLow" class="val">–</div></div>
+        <div class="stat"><div class="label">Open</div><div id="statOpen" class="val">–</div></div>
+        <div class="stat"><div class="label">Prev Close</div><div id="statClose" class="val">–</div></div>
+      </div>
 
-        <div class="ranges">
-          <button class="chip active" data-range="1M">1M</button>
-          <button class="chip" data-range="3M">3M</button>
-          <button class="chip" data-range="6M">6M</button>
-          <button class="chip" data-range="1Y">1Y</button>
-        </div>
+      <div class="ranges">
+        <button class="chip active" data-range="1M">1M</button>
+        <button class="chip" data-range="3M">3M</button>
+        <button class="chip" data-range="6M">6M</button>
+        <button class="chip" data-range="1Y">1Y</button>
+      </div>
 
-        <div class="chart-wrap" style="position:relative;">
-          <canvas id="chartCanvas" width="1000" height="300"></canvas>
-          <div id="tooltip" class="tooltip"></div>
-        </div>
+      <div class="chart-wrap">
+        <canvas id="chart" width="1000" height="320"></canvas>
+        <div id="tip" class="tooltip"></div>
+      </div>
 
-        <div class="api-note">API: /quote/{symbol}, /summary/{symbol}, /history/{symbol}</div>
-      </section>
+      <div class="api-note">Endpoints: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>, <code>/history/{symbol}?range=1M</code></div>
+    </section>
 
-      <!-- RIGHT: status -->
-      <aside class="card pad aside">
-        <div class="title muted">Status</div>
-        <div id="status" class="kv"><span class="k">State:</span> <span class="v">Loading…</span></div>
-        <div class="kv" style="margin-top:6px;"><span class="k">Version:</span> <span id="version" class="v">—</span></div>
-
-        <div class="title muted" style="margin-top:16px;">Summary</div>
-        <div id="summary" style="font-size:13px; line-height:1.5; margin-top:6px; color: #cdd6f4;">—</div>
-      </aside>
-    </div>
-
-    <footer>© 2025 StackIQ</footer>
+    <aside class="card pad">
+      <div class="muted" style="font-weight:700;margin-bottom:6px">Status</div>
+      <div class="kv"><span class="k">State:</span> <span id="state" class="v">Idle</span></div>
+      <div class="kv"><span class="k">Version:</span> <span id="version" class="v">–</span></div>
+      <div class="kv"><span class="k">Summary:</span> <div id="summary" class="v">–</div></div>
+    </aside>
   </div>
 
-  <script>
-    const $ = (sel) => document.querySelector(sel);
-    const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+  <footer>© 2025 StackIQ</footer>
+</div>
 
-    const statHigh  = $('#statHigh');
-    const statLow   = $('#statLow');
-    const statOpen  = $('#statOpen');
-    const statClose = $('#statClose');
+<!-- API helper so it works under /web/ -->
+<script>
+  function api(path){ const base = location.pathname.startsWith("/web") ? "/" : "/"; return base + path.replace(/^\//,""); }
+</script>
 
-    const statusEl  = $('#status .v');
-    const versionEl = $('#version');
-    const summaryEl = $('#summary');
+<script>
+const $ = (s)=>document.querySelector(s);
+const $$ = (s)=>Array.from(document.querySelectorAll(s));
 
-    const symbolInput = $('#symbolInput');
-    const getBtn = $('#getBtn');
-    const refreshBtn = $('#refreshBtn');
+const els = {
+  high: $("#statHigh"), low: $("#statLow"), open: $("#statOpen"), close: $("#statClose"),
+  state: $("#state"), version: $("#version"), summary: $("#summary"),
+  chart: $("#chart"), tip: $("#tip"), input: $("#symbolInput")
+};
 
-    const canvas = $('#chartCanvas');
-    const ctx = canvas.getContext('2d');
-    const tooltip = $('#tooltip');
+async function getJSON(url){
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(await r.text());
+  return await r.json();
+}
 
-    let activeRange = '1M';
-    let points = []; // {t, c}
-    let isLoading = false;
+function setState(t){ els.state.textContent = t; }
 
-    const api = (p) => p;
+async function loadVersion(){
+  try{
+    const j = await getJSON(api("/version"));
+    els.version.textContent = `${j.app} v${j.version}`;
+  }catch{ els.version.textContent = "n/a"; }
+}
 
-    function fmt(n) {
-      return (n === null || n === undefined || isNaN(n)) ? '—' : Number(n).toFixed(3);
-    }
-    function fmtDate(ts) {
-      const d = new Date(ts * 1000);
-      return d.toLocaleDateString(undefined, {year:'2-digit', month:'short', day:'2-digit'});
-    }
+async function loadQuote(sym){
+  setState("Loading quote…");
+  try{
+    const j = await getJSON(api(`/quote/${encodeURIComponent(sym)}`));
+    els.high.textContent = (j.high ?? "–");
+    els.low.textContent  = (j.low ?? "–");
+    els.open.textContent = (j.open ?? "–");
+    els.close.textContent= (j.prev_close ?? "–");
+    setState("OK");
+    return j;
+  }catch(e){
+    setState("Quote error");
+    throw e;
+  }
+}
 
-    async function loadVersion() {
-      try {
-        const r = await fetch(api('/version'));
-        const j = await r.json();
-        versionEl.textContent = `${j.app} ${j.version}`;
-        setStatus('Loaded.');
-      } catch {
-        setStatus('Error loading version');
-      }
-    }
+async function loadSummary(sym){
+  try{
+    const j = await getJSON(api(`/summary/${encodeURIComponent(sym)}`));
+    els.summary.textContent = j.summary || "–";
+  }catch{ els.summary.textContent = "–"; }
+}
 
-    function setStatus(text) {
-      statusEl.textContent = text;
-    }
+async function loadHistory(sym, range){
+  setState(`Loading ${range}…`);
+  try{
+    const j = await getJSON(api(`/history/${encodeURIComponent(sym)}?range=${encodeURIComponent(range)}`));
+    setState("OK");
+    return j.points || [];
+  }catch(e){
+    setState("History error");
+    return [];
+  }
+}
 
-    async function loadQuote(sym) {
-      try {
-        const r = await fetch(api(`/quote/${encodeURIComponent(sym)}`));
-        if (!r.ok) throw new Error('quote failed');
-        const j = await r.json();
-        statHigh.textContent  = fmt(j.high);
-        statLow.textContent   = fmt(j.low);
-        statOpen.textContent  = fmt(j.open);
-        statClose.textContent = fmt(j.prev_close);
-        return j;
-      } catch {
-        statHigh.textContent  = '—';
-        statLow.textContent   = '—';
-        statOpen.textContent  = '—';
-        statClose.textContent = '—';
-        return null;
-      }
-    }
+/* === Canvas chart === */
+function drawChart(canvas, points){
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0,0,W,H);
 
-    async function loadSummary(sym) {
-      try {
-        const r = await fetch(api(`/summary/${encodeURIComponent(sym)}`));
-        if (!r.ok) throw new Error('summary failed');
-        const j = await r.json();
-        summaryEl.textContent = j.summary || '—';
-      } catch {
-        summaryEl.textContent = '—';
-      }
-    }
+  if(!points || points.length===0){
+    ctx.fillStyle = "rgba(230,236,255,.7)";
+    ctx.font = "600 14px Inter, sans-serif";
+    ctx.fillText("No data", 16, 24);
+    return;
+  }
 
-    async function loadHistory(sym, rangeKey) {
-      try {
-        const r = await fetch(api(`/history/${encodeURIComponent(sym)}?range=${rangeKey}`));
-        if (!r.ok) throw new Error('history failed');
-        const j = await r.json();
-        return j.points || [];
-      } catch {
-        return [];
-      }
-    }
+  const vals = points.map(p=>p.c);
+  const xs = points.map((_,i)=>i);
+  const min = Math.min(...vals), max = Math.max(...vals);
+  const pad = 20;
+  const x = i => pad + (W - 2*pad) * (i / (points.length-1));
+  const y = v => H - pad - (H - 2*pad) * ((v - min) / Math.max(1e-9, (max - min)));
 
-    // ----------------- Chart -----------------
-    function clearCanvas() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = 'rgba(255,255,255,.02)';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
+  // grid
+  ctx.strokeStyle = "rgba(255,255,255,.06)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for(let g=0; g<=4; g++){
+    const gy = pad + (H - 2*pad) * (g/4);
+    ctx.moveTo(pad, gy);
+    ctx.lineTo(W-pad, gy);
+  }
+  ctx.stroke();
 
-    function drawLineChart(pts) {
-      clearCanvas();
-      if (!pts.length) return;
+  // line
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(140,182,255,.95)";
+  ctx.beginPath();
+  ctx.moveTo(x(0), y(vals[0]));
+  for(let i=1;i<points.length;i++) ctx.lineTo(x(i), y(vals[i]));
+  ctx.stroke();
 
-      const padX = 36, padY = 22;
-      const w = canvas.width - padX * 2;
-      const h = canvas.height - padY * 2;
-      const min = Math.min(...pts.map(p => p.c));
-      const max = Math.max(...pts.map(p => p.c));
-      const span = (max - min) || 1;
+  // filled area
+  const grad = ctx.createLinearGradient(0, pad, 0, H-pad);
+  grad.addColorStop(0, "rgba(140,182,255,.30)");
+  grad.addColorStop(1, "rgba(140,182,255,.02)");
+  ctx.fillStyle = grad;
+  ctx.lineTo(x(points.length-1), H-pad);
+  ctx.lineTo(x(0), H-pad);
+  ctx.closePath();
+  ctx.fill();
 
-      // grid
-      ctx.strokeStyle = 'rgba(255,255,255,.06)';
-      ctx.lineWidth = 1;
-      for (let i = 0; i < 5; i++) {
-        const y = padY + (h * i / 4);
-        ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(padX + w, y); ctx.stroke();
-      }
+  // y labels
+  ctx.fillStyle = "rgba(230,236,255,.70)";
+  ctx.font = "12px Inter, sans-serif";
+  for(let g=0; g<=4; g++){
+    const val = max - (max-min)*(g/4);
+    const gy = pad + (H - 2*pad) * (g/4);
+    ctx.fillText(val.toFixed(2), W - pad - 60, gy - 4);
+  }
+}
 
-      // line
-      ctx.beginPath();
-      pts.forEach((p, i) => {
-        const x = padX + (w * i / (pts.length - 1 || 1));
-        const y = padY + h - ((p.c - min) / span) * h;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.strokeStyle = '#6aa3ff';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
+function attachHover(canvas, tip, points){
+  const rectOf = () => canvas.getBoundingClientRect();
+  const show = (x,y,txt)=>{ tip.style.display="block"; tip.style.left=`${x}px`; tip.style.top=`${y}px`; tip.textContent=txt; };
+  const hide = ()=>{ tip.style.display="none"; };
 
-      // save for hover
-      canvas._chart = { padX, padY, w, h, min, max, span, pts };
-    }
+  canvas.onmousemove = (e)=>{
+    if(!points || points.length===0) return hide();
+    const rect = rectOf();
+    const relX = e.clientX - rect.left;
+    const idx = Math.max(0, Math.min(points.length-1, Math.round((relX / rect.width) * (points.length-1))));
+    const p = points[idx];
 
-    function handleHover(ev) {
-      const c = canvas._chart;
-      if (!c) return;
-      const rect = canvas.getBoundingClientRect();
-      const mx = ev.clientX - rect.left;
-      const my = ev.clientY - rect.top;
+    // position tip a bit above cursor
+    show(e.clientX - rect.left, e.clientY - rect.top, `Close: ${(+p.c).toFixed(2)}`);
+  };
+  canvas.onmouseleave = hide;
+}
 
-      // inside plot?
-      if (mx < c.padX || mx > c.padX + c.w || my < c.padY || my > c.padY + c.h) {
-        tooltip.style.display = 'none';
-        return;
-      }
-      // find nearest index
-      const ratio = (mx - c.padX) / c.w;
-      const idx = Math.round(ratio * (c.pts.length - 1));
-      const p = c.pts[Math.max(0, Math.min(c.pts.length - 1, idx))];
+/* === App wiring === */
+let currentRange = "1M";
+async function refreshAll(){
+  const sym = els.input.value.trim().toUpperCase() || "AAPL";
+  await loadQuote(sym);
+  await loadSummary(sym);
+  const pts = await loadHistory(sym, currentRange);
+  drawChart(els.chart, pts);
+  attachHover(els.chart, els.tip, pts);
+}
 
-      const x = c.padX + (c.w * idx / (c.pts.length - 1 || 1));
-      const y = c.padY + c.h - ((p.c - c.min) / c.span) * c.h;
+function bindUI(){
+  $("#goBtn").addEventListener("click", refreshAll);
+  $("#refreshBtn").addEventListener("click", refreshAll);
+  els.input.addEventListener("keydown", (e)=>{ if(e.key==="Enter") refreshAll(); });
 
-      // vertical guide
-      clearCanvas();
-      drawLineChart(c.pts); // redraw line
-      ctx.beginPath();
-      ctx.moveTo(x, c.padY);
-      ctx.lineTo(x, c.padY + c.h);
-      ctx.strokeStyle = 'rgba(255,255,255,.15)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-
-      // tooltip
-      tooltip.style.display = 'block';
-      tooltip.style.left = `${x}px`;
-      tooltip.style.top = `${y}px`;
-      tooltip.textContent = `${fmtDate(p.t)}  •  ${fmt(p.c)}`;
-    }
-
-    canvas.addEventListener('mousemove', handleHover);
-    canvas.addEventListener('mouseleave', () => (tooltip.style.display = 'none'));
-
-    // --------------- Orchestration ---------------
-    async function refreshAll() {
-      if (isLoading) return;
-      isLoading = true;
-      setStatus('Loading...');
-      const sym = symbolInput.value.trim().toUpperCase() || 'AAPL';
-
-      await loadVersion();
-      await loadQuote(sym);
-      await loadSummary(sym);
-
-      const hist = await loadHistory(sym, activeRange);
-      points = hist;
-      drawLineChart(points);
-
-      setStatus('Loaded.');
-      isLoading = false;
-    }
-
-    // UI events
-    getBtn.addEventListener('click', () => refreshAll());
-    refreshBtn.addEventListener('click', () => refreshAll());
-    symbolInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') refreshAll();
+  $$(".chip").forEach(ch=>{
+    ch.addEventListener("click", async ()=>{
+      $$(".chip").forEach(c=>c.classList.remove("active"));
+      ch.classList.add("active");
+      currentRange = ch.dataset.range || "1M";
+      const sym = els.input.value.trim().toUpperCase() || "AAPL";
+      const pts = await loadHistory(sym, currentRange);
+      drawChart(els.chart, pts);
+      attachHover(els.chart, els.tip, pts);
     });
+  });
+}
 
-    $$('.chip').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        $$('.chip').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        activeRange = btn.dataset.range;
-        await refreshAll();
-      });
-    });
-
-    // First load
-    refreshAll();
-    // Optional auto-refresh every 90s
-    setInterval(refreshAll, 90000);
-  </script>
+(async function init(){
+  bindUI();
+  await loadVersion();
+  await refreshAll();
+})();
+</script>
 </body>
 </html>
+
 
 
 
