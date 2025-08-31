@@ -1,4 +1,3 @@
-# app.py
 import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,10 +8,9 @@ from data_fetcher import fetch_quote
 
 APP_NAME = "stackiq-web"
 APP_VERSION = "1.0.0"
-
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-# CORS (lenient)
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,11 +19,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve /web if a web folder exists
+# Serve static site if /web exists
 if os.path.isdir("web"):
     app.mount("/web", StaticFiles(directory="web", html=True), name="web")
 
-# Root -> redirect to /web (if present), else show basic message
 @app.get("/", include_in_schema=False)
 def root():
     if os.path.isdir("web"):
@@ -44,7 +41,6 @@ def version():
 def quote(symbol: str):
     data = fetch_quote(symbol)
     if not data:
-        # If Finnhub gave us nothing, return 404 so the UI shows a clean error
         raise HTTPException(status_code=404, detail="Symbol not found")
     return data
 
@@ -53,7 +49,6 @@ def summary(symbol: str):
     data = fetch_quote(symbol)
     if not data:
         raise HTTPException(status_code=404, detail="Symbol not found")
-
     pct = data.get("percent_change") or 0.0
     updown = "up" if pct >= 0 else "down"
     msg = (
@@ -61,6 +56,7 @@ def summary(symbol: str):
         f"Session range: {data['low']}–{data['high']}. Prev close {data['prev_close']}."
     )
     return {"symbol": data["symbol"], "summary": msg, "quote": data}
+
 
 
 
