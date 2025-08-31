@@ -1,96 +1,91 @@
 import os
 import time
+from typing import Optional, Dict, Any, List
 import requests
-from typing import Any, Dict, List, Optional
 
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
-BASE = "https://finnhub.io/api/v1"
 
-def _get(url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    if not FINNHUB_KEY:
-        return None
-    p = dict(params or {})
-    p["token"] = FINNHUB_KEY
+SESSION = requests.Session()
+SESSION.headers.update({"User-Agent": "stackiq-web/1.0"})
+
+
+def _get_json(url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
-        r = requests.get(url, params=p, timeout=12)
+        r = SESSION.get(url, params=params, timeout=10)
         r.raise_for_status()
         return r.json()
     except Exception:
         return None
 
-def _pct_change(prev: Optional[float], curr: Optional[float]) -> Optional[float]:
-    try:
-        if prev in (None, 0, 0.0) or curr is None:
-            return None
-        return (float(curr) - float(prev)) / float(prev) * 100.0
-    except Exception:
-        return None
 
 def fetch_quote(symbol: str) -> Optional[Dict[str, Any]]:
-    sym = (symbol or "").upper().strip()
-    if not sym:
+    """
+    Fetch a real-time-ish quote from Finnhub.
+    """
+    if not FINNHUB_KEY:
+        # Provide a helpful error if key is missing
         return None
 
-    j = _get(f"{BASE}/quote", {"symbol": sym})
+    url = "https://finnhub.io/api/v1/quote"
+    j = _get_json(url, {"symbol": symbol.upper(), "token": FINNHUB_KEY})
     if not j or "c" not in j:
         return None
 
-    c = j.get("c")
-    pc = j.get("pc")
-    h = j.get("h")
-    l = j.get("l")
-    o = j.get("o")
-
-    # Some invalid symbols return zeros for everything; treat as missing
-    if all(v in (None, 0, 0.0) for v in [c, pc, h, l, o]):
-        return None
-
-    pct = _pct_change(pc, c)
-    return {
-        "symbol": sym,
-        "current": c,
-        "prev_close": pc,
-        "high": h,
-        "low": l,
-        "open": o,
-        "percent_change": None if pct is None else round(pct, 3),
+    out = {
+        "symbol": symbol.upper(),
+        "current": float(j.get("c") or 0),
+        "prev_close": float(j.get("pc") or 0),
+        "high": float(j.get("h") or 0),
+        "low": float(j.get("l") or 0),
+        "open": float(j.get("o") or 0),
+        "percent_change": 0.0,
         "volume": j.get("v"),
         "raw": j,
     }
+    # daily percent change based on prev close
+    if out["prev_close"]:
+        out["percent_change"] = ((out["current"] - out["prev_close"]) / out["prev_close"]) * 100.0
+    return out
 
-def _range_days(key: str) -> int:
-    return {"1M": 31, "3M": 93, "6M": 186, "1Y": 372}.get(key.upper(), 31)
 
 def fetch_history(symbol: str, range_key: str = "1M") -> Optional[List[Dict[str, float]]]:
     """
-    Returns list of {"t": epochSec, "c": close} points (or [] if none).
+    Fetch historical candles from Finnhub for ranges used in the UI.
+    Returns a list like: [{"t": 1692748800, "c": 123.45}, ...]
     """
-    sym = (symbol or "").upper().strip()
-    if not sym:
+    if not FINNHUB_KEY:
         return None
 
+    # Map range -> (resolution, seconds back)
     now = int(time.time())
-    start = now - _range_days(range_key) * 24 * 60 * 60
+    ranges = {
+        "1M": ("D", 60 * 60 * 24 * 32),        # ~32 days
+        "3M": ("D", 60 * 60 * 24 * 95),
+        "6M": ("D", 60 * 60 * 24 * 190),
+        "1Y": ("W", 60 * 60 * 24 * 370),       # weekly to keep points reasonable
+    }
+    res, back = ranges.get(range_key, ("D", 60 * 60 * 24 * 32))
+    frm = now - back
+    to = now
 
-    # Finnhub /stock/candle uses keys: s(status), t(times[]), c(closes[])
-    j = _get(f"{BASE}/stock/candle", {
-        "symbol": sym,
-        "resolution": "D",
-        "from": start,     # NOTE: must be 'from', not '_from'
-        "to": now,
-    })
+    url = "https://finnhub.io/api/v1/stock/candle"
+    j = _get_json(
+        url,
+        {"symbol": symbol.upper(), "resolution": res, "from": frm, "to": to, "token": FINNHUB_KEY},
+    )
     if not j or j.get("s") != "ok":
-        return []
+        return None
 
-    ts = j.get("t") or []
-    cs = j.get("c") or []
-    out: List[Dict[str, float]] = []
-    for t, c in zip(ts, cs):
-        try:
-            out.append({"t": float(t), "c": float(c)})
-        except Exception:
-            continue
-    return out
+    t = j.get("t", [])  # timestamps
+    c = j.get("c", [])  # close prices
+    if not t or not c or len(t) != len(c):
+        return None
+
+    points = [{"t": int(ts), "c": float(cv)} for ts, cv in zip(t, c)]
+    # Sort by time just in case
+    points.sort(key=lambda p: p["t"])
+    return points
+
 
 
 
