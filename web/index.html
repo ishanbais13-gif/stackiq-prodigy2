@@ -1,356 +1,419 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>StackIQ — Live Quote</title>
-<style>
-  /* ===== Theme */
-  :root{
-    --bg-1:#0b1020;           /* page */
-    --bg-2:#0e1428;           /* panels */
-    --bg-3:#0a0f1f;
-    --glass:rgba(255,255,255,.06);
-    --stroke:rgba(255,255,255,.09);
-    --muted:#9aa4b2;
-    --text:#e7ecf2;
-    --accent:#6aa2ff;
-    --accent-2:#8a7dff;
-    --ok:#1dd1a1;
-    --bad:#ff6b6b;
-    --radius:18px;
-    --radius-sm:12px;
-    --shadow:0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.04);
-  }
-  *{box-sizing:border-box}
-  html,body{height:100%}
-  body{
-    margin:0; color:var(--text);
-    font:15px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
-    background:
-      radial-gradient(1200px 900px at -10% -20%, #13203f 0%, transparent 60%),
-      radial-gradient(900px 700px at 110% -10%, #26163f 0%, transparent 60%),
-      linear-gradient(180deg, var(--bg-1), var(--bg-3));
-    background-attachment: fixed;
-  }
-  a{color:var(--accent);text-decoration:none}
-  .container{max-width:1240px;margin:48px auto;padding:0 24px}
-  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
-  .brand{display:flex;align-items:center;gap:10px}
-  .logo{width:36px;height:36px;border-radius:10px;
-    background:linear-gradient(135deg,var(--accent),var(--accent-2));
-    box-shadow:0 6px 18px rgba(106,162,255,.35);
-  }
-  h1{margin:0;font-weight:800;letter-spacing:.3px}
-  .sub{color:var(--muted);font-size:12px;margin-left:6px}
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, maximum-scale=1"
+  />
+  <title>StackIQ — minimal market data UI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+    rel="stylesheet"
+  />
+  <style>
+    :root {
+      --bg: #0b1320;
+      --panel: #111a2e;
+      --muted: #7f8ba6;
+      --text: #e6ecff;
+      --brand: #6aa3ff;
+      --brand-2: #8c6bff;
+      --success: #25d0a2;
+      --danger: #ff7a7a;
+      --shadow: 0 10px 40px rgba(0,0,0,.45);
+      --radius: 16px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+      color: var(--text);
+      background: radial-gradient(1200px 700px at 85% 20%, rgba(96, 70, 255, .20), transparent),
+                  radial-gradient(900px 600px at 15% 10%, rgba(74, 168, 255, .18), transparent),
+                  var(--bg);
+    }
+    .page {
+      max-width: 1120px;
+      margin: 48px auto 80px;
+      padding: 0 20px;
+    }
+    header {
+      display:flex; align-items:center; gap:14px; margin-bottom:18px;
+    }
+    .logo-dot {
+      width: 18px; height: 18px; border-radius: 6px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-2));
+      box-shadow: 0 6px 20px rgba(106,163,255,.35), inset 0 0 16px rgba(255,255,255,.18);
+    }
+    .brand { font-weight: 700; font-size: 22px; letter-spacing:.2px; }
+    .sublabel { font-size: 12px; color: var(--muted); margin-left: 2px; }
 
-  /* ===== Layout cards */
-  .grid{display:grid;grid-template-columns: minmax(0,1fr) 420px; gap:26px}
-  .card{
-    background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
-    border:1px solid var(--stroke);
-    border-radius:var(--radius);
-    backdrop-filter: blur(8px);
-    box-shadow: var(--shadow);
-  }
-  .card > .body{padding:20px 20px}
-  .section-title{color:var(--muted);font-size:12px;margin-bottom:10px}
+    .grid {
+      display:grid;
+      grid-template-columns: 1.15fr .85fr;
+      gap: 26px;
+    }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+    }
 
-  /* ===== Search bar */
-  .search{display:flex;gap:10px;align-items:center;margin-bottom:14px}
-  .search input{
-    flex:1 1 auto; height:46px; padding:0 14px; border-radius:var(--radius-sm);
-    border:1px solid var(--stroke); background:rgba(255,255,255,.03); color:var(--text);
-    outline:none; font-size:15px;
-  }
-  .btn{
-    height:46px; padding:0 14px; border-radius:var(--radius-sm);
-    border:1px solid transparent; background:linear-gradient(135deg,var(--accent),var(--accent-2));
-    color:#0b1020; font-weight:800; cursor:pointer; letter-spacing:.2px;
-    box-shadow:0 6px 14px rgba(106,162,255,.35);
-  }
-  .btn.secondary{
-    background:transparent; color:var(--text); border-color:var(--stroke);
-    box-shadow:none;
-  }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015));
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
 
-  /* ===== Quote grid */
-  .kv{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
-  .kv .box{
-    background:rgba(255,255,255,.035); border:1px solid var(--stroke);
-    border-radius:14px; padding:12px 12px; min-height:72px;
-  }
-  .label{color:var(--muted);font-size:12px;margin-bottom:6px}
-  .val{font-size:20px;font-weight:800;letter-spacing:.1px}
+    .pad { padding: 18px; }
+    .row { display:flex; align-items:center; gap:10px; }
+    .grow { flex: 1; }
+    .muted { color: var(--muted); }
 
-  /* ===== Range buttons */
-  .range{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 4px}
-  .chip{
-    border:1px solid var(--stroke); background:rgba(255,255,255,.03);
-    color:var(--text); height:34px; padding:0 12px; border-radius:999px; cursor:pointer;
-    font-weight:600; letter-spacing:.2px;
-  }
-  .chip.active{border-color:var(--accent); box-shadow:0 0 0 3px rgba(106,162,255,.15) inset}
+    .input {
+      width: 100%; height: 42px; border-radius: 10px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      color: var(--text); padding: 0 14px; font-size:14px;
+      outline: none;
+    }
+    .btn {
+      height: 42px; padding: 0 14px; border-radius: 10px; border: 0; cursor: pointer;
+      font-weight: 600; color: #0b1320; background: linear-gradient(135deg, var(--brand), var(--brand-2));
+      box-shadow: 0 6px 22px rgba(106,163,255,.35);
+    }
+    .btn-ghost {
+      height: 42px; padding: 0 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.08); cursor: pointer;
+      color: var(--text); background: rgba(255,255,255,.03);
+    }
 
-  /* ===== Chart */
-  .chart-wrap{position:relative;margin-top:8px}
-  canvas{width:100%;height:340px;display:block;cursor:crosshair}
-  .tooltip{
-    position:absolute; pointer-events:none; display:none;
-    background:#0e1530; border:1px solid var(--stroke); color:var(--text);
-    border-radius:10px; padding:8px 10px; font-size:12px;
-    box-shadow: var(--shadow); transform:translate(-50%,-110%); white-space:nowrap;
-  }
-  .api-note{color:var(--muted);font-size:12px;margin-top:10px}
+    .stats { display:grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
+    @media (max-width: 640px) {
+      .stats { grid-template-columns: repeat(2, 1fr); }
+    }
+    .stat {
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 12px; padding: 10px 12px;
+    }
+    .stat .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .stat .val { font-size: 16px; font-weight: 700; letter-spacing:.2px; }
 
-  /* ===== Status panel */
-  .status .body{padding:20px}
-  .status .ok{color:var(--ok); font-weight:700}
-  .status .bad{color:var(--bad); font-weight:700}
-  .stat-line{padding:10px 0 14px;border-bottom:1px dashed var(--stroke);margin-bottom:12px}
-  .summary{color:#cdd6e3; font-size:13px; line-height:1.5}
+    .ranges { display:flex; gap: 8px; margin: 12px 0 2px; }
+    .chip {
+      padding: 6px 10px; border-radius: 999px;
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.08);
+      color: var(--text); font-weight: 600; font-size: 12px; cursor: pointer;
+    }
+    .chip.active {
+      background: rgba(106,163,255,.14);
+      border-color: rgba(106,163,255,.45);
+      box-shadow: inset 0 0 0 1px rgba(106,163,255,.3);
+    }
 
-  /* ===== Footer */
-  .footer{margin-top:22px;color:var(--muted);font-size:12px;text-align:center}
+    .chart-wrap { margin-top: 12px; border-radius: 14px; overflow: hidden; border:1px solid rgba(255,255,255,.06); }
+    canvas { display:block; width: 100%; height: 300px; background: rgba(2,12,30,.45); }
 
-  /* ===== Responsive */
-  @media (max-width: 1020px){
-    .grid{grid-template-columns:1fr}
-    .kv{grid-template-columns:repeat(2,1fr)}
-  }
-</style>
+    .aside .title { font-weight: 700; }
+    .aside .kv { margin-top: 8px; }
+    .kv .k { font-size:12px; color: var(--muted); }
+    .kv .v { font-size:14px; font-weight: 600; }
+
+    .api-note {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12px; color: rgba(230,236,255,.6);
+      margin: 10px 2px 0;
+    }
+
+    .tooltip {
+      position: absolute;
+      pointer-events:none;
+      padding: 6px 8px;
+      font-size: 12px;
+      background: #0b1320;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 6px;
+      box-shadow: var(--shadow);
+      color: var(--text);
+      display:none;
+      transform: translate(-50%, -120%);
+      white-space: nowrap;
+    }
+
+    footer { text-align:center; color: var(--muted); font-size: 12px; margin-top: 16px; }
+  </style>
 </head>
 <body>
-  <div class="container">
+  <div class="page">
     <header>
-      <div class="brand">
-        <div class="logo"></div>
-        <div>
-          <h1>StackIQ</h1>
-          <div class="sub">Minimal market data UI</div>
-        </div>
-      </div>
+      <div class="logo-dot"></div>
+      <div class="brand">StackIQ</div>
+      <div class="sublabel">Minimal market data UI</div>
     </header>
 
     <div class="grid">
-      <!-- ===== MAIN PANEL ===== -->
-      <div class="card">
-        <div class="body">
-          <div class="search">
-            <input id="symbol" type="text" placeholder="AAPL" value="AAPL" />
-            <button id="getQuoteBtn" class="btn">Get&nbsp;Quote</button>
-            <button id="sparkBtn" class="btn secondary" title="Refresh chart">↻</button>
-          </div>
-
-          <div class="kv">
-            <div class="box"><div class="label">Session High</div><div class="val" id="high">—</div></div>
-            <div class="box"><div class="label">Session Low</div><div class="val" id="low">—</div></div>
-            <div class="box"><div class="label">Open</div><div class="val" id="open">—</div></div>
-            <div class="box"><div class="label">Prev Close</div><div class="val" id="prev">—</div></div>
-          </div>
-
-          <div class="range" id="rangeBtns">
-            <button class="chip active" data-range="1M">1M</button>
-            <button class="chip" data-range="3M">3M</button>
-            <button class="chip" data-range="6M">6M</button>
-            <button class="chip" data-range="1Y">1Y</button>
-          </div>
-
-          <div class="chart-wrap">
-            <canvas id="chart" width="1100" height="340" aria-label="Price chart"></canvas>
-            <div id="tip" class="tooltip"></div>
-          </div>
-
-          <div class="api-note">API: <code>/quote/{symbol}</code> · <code>/summary/{symbol}</code> · <code>/history/{symbol}</code></div>
+      <!-- LEFT: quote + chart -->
+      <section class="card pad">
+        <div class="row" style="gap:8px;">
+          <input id="symbolInput" class="input grow" value="AAPL" spellcheck="false" />
+          <button id="getBtn" class="btn">Get Quote</button>
+          <button id="refreshBtn" class="btn-ghost" title="Refresh">⟳</button>
         </div>
-      </div>
 
-      <!-- ===== STATUS PANEL ===== -->
-      <div class="card status" style="position:sticky; top:24px; align-self:start;">
-        <div class="body">
-          <div class="section-title">Status</div>
-          <div id="statusLine" class="ok stat-line">Loaded.</div>
-
-          <div class="section-title">Version</div>
-          <div id="version" class="stat-line">—</div>
-
-          <div class="section-title">Summary</div>
-          <div id="summary" class="summary">—</div>
+        <div class="stats">
+          <div class="stat"><div class="label">Session High</div><div id="statHigh" class="val">—</div></div>
+          <div class="stat"><div class="label">Session Low</div><div id="statLow" class="val">—</div></div>
+          <div class="stat"><div class="label">Open</div><div id="statOpen" class="val">—</div></div>
+          <div class="stat"><div class="label">Prev Close</div><div id="statClose" class="val">—</div></div>
         </div>
-      </div>
+
+        <div class="ranges">
+          <button class="chip active" data-range="1M">1M</button>
+          <button class="chip" data-range="3M">3M</button>
+          <button class="chip" data-range="6M">6M</button>
+          <button class="chip" data-range="1Y">1Y</button>
+        </div>
+
+        <div class="chart-wrap" style="position:relative;">
+          <canvas id="chartCanvas" width="1000" height="300"></canvas>
+          <div id="tooltip" class="tooltip"></div>
+        </div>
+
+        <div class="api-note">API: /quote/{symbol}, /summary/{symbol}, /history/{symbol}</div>
+      </section>
+
+      <!-- RIGHT: status -->
+      <aside class="card pad aside">
+        <div class="title muted">Status</div>
+        <div id="status" class="kv"><span class="k">State:</span> <span class="v">Loading…</span></div>
+        <div class="kv" style="margin-top:6px;"><span class="k">Version:</span> <span id="version" class="v">—</span></div>
+
+        <div class="title muted" style="margin-top:16px;">Summary</div>
+        <div id="summary" style="font-size:13px; line-height:1.5; margin-top:6px; color: #cdd6f4;">—</div>
+      </aside>
     </div>
 
-    <div class="footer">© 2025 StackIQ</div>
+    <footer>© 2025 StackIQ</footer>
   </div>
 
   <script>
-    /* ========= utilities ========= */
-    async function getJSON(url){
-      const r = await fetch(url,{headers:{Accept:"application/json"}});
-      if(!r.ok){
-        let msg="Request failed"; try{const j=await r.json(); msg=j?.detail||msg;}catch{}
-        const e=new Error(`${r.status}: ${msg}`); e.status=r.status; throw e;
-      }
-      return r.json();
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+    const statHigh  = $('#statHigh');
+    const statLow   = $('#statLow');
+    const statOpen  = $('#statOpen');
+    const statClose = $('#statClose');
+
+    const statusEl  = $('#status .v');
+    const versionEl = $('#version');
+    const summaryEl = $('#summary');
+
+    const symbolInput = $('#symbolInput');
+    const getBtn = $('#getBtn');
+    const refreshBtn = $('#refreshBtn');
+
+    const canvas = $('#chartCanvas');
+    const ctx = canvas.getContext('2d');
+    const tooltip = $('#tooltip');
+
+    let activeRange = '1M';
+    let points = []; // {t, c}
+    let isLoading = false;
+
+    const api = (p) => p;
+
+    function fmt(n) {
+      return (n === null || n === undefined || isNaN(n)) ? '—' : Number(n).toFixed(3);
     }
-    const fmt = n => (n==null||isNaN(n))? "—" : Number(n).toFixed(3);
-    const setStatus = (t, err=false) => {
-      const el = document.getElementById("statusLine");
-      el.textContent = t; el.className = (err?"bad":"ok")+" stat-line";
-    };
+    function fmtDate(ts) {
+      const d = new Date(ts * 1000);
+      return d.toLocaleDateString(undefined, {year:'2-digit', month:'short', day:'2-digit'});
+    }
 
-    /* ========= chart state ========= */
-    let chartPoints=[], chartData=[], chartLabels=[];
-    let isDragging=false;
-
-    function drawChart(points){
-      const c=document.getElementById("chart"), ctx=c.getContext("2d");
-      ctx.clearRect(0,0,c.width,c.height);
-      chartPoints=[]; chartData=points||[];
-
-      if(!points||!points.length){
-        ctx.fillStyle="rgba(255,255,255,.45)"; ctx.font="14px system-ui"; ctx.fillText("No data", 14,24); return;
+    async function loadVersion() {
+      try {
+        const r = await fetch(api('/version'));
+        const j = await r.json();
+        versionEl.textContent = `${j.app} ${j.version}`;
+        setStatus('Loaded.');
+      } catch {
+        setStatus('Error loading version');
       }
-      const W=c.width, H=c.height, padX=34, padY=26;
-      const min=Math.min(...points), max=Math.max(...points), span=(max-min)||1;
+    }
 
-      // gradient stroke
-      const grad=ctx.createLinearGradient(0,0,0,H);
-      grad.addColorStop(0,"rgba(106,162,255,1)");
-      grad.addColorStop(1,"rgba(138,125,255,1)");
-      ctx.lineWidth=2.2; ctx.strokeStyle=grad; ctx.beginPath();
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
 
-      points.forEach((v,i)=>{
-        const x = padX + (i * (W - padX*2)) / (points.length - 1 || 1);
-        const y = H - padY - ((v-min)/span) * (H - padY*2);
-        chartPoints.push({x,y,val:v,label:chartLabels[i]||String(i+1)});
-        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    async function loadQuote(sym) {
+      try {
+        const r = await fetch(api(`/quote/${encodeURIComponent(sym)}`));
+        if (!r.ok) throw new Error('quote failed');
+        const j = await r.json();
+        statHigh.textContent  = fmt(j.high);
+        statLow.textContent   = fmt(j.low);
+        statOpen.textContent  = fmt(j.open);
+        statClose.textContent = fmt(j.prev_close);
+        return j;
+      } catch {
+        statHigh.textContent  = '—';
+        statLow.textContent   = '—';
+        statOpen.textContent  = '—';
+        statClose.textContent = '—';
+        return null;
+      }
+    }
+
+    async function loadSummary(sym) {
+      try {
+        const r = await fetch(api(`/summary/${encodeURIComponent(sym)}`));
+        if (!r.ok) throw new Error('summary failed');
+        const j = await r.json();
+        summaryEl.textContent = j.summary || '—';
+      } catch {
+        summaryEl.textContent = '—';
+      }
+    }
+
+    async function loadHistory(sym, rangeKey) {
+      try {
+        const r = await fetch(api(`/history/${encodeURIComponent(sym)}?range=${rangeKey}`));
+        if (!r.ok) throw new Error('history failed');
+        const j = await r.json();
+        return j.points || [];
+      } catch {
+        return [];
+      }
+    }
+
+    // ----------------- Chart -----------------
+    function clearCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = 'rgba(255,255,255,.02)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function drawLineChart(pts) {
+      clearCanvas();
+      if (!pts.length) return;
+
+      const padX = 36, padY = 22;
+      const w = canvas.width - padX * 2;
+      const h = canvas.height - padY * 2;
+      const min = Math.min(...pts.map(p => p.c));
+      const max = Math.max(...pts.map(p => p.c));
+      const span = (max - min) || 1;
+
+      // grid
+      ctx.strokeStyle = 'rgba(255,255,255,.06)';
+      ctx.lineWidth = 1;
+      for (let i = 0; i < 5; i++) {
+        const y = padY + (h * i / 4);
+        ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(padX + w, y); ctx.stroke();
+      }
+
+      // line
+      ctx.beginPath();
+      pts.forEach((p, i) => {
+        const x = padX + (w * i / (pts.length - 1 || 1));
+        const y = padY + h - ((p.c - min) / span) * h;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
       });
+      ctx.strokeStyle = '#6aa3ff';
+      ctx.lineWidth = 2.5;
       ctx.stroke();
 
-      // gridline baseline
-      ctx.strokeStyle="rgba(255,255,255,.08)"; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(padX, H-padY); ctx.lineTo(W-padX, H-padY); ctx.stroke();
+      // save for hover
+      canvas._chart = { padX, padY, w, h, min, max, span, pts };
     }
 
-    function showTip(idx){
-      const tip=document.getElementById("tip");
-      if(idx<0||!chartPoints[idx]){ tip.style.display="none"; drawChart(chartData); return; }
-      const p=chartPoints[idx]; tip.style.display="block";
-      tip.innerHTML = `<strong>${fmt(p.val)}</strong><div style="color:#9aa4b2">${p.label||""}</div>`;
-      tip.style.left=p.x+"px"; tip.style.top=p.y+"px";
-      // crosshair
-      const c=document.getElementById("chart"), ctx=c.getContext("2d");
-      drawChart(chartData);
-      ctx.strokeStyle="rgba(255,255,255,.2)"; ctx.lineWidth=1;
-      ctx.beginPath(); ctx.moveTo(p.x, 8); ctx.lineTo(p.x, c.height-8); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(8, p.y); ctx.lineTo(c.width-8, p.y); ctx.stroke();
-    }
+    function handleHover(ev) {
+      const c = canvas._chart;
+      if (!c) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = ev.clientX - rect.left;
+      const my = ev.clientY - rect.top;
 
-    function idxFromMouse(evt){
-      const c=document.getElementById("chart"); const r=c.getBoundingClientRect();
-      const mx=(evt.clientX - r.left) * (c.width/r.width);
-      let best=-1, dmin=1e9;
-      chartPoints.forEach((p,i)=>{ const d=Math.abs(p.x-mx); if(d<dmin){dmin=d; best=i;} });
-      return best;
-    }
-
-    function synthHistory(q){
-      if(!q) return [];
-      const base=q.prev_close||q.open||q.current||100;
-      const hi=q.high||base*1.02, lo=q.low||base*0.98;
-      const arr=[base*0.996, lo, base*1.022, base*1.012, base*0.997, base*0.988, q.current||base];
-      return arr.map(v=>Math.min(hi,Math.max(lo,v)));
-    }
-
-    async function loadHistory(symbol, range="1M"){
-      try{
-        const rows = await getJSON(`/history/${encodeURIComponent(symbol)}?range=${range}`);
-        if(Array.isArray(rows) && rows.length){
-          const vals = rows.map(r => (typeof r==="number"? r : Number(r.c)));
-          chartLabels = rows.map((r,i)=>{
-            if(typeof r==="number") return `#${i+1}`;
-            const t=Number(r.t||r.time||0); if(!t) return `#${i+1}`;
-            const d=new Date((String(t).length>10?t: t*1000)); return d.toLocaleDateString();
-          });
-          return vals.filter(v=>isFinite(v));
-        }
-      }catch{}
-      return [];
-    }
-
-    /* ========= data flows ========= */
-    async function loadVersion(){
-      try{ const v=await getJSON("/version"); document.getElementById("version").textContent=`${v.app} ${v.version}`; }
-      catch{ document.getElementById("version").textContent="unknown"; }
-    }
-
-    async function loadQuote(symbol){
-      const sym=(symbol||"").trim().toUpperCase(); if(!sym) return;
-      setStatus("Loading…");
-      document.getElementById("summary").textContent="—";
-      try{
-        const q=await getJSON(`/quote/${encodeURIComponent(sym)}`);
-        document.getElementById("high").textContent=fmt(q.high);
-        document.getElementById("low").textContent =fmt(q.low);
-        document.getElementById("open").textContent=fmt(q.open);
-        document.getElementById("prev").textContent =fmt(q.prev_close);
-
-        // summary
-        try{
-          const s=await getJSON(`/summary/${encodeURIComponent(sym)}`);
-          document.getElementById("summary").textContent=s.summary||"—";
-        }catch{
-          document.getElementById("summary").textContent=`${sym}: ${fmt(q.current)} (${fmt(q.percent_change)}%)`;
-        }
-
-        // history
-        const active=document.querySelector(".chip.active");
-        const range=active?active.dataset.range:"1M";
-        const hist=await loadHistory(sym, range);
-        if(hist.length){ drawChart(hist); } else { chartLabels=[]; drawChart(synthHistory(q)); }
-
-        setStatus("Loaded.");
-      }catch(err){
-        setStatus(`Failed: ${err.message}`, true);
-        ["high","low","open","prev"].forEach(id=>document.getElementById(id).textContent="—");
-        drawChart([]);
+      // inside plot?
+      if (mx < c.padX || mx > c.padX + c.w || my < c.padY || my > c.padY + c.h) {
+        tooltip.style.display = 'none';
+        return;
       }
+      // find nearest index
+      const ratio = (mx - c.padX) / c.w;
+      const idx = Math.round(ratio * (c.pts.length - 1));
+      const p = c.pts[Math.max(0, Math.min(c.pts.length - 1, idx))];
+
+      const x = c.padX + (c.w * idx / (c.pts.length - 1 || 1));
+      const y = c.padY + c.h - ((p.c - c.min) / c.span) * c.h;
+
+      // vertical guide
+      clearCanvas();
+      drawLineChart(c.pts); // redraw line
+      ctx.beginPath();
+      ctx.moveTo(x, c.padY);
+      ctx.lineTo(x, c.padY + c.h);
+      ctx.strokeStyle = 'rgba(255,255,255,.15)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // tooltip
+      tooltip.style.display = 'block';
+      tooltip.style.left = `${x}px`;
+      tooltip.style.top = `${y}px`;
+      tooltip.textContent = `${fmtDate(p.t)}  •  ${fmt(p.c)}`;
     }
 
-    /* ========= wire up ========= */
-    window.addEventListener("DOMContentLoaded", ()=>{
-      loadVersion();
-      const input=document.getElementById("symbol");
-      document.getElementById("getQuoteBtn").addEventListener("click", ()=>loadQuote(input.value));
-      input.addEventListener("keydown",e=>{ if(e.key==="Enter") loadQuote(input.value); });
-      document.getElementById("sparkBtn").addEventListener("click", async ()=>{
-        const sym=input.value.trim().toUpperCase(); if(!sym) return;
-        const active=document.querySelector(".chip.active"); const range=active?active.dataset.range:"1M";
-        const hist=await loadHistory(sym, range); if(hist.length) drawChart(hist);
-      });
-      document.getElementById("rangeBtns").addEventListener("click", e=>{
-        if(!e.target.classList.contains("chip")) return;
-        document.querySelectorAll(".chip").forEach(b=>b.classList.remove("active"));
-        e.target.classList.add("active");
-        loadQuote(input.value);
-      });
+    canvas.addEventListener('mousemove', handleHover);
+    canvas.addEventListener('mouseleave', () => (tooltip.style.display = 'none'));
 
-      const canvas=document.getElementById("chart");
-      canvas.addEventListener("mousemove",e=>showTip(idxFromMouse(e)));
-      canvas.addEventListener("mouseleave",()=>{ if(!isDragging){ document.getElementById("tip").style.display="none"; drawChart(chartData);} });
-      canvas.addEventListener("mousedown",e=>{ isDragging=true; showTip(idxFromMouse(e)); });
-      window.addEventListener("mouseup",()=>{ isDragging=false; });
-      canvas.addEventListener("touchstart",e=>{ isDragging=true; showTip(idxFromMouse(e.touches[0]));},{passive:true});
-      canvas.addEventListener("touchmove", e=> showTip(idxFromMouse(e.touches[0])), {passive:true});
-      canvas.addEventListener("touchend", ()=>{ isDragging=false; });
+    // --------------- Orchestration ---------------
+    async function refreshAll() {
+      if (isLoading) return;
+      isLoading = true;
+      setStatus('Loading...');
+      const sym = symbolInput.value.trim().toUpperCase() || 'AAPL';
 
-      // initial
-      loadQuote(input.value);
+      await loadVersion();
+      await loadQuote(sym);
+      await loadSummary(sym);
+
+      const hist = await loadHistory(sym, activeRange);
+      points = hist;
+      drawLineChart(points);
+
+      setStatus('Loaded.');
+      isLoading = false;
+    }
+
+    // UI events
+    getBtn.addEventListener('click', () => refreshAll());
+    refreshBtn.addEventListener('click', () => refreshAll());
+    symbolInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') refreshAll();
     });
+
+    $$('.chip').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        $$('.chip').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        activeRange = btn.dataset.range;
+        await refreshAll();
+      });
+    });
+
+    // First load
+    refreshAll();
+    // Optional auto-refresh every 90s
+    setInterval(refreshAll, 90000);
   </script>
 </body>
 </html>
+
 
 
 
