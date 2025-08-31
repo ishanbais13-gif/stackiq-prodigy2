@@ -1,46 +1,96 @@
 import os
+import time
 import requests
+from typing import Any, Dict, List, Optional
 
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+BASE = "https://finnhub.io/api/v1"
 
-def fetch_quote(symbol: str):
-    if not FINNHUB_API_KEY:
+def _get(url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not FINNHUB_KEY:
         return None
-
-    url = "https://finnhub.io/api/v1/quote"
-    params = {"symbol": symbol.upper(), "token": FINNHUB_API_KEY}
+    p = dict(params or {})
+    p["token"] = FINNHUB_KEY
     try:
-        r = requests.get(url, params=params, timeout=8)
+        r = requests.get(url, params=p, timeout=12)
         r.raise_for_status()
-        q = r.json() or {}
+        return r.json()
     except Exception:
         return None
 
-    # Finnhub returns 0 when market closed/no data; still parse basics
+def _pct_change(prev: Optional[float], curr: Optional[float]) -> Optional[float]:
     try:
-        current = float(q.get("c") or 0)
-        prev_close = float(q.get("pc") or 0)
-        high = float(q.get("h") or 0)
-        low = float(q.get("l") or 0)
-        open_ = float(q.get("o") or 0)
+        if prev in (None, 0, 0.0) or curr is None:
+            return None
+        return (float(curr) - float(prev)) / float(prev) * 100.0
     except Exception:
         return None
 
-    pct_change = 0.0
-    if prev_close:
-        pct_change = (current - prev_close) / prev_close * 100.0
+def fetch_quote(symbol: str) -> Optional[Dict[str, Any]]:
+    sym = (symbol or "").upper().strip()
+    if not sym:
+        return None
 
+    j = _get(f"{BASE}/quote", {"symbol": sym})
+    if not j or "c" not in j:
+        return None
+
+    c = j.get("c")
+    pc = j.get("pc")
+    h = j.get("h")
+    l = j.get("l")
+    o = j.get("o")
+
+    # Some invalid symbols return zeros for everything; treat as missing
+    if all(v in (None, 0, 0.0) for v in [c, pc, h, l, o]):
+        return None
+
+    pct = _pct_change(pc, c)
     return {
-        "symbol": symbol.upper(),
-        "current": current,
-        "prev_close": prev_close,
-        "high": high,
-        "low": low,
-        "open": open_,
-        "percent_change": round(pct_change, 3),
-        "volume": None,
-        "raw": {"c": current, "pc": prev_close, "h": high, "l": low, "o": open_},
+        "symbol": sym,
+        "current": c,
+        "prev_close": pc,
+        "high": h,
+        "low": l,
+        "open": o,
+        "percent_change": None if pct is None else round(pct, 3),
+        "volume": j.get("v"),
+        "raw": j,
     }
+
+def _range_days(key: str) -> int:
+    return {"1M": 31, "3M": 93, "6M": 186, "1Y": 372}.get(key.upper(), 31)
+
+def fetch_history(symbol: str, range_key: str = "1M") -> Optional[List[Dict[str, float]]]:
+    """
+    Returns list of {"t": epochSec, "c": close} points (or [] if none).
+    """
+    sym = (symbol or "").upper().strip()
+    if not sym:
+        return None
+
+    now = int(time.time())
+    start = now - _range_days(range_key) * 24 * 60 * 60
+
+    # Finnhub /stock/candle uses keys: s(status), t(times[]), c(closes[])
+    j = _get(f"{BASE}/stock/candle", {
+        "symbol": sym,
+        "resolution": "D",
+        "from": start,     # NOTE: must be 'from', not '_from'
+        "to": now,
+    })
+    if not j or j.get("s") != "ok":
+        return []
+
+    ts = j.get("t") or []
+    cs = j.get("c") or []
+    out: List[Dict[str, float]] = []
+    for t, c in zip(ts, cs):
+        try:
+            out.append({"t": float(t), "c": float(c)})
+        except Exception:
+            continue
+    return out
 
 
 
