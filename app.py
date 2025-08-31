@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 
-from data_fetcher import fetch_quote, fetch_candles
+from data_fetcher import fetch_quote, fetch_history
 
 APP_NAME = "stackiq-web"
 APP_VERSION = "1.0.0"
@@ -43,6 +43,7 @@ def version():
 def quote(symbol: str):
     data = fetch_quote(symbol)
     if not data:
+        # If Finnhub gave us nothing, return 404 so the UI shows a clean error
         raise HTTPException(status_code=404, detail="Symbol not found")
     return data
 
@@ -61,10 +62,16 @@ def summary(symbol: str):
     return {"symbol": data["symbol"], "summary": msg, "quote": data}
 
 @app.get("/history/{symbol}")
-def history(symbol: str, range: str = Query("1M", pattern="^(1M|3M|6M|1Y)$")):
-    candles = fetch_candles(symbol, range)
-    # Return empty list (200) if none (keeps UI happy even if rate-limited/no key)
-    return candles or []
+def history(symbol: str, range: str = Query("3M", pattern="^(1M|3M|6M|1Y)$")):
+    """
+    Historical close prices for a symbol. range in: 1M, 3M, 6M, 1Y
+    """
+    pts = fetch_history(symbol, range)
+    if not pts:
+        # Prefer 404 so UI can show clear message without crashing
+        raise HTTPException(status_code=404, detail="No history available")
+    return {"symbol": symbol.upper(), "range": range, "points": pts}
+
 
 
 
