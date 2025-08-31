@@ -5,272 +5,353 @@
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>StackIQ — Live Quote</title>
 <style>
-  :root{--bg:#0f172a;--panel:#111827;--panel-2:#0b1220;--text:#e5e7eb;--muted:#9ca3af;--accent:#3b82f6;--ok:#10b981;--bad:#ef4444;--r:16px}
-  html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
-  .container{max-width:1100px;margin:48px auto;padding:0 16px}
-  h1{font-size:22px;letter-spacing:.3px;margin:0 0 18px}
-  .grid{display:grid;grid-template-columns:1.2fr .9fr;gap:24px}
-  .card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid rgba(255,255,255,.06);border-radius:var(--r);box-shadow:0 10px 24px rgba(0,0,0,.25);padding:18px}
-  .row{display:flex;align-items:center;gap:10px}.grow{flex:1 1 auto}
-  input[type=text]{width:100%;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.04);color:var(--text);outline:none}
-  button{background:var(--accent);color:#fff;border:none;padding:10px 14px;border-radius:12px;font-weight:600;cursor:pointer}
-  button.secondary{background:transparent;border:1px solid rgba(255,255,255,.12);color:var(--text)}
-  .kv{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0 12px}
-  .kv .box{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:12px;min-height:62px}
-  .label{color:var(--muted);font-size:12px;margin-bottom:6px}.val{font-size:18px;font-weight:700}
-  .range{display:flex;gap:8px;margin:12px 0 8px;flex-wrap:wrap}
-  .range button{padding:6px 10px;border-radius:999px;font-size:12px}
-  .range button.active{background:rgba(59,130,246,.2);border:1px solid var(--accent)}
+  /* ===== Theme */
+  :root{
+    --bg-1:#0b1020;           /* page */
+    --bg-2:#0e1428;           /* panels */
+    --bg-3:#0a0f1f;
+    --glass:rgba(255,255,255,.06);
+    --stroke:rgba(255,255,255,.09);
+    --muted:#9aa4b2;
+    --text:#e7ecf2;
+    --accent:#6aa2ff;
+    --accent-2:#8a7dff;
+    --ok:#1dd1a1;
+    --bad:#ff6b6b;
+    --radius:18px;
+    --radius-sm:12px;
+    --shadow:0 10px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.04);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; color:var(--text);
+    font:15px/1.45 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;
+    background:
+      radial-gradient(1200px 900px at -10% -20%, #13203f 0%, transparent 60%),
+      radial-gradient(900px 700px at 110% -10%, #26163f 0%, transparent 60%),
+      linear-gradient(180deg, var(--bg-1), var(--bg-3));
+    background-attachment: fixed;
+  }
+  a{color:var(--accent);text-decoration:none}
+  .container{max-width:1240px;margin:48px auto;padding:0 24px}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+  .brand{display:flex;align-items:center;gap:10px}
+  .logo{width:36px;height:36px;border-radius:10px;
+    background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    box-shadow:0 6px 18px rgba(106,162,255,.35);
+  }
+  h1{margin:0;font-weight:800;letter-spacing:.3px}
+  .sub{color:var(--muted);font-size:12px;margin-left:6px}
+
+  /* ===== Layout cards */
+  .grid{display:grid;grid-template-columns: minmax(0,1fr) 420px; gap:26px}
+  .card{
+    background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+    border:1px solid var(--stroke);
+    border-radius:var(--radius);
+    backdrop-filter: blur(8px);
+    box-shadow: var(--shadow);
+  }
+  .card > .body{padding:20px 20px}
+  .section-title{color:var(--muted);font-size:12px;margin-bottom:10px}
+
+  /* ===== Search bar */
+  .search{display:flex;gap:10px;align-items:center;margin-bottom:14px}
+  .search input{
+    flex:1 1 auto; height:46px; padding:0 14px; border-radius:var(--radius-sm);
+    border:1px solid var(--stroke); background:rgba(255,255,255,.03); color:var(--text);
+    outline:none; font-size:15px;
+  }
+  .btn{
+    height:46px; padding:0 14px; border-radius:var(--radius-sm);
+    border:1px solid transparent; background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    color:#0b1020; font-weight:800; cursor:pointer; letter-spacing:.2px;
+    box-shadow:0 6px 14px rgba(106,162,255,.35);
+  }
+  .btn.secondary{
+    background:transparent; color:var(--text); border-color:var(--stroke);
+    box-shadow:none;
+  }
+
+  /* ===== Quote grid */
+  .kv{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .kv .box{
+    background:rgba(255,255,255,.035); border:1px solid var(--stroke);
+    border-radius:14px; padding:12px 12px; min-height:72px;
+  }
+  .label{color:var(--muted);font-size:12px;margin-bottom:6px}
+  .val{font-size:20px;font-weight:800;letter-spacing:.1px}
+
+  /* ===== Range buttons */
+  .range{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 4px}
+  .chip{
+    border:1px solid var(--stroke); background:rgba(255,255,255,.03);
+    color:var(--text); height:34px; padding:0 12px; border-radius:999px; cursor:pointer;
+    font-weight:600; letter-spacing:.2px;
+  }
+  .chip.active{border-color:var(--accent); box-shadow:0 0 0 3px rgba(106,162,255,.15) inset}
+
+  /* ===== Chart */
+  .chart-wrap{position:relative;margin-top:8px}
+  canvas{width:100%;height:340px;display:block;cursor:crosshair}
+  .tooltip{
+    position:absolute; pointer-events:none; display:none;
+    background:#0e1530; border:1px solid var(--stroke); color:var(--text);
+    border-radius:10px; padding:8px 10px; font-size:12px;
+    box-shadow: var(--shadow); transform:translate(-50%,-110%); white-space:nowrap;
+  }
   .api-note{color:var(--muted);font-size:12px;margin-top:10px}
-  .status .ok{color:var(--ok)}.status .bad{color:var(--bad)}
-  .chart-wrap{position:relative}
-  canvas{width:100%;height:260px;display:block;cursor:crosshair}
-  .tooltip{position:absolute;pointer-events:none;background:#0b1020;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:6px 8px;font-size:12px;color:var(--text);box-shadow:0 6px 16px rgba(0,0,0,.35);transform:translate(-50%,-110%);white-space:nowrap}
-  .footer{margin-top:20px;color:var(--muted);font-size:12px;text-align:center}
+
+  /* ===== Status panel */
+  .status .body{padding:20px}
+  .status .ok{color:var(--ok); font-weight:700}
+  .status .bad{color:var(--bad); font-weight:700}
+  .stat-line{padding:10px 0 14px;border-bottom:1px dashed var(--stroke);margin-bottom:12px}
+  .summary{color:#cdd6e3; font-size:13px; line-height:1.5}
+
+  /* ===== Footer */
+  .footer{margin-top:22px;color:var(--muted);font-size:12px;text-align:center}
+
+  /* ===== Responsive */
+  @media (max-width: 1020px){
+    .grid{grid-template-columns:1fr}
+    .kv{grid-template-columns:repeat(2,1fr)}
+  }
 </style>
 </head>
 <body>
-<div class="container">
-  <h1>StackIQ</h1>
+  <div class="container">
+    <header>
+      <div class="brand">
+        <div class="logo"></div>
+        <div>
+          <h1>StackIQ</h1>
+          <div class="sub">Minimal market data UI</div>
+        </div>
+      </div>
+    </header>
 
-  <div class="grid">
-    <!-- LEFT -->
-    <div class="card">
-      <div class="row">
-        <input id="symbol" type="text" placeholder="AAPL" value="AAPL" class="grow" />
-        <button id="getQuoteBtn">Get Quote</button>
-        <button id="sparkBtn" class="secondary" title="Refresh chart only">↻</button>
+    <div class="grid">
+      <!-- ===== MAIN PANEL ===== -->
+      <div class="card">
+        <div class="body">
+          <div class="search">
+            <input id="symbol" type="text" placeholder="AAPL" value="AAPL" />
+            <button id="getQuoteBtn" class="btn">Get&nbsp;Quote</button>
+            <button id="sparkBtn" class="btn secondary" title="Refresh chart">↻</button>
+          </div>
+
+          <div class="kv">
+            <div class="box"><div class="label">Session High</div><div class="val" id="high">—</div></div>
+            <div class="box"><div class="label">Session Low</div><div class="val" id="low">—</div></div>
+            <div class="box"><div class="label">Open</div><div class="val" id="open">—</div></div>
+            <div class="box"><div class="label">Prev Close</div><div class="val" id="prev">—</div></div>
+          </div>
+
+          <div class="range" id="rangeBtns">
+            <button class="chip active" data-range="1M">1M</button>
+            <button class="chip" data-range="3M">3M</button>
+            <button class="chip" data-range="6M">6M</button>
+            <button class="chip" data-range="1Y">1Y</button>
+          </div>
+
+          <div class="chart-wrap">
+            <canvas id="chart" width="1100" height="340" aria-label="Price chart"></canvas>
+            <div id="tip" class="tooltip"></div>
+          </div>
+
+          <div class="api-note">API: <code>/quote/{symbol}</code> · <code>/summary/{symbol}</code> · <code>/history/{symbol}</code></div>
+        </div>
       </div>
 
-      <div class="kv">
-        <div class="box"><div class="label">Session High</div><div class="val" id="high">—</div></div>
-        <div class="box"><div class="label">Session Low</div><div class="val" id="low">—</div></div>
-        <div class="box"><div class="label">Open</div><div class="val" id="open">—</div></div>
-        <div class="box"><div class="label">Prev Close</div><div class="val" id="prev">—</div></div>
-      </div>
+      <!-- ===== STATUS PANEL ===== -->
+      <div class="card status" style="position:sticky; top:24px; align-self:start;">
+        <div class="body">
+          <div class="section-title">Status</div>
+          <div id="statusLine" class="ok stat-line">Loaded.</div>
 
-      <div class="range" id="rangeBtns">
-        <button data-range="1M" class="active">1M</button>
-        <button data-range="3M">3M</button>
-        <button data-range="6M">6M</button>
-        <button data-range="1Y">1Y</button>
-      </div>
+          <div class="section-title">Version</div>
+          <div id="version" class="stat-line">—</div>
 
-      <div class="chart-wrap">
-        <canvas id="chart" width="900" height="260" aria-label="Price chart"></canvas>
-        <div id="tip" class="tooltip" style="display:none"></div>
+          <div class="section-title">Summary</div>
+          <div id="summary" class="summary">—</div>
+        </div>
       </div>
-
-      <div class="api-note">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>, <code>/history/{symbol}</code></div>
     </div>
 
-    <!-- RIGHT -->
-    <div class="card status">
-      <div class="label">Status</div>
-      <div id="statusLine" class="ok">Loaded.</div>
-      <div class="label" style="margin-top:12px">Version</div>
-      <div id="version">—</div>
-      <div class="label" style="margin-top:12px">Summary</div>
-      <div id="summary">—</div>
-    </div>
+    <div class="footer">© 2025 StackIQ</div>
   </div>
 
-  <div class="footer">© 2025 StackIQ · minimal market data UI</div>
-</div>
-
-<script>
-  // ========== helpers ==========
-  async function getJSON(url){
-    const r = await fetch(url,{headers:{"Accept":"application/json"}});
-    if(!r.ok){
-      let d="Request failed"; try{const j=await r.json(); d=j?.detail||d;}catch{}
-      const e=new Error(`${r.status}: ${d}`); e.status=r.status; throw e;
-    }
-    return r.json();
-  }
-  const fmt = n => (n==null||isNaN(n))? "—" : Number(n).toFixed(3);
-  function setStatus(msg,err=false){const el=document.getElementById("statusLine"); el.textContent=msg; el.className=err?"bad":"ok"}
-
-  // Chart state
-  let chartPoints = []; // [{x,y,val,label}]
-  let chartData   = []; // raw values (numbers)
-  let chartLabels = []; // label per point (date or index)
-  let isDragging=false, lastHover=-1;
-
-  function drawChart(points){
-    const canvas=document.getElementById("chart");
-    const ctx=canvas.getContext("2d");
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-
-    chartPoints=[]; chartData = points || [];
-    if(!points || !points.length){
-      ctx.fillStyle="rgba(255,255,255,.4)";
-      ctx.font="14px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial";
-      ctx.fillText("No data", 12,24);
-      return;
-    }
-    const W=canvas.width, H=canvas.height, pad=20;
-    const min=Math.min(...points), max=Math.max(...points), span=(max-min)||1;
-
-    // line
-    ctx.lineWidth=2; ctx.strokeStyle="rgba(59,130,246,0.9)"; ctx.beginPath();
-    points.forEach((v,i)=>{
-      const x = pad + (i * (W - pad*2)) / (points.length - 1 || 1);
-      const y = H - pad - ((v - min)/span) * (H - pad*2);
-      chartPoints.push({x,y,val:v,label:chartLabels[i] || String(i)});
-      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-    });
-    ctx.stroke();
-
-    // baseline
-    ctx.strokeStyle="rgba(255,255,255,.08)"; ctx.lineWidth=1; ctx.beginPath();
-    ctx.moveTo(pad, H-pad); ctx.lineTo(W-pad, H-pad); ctx.stroke();
-  }
-
-  function showTip(idx){
-    const tip=document.getElementById("tip");
-    if(idx<0 || !chartPoints[idx]){ tip.style.display="none"; return; }
-    const p = chartPoints[idx];
-    tip.innerHTML = `<strong>${fmt(p.val)}</strong><div style="color:#9ca3af">${p.label||""}</div>`;
-    tip.style.left = p.x + "px";
-    tip.style.top  = p.y + "px";
-    tip.style.display="block";
-
-    // crosshair
-    const canvas=document.getElementById("chart");
-    const ctx=canvas.getContext("2d");
-    drawChart(chartData); // redraw base
-    ctx.strokeStyle="rgba(255,255,255,.25)";
-    ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(p.x, 10); ctx.lineTo(p.x, canvas.height-10); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(10, p.y); ctx.lineTo(canvas.width-10, p.y); ctx.stroke();
-  }
-
-  function idxFromMouse(evt){
-    const canvas=document.getElementById("chart");
-    const rect = canvas.getBoundingClientRect();
-    const mx = (evt.clientX - rect.left) * (canvas.width/rect.width);
-    // find nearest x
-    let best=-1, bestd=1e9;
-    chartPoints.forEach((p,i)=>{
-      const d=Math.abs(p.x - mx);
-      if(d<bestd){best=i; bestd=d;}
-    });
-    return best;
-  }
-
-  // Fallback synthetic sparkline from a quote
-  function synthHistory(q){
-    if(!q) return [];
-    const base = q.prev_close || q.open || q.current || 100;
-    const hi = q.high || base*1.01, lo=q.low || base*0.99;
-    const pts=[base*0.995, lo, base*1.02, base*1.01, base*0.998, base*0.99, q.current||base];
-    return pts.map(p=>Math.min(hi, Math.max(lo,p)));
-  }
-
-  async function loadHistory(symbol, range="1M"){
-    try{
-      const rows = await getJSON(`/history/${encodeURIComponent(symbol)}?range=${range}`);
-      // Accept either [{c,t},…] or [number,…]
-      if(Array.isArray(rows) && rows.length){
-        const vals = rows.map(r => (typeof r==="number" ? r : Number(r.c)));
-        chartLabels = rows.map((r,i)=>{
-          if(typeof r==="number") return `${i+1}`;
-          const t = Number(r.t||r.time||0);
-          if(!t) return `${i+1}`;
-          const d = new Date((String(t).length>10?t: t*1000));
-          return d.toLocaleDateString();
-        });
-        return vals.filter(v => isFinite(v));
+  <script>
+    /* ========= utilities ========= */
+    async function getJSON(url){
+      const r = await fetch(url,{headers:{Accept:"application/json"}});
+      if(!r.ok){
+        let msg="Request failed"; try{const j=await r.json(); msg=j?.detail||msg;}catch{}
+        const e=new Error(`${r.status}: ${msg}`); e.status=r.status; throw e;
       }
-      return [];
-    }catch{ return []; }
-  }
+      return r.json();
+    }
+    const fmt = n => (n==null||isNaN(n))? "—" : Number(n).toFixed(3);
+    const setStatus = (t, err=false) => {
+      const el = document.getElementById("statusLine");
+      el.textContent = t; el.className = (err?"bad":"ok")+" stat-line";
+    };
 
-  // ========== page behaviors ==========
-  async function loadVersion(){
-    try{ const v=await getJSON("/version"); document.getElementById("version").textContent = `${v.app} ${v.version}`;}
-    catch{ document.getElementById("version").textContent="unknown"; }
-  }
+    /* ========= chart state ========= */
+    let chartPoints=[], chartData=[], chartLabels=[];
+    let isDragging=false;
 
-  async function loadQuote(symbol){
-    const sym=(symbol||"").trim().toUpperCase(); if(!sym) return;
-    setStatus("Loading…"); document.getElementById("summary").textContent="—";
+    function drawChart(points){
+      const c=document.getElementById("chart"), ctx=c.getContext("2d");
+      ctx.clearRect(0,0,c.width,c.height);
+      chartPoints=[]; chartData=points||[];
 
-    try{
-      const q = await getJSON(`/quote/${encodeURIComponent(sym)}`);
-      document.getElementById("high").textContent = fmt(q.high);
-      document.getElementById("low").textContent  = fmt(q.low);
-      document.getElementById("open").textContent = fmt(q.open);
-      document.getElementById("prev").textContent = fmt(q.prev_close);
+      if(!points||!points.length){
+        ctx.fillStyle="rgba(255,255,255,.45)"; ctx.font="14px system-ui"; ctx.fillText("No data", 14,24); return;
+      }
+      const W=c.width, H=c.height, padX=34, padY=26;
+      const min=Math.min(...points), max=Math.max(...points), span=(max-min)||1;
 
-      // summary
+      // gradient stroke
+      const grad=ctx.createLinearGradient(0,0,0,H);
+      grad.addColorStop(0,"rgba(106,162,255,1)");
+      grad.addColorStop(1,"rgba(138,125,255,1)");
+      ctx.lineWidth=2.2; ctx.strokeStyle=grad; ctx.beginPath();
+
+      points.forEach((v,i)=>{
+        const x = padX + (i * (W - padX*2)) / (points.length - 1 || 1);
+        const y = H - padY - ((v-min)/span) * (H - padY*2);
+        chartPoints.push({x,y,val:v,label:chartLabels[i]||String(i+1)});
+        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+      });
+      ctx.stroke();
+
+      // gridline baseline
+      ctx.strokeStyle="rgba(255,255,255,.08)"; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(padX, H-padY); ctx.lineTo(W-padX, H-padY); ctx.stroke();
+    }
+
+    function showTip(idx){
+      const tip=document.getElementById("tip");
+      if(idx<0||!chartPoints[idx]){ tip.style.display="none"; drawChart(chartData); return; }
+      const p=chartPoints[idx]; tip.style.display="block";
+      tip.innerHTML = `<strong>${fmt(p.val)}</strong><div style="color:#9aa4b2">${p.label||""}</div>`;
+      tip.style.left=p.x+"px"; tip.style.top=p.y+"px";
+      // crosshair
+      const c=document.getElementById("chart"), ctx=c.getContext("2d");
+      drawChart(chartData);
+      ctx.strokeStyle="rgba(255,255,255,.2)"; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(p.x, 8); ctx.lineTo(p.x, c.height-8); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(8, p.y); ctx.lineTo(c.width-8, p.y); ctx.stroke();
+    }
+
+    function idxFromMouse(evt){
+      const c=document.getElementById("chart"); const r=c.getBoundingClientRect();
+      const mx=(evt.clientX - r.left) * (c.width/r.width);
+      let best=-1, dmin=1e9;
+      chartPoints.forEach((p,i)=>{ const d=Math.abs(p.x-mx); if(d<dmin){dmin=d; best=i;} });
+      return best;
+    }
+
+    function synthHistory(q){
+      if(!q) return [];
+      const base=q.prev_close||q.open||q.current||100;
+      const hi=q.high||base*1.02, lo=q.low||base*0.98;
+      const arr=[base*0.996, lo, base*1.022, base*1.012, base*0.997, base*0.988, q.current||base];
+      return arr.map(v=>Math.min(hi,Math.max(lo,v)));
+    }
+
+    async function loadHistory(symbol, range="1M"){
       try{
-        const s=await getJSON(`/summary/${encodeURIComponent(sym)}`);
-        document.getElementById("summary").textContent = s.summary || "—";
-      }catch{
-        document.getElementById("summary").textContent = `${sym}: ${fmt(q.current)} (${fmt(q.percent_change)}%)`;
-      }
-
-      // range + history
-      const activeBtn = document.querySelector(".range button.active");
-      const selRange = activeBtn ? activeBtn.dataset.range : "1M";
-      const hist = await loadHistory(sym, selRange);
-      if(hist.length){ drawChart(hist); }
-      else { chartLabels = []; drawChart(synthHistory(q)); }
-
-      setStatus("Loaded.");
-    }catch(err){
-      setStatus(`Failed to load quote: ${err.message}`, true);
-      ["high","low","open","prev"].forEach(id=>document.getElementById(id).textContent="—");
-      drawChart([]);
+        const rows = await getJSON(`/history/${encodeURIComponent(symbol)}?range=${range}`);
+        if(Array.isArray(rows) && rows.length){
+          const vals = rows.map(r => (typeof r==="number"? r : Number(r.c)));
+          chartLabels = rows.map((r,i)=>{
+            if(typeof r==="number") return `#${i+1}`;
+            const t=Number(r.t||r.time||0); if(!t) return `#${i+1}`;
+            const d=new Date((String(t).length>10?t: t*1000)); return d.toLocaleDateString();
+          });
+          return vals.filter(v=>isFinite(v));
+        }
+      }catch{}
+      return [];
     }
-  }
 
-  // ========== wire up ==========
-  window.addEventListener("DOMContentLoaded", ()=>{
-    loadVersion();
+    /* ========= data flows ========= */
+    async function loadVersion(){
+      try{ const v=await getJSON("/version"); document.getElementById("version").textContent=`${v.app} ${v.version}`; }
+      catch{ document.getElementById("version").textContent="unknown"; }
+    }
 
-    const input=document.getElementById("symbol");
-    document.getElementById("getQuoteBtn").addEventListener("click", ()=>loadQuote(input.value));
-    input.addEventListener("keydown",(e)=>{ if(e.key==="Enter") loadQuote(input.value); });
-    document.getElementById("sparkBtn").addEventListener("click", async ()=>{
-      const sym=input.value.trim().toUpperCase(); if(!sym) return;
-      const activeBtn=document.querySelector(".range button.active");
-      const selRange=activeBtn?activeBtn.dataset.range:"1M";
-      const hist=await loadHistory(sym, selRange);
-      if(hist.length) drawChart(hist);
-    });
+    async function loadQuote(symbol){
+      const sym=(symbol||"").trim().toUpperCase(); if(!sym) return;
+      setStatus("Loading…");
+      document.getElementById("summary").textContent="—";
+      try{
+        const q=await getJSON(`/quote/${encodeURIComponent(sym)}`);
+        document.getElementById("high").textContent=fmt(q.high);
+        document.getElementById("low").textContent =fmt(q.low);
+        document.getElementById("open").textContent=fmt(q.open);
+        document.getElementById("prev").textContent =fmt(q.prev_close);
 
-    // range buttons
-    document.getElementById("rangeBtns").addEventListener("click", (e)=>{
-      if(e.target.tagName!=="BUTTON") return;
-      document.querySelectorAll(".range button").forEach(b=>b.classList.remove("active"));
-      e.target.classList.add("active");
+        // summary
+        try{
+          const s=await getJSON(`/summary/${encodeURIComponent(sym)}`);
+          document.getElementById("summary").textContent=s.summary||"—";
+        }catch{
+          document.getElementById("summary").textContent=`${sym}: ${fmt(q.current)} (${fmt(q.percent_change)}%)`;
+        }
+
+        // history
+        const active=document.querySelector(".chip.active");
+        const range=active?active.dataset.range:"1M";
+        const hist=await loadHistory(sym, range);
+        if(hist.length){ drawChart(hist); } else { chartLabels=[]; drawChart(synthHistory(q)); }
+
+        setStatus("Loaded.");
+      }catch(err){
+        setStatus(`Failed: ${err.message}`, true);
+        ["high","low","open","prev"].forEach(id=>document.getElementById(id).textContent="—");
+        drawChart([]);
+      }
+    }
+
+    /* ========= wire up ========= */
+    window.addEventListener("DOMContentLoaded", ()=>{
+      loadVersion();
+      const input=document.getElementById("symbol");
+      document.getElementById("getQuoteBtn").addEventListener("click", ()=>loadQuote(input.value));
+      input.addEventListener("keydown",e=>{ if(e.key==="Enter") loadQuote(input.value); });
+      document.getElementById("sparkBtn").addEventListener("click", async ()=>{
+        const sym=input.value.trim().toUpperCase(); if(!sym) return;
+        const active=document.querySelector(".chip.active"); const range=active?active.dataset.range:"1M";
+        const hist=await loadHistory(sym, range); if(hist.length) drawChart(hist);
+      });
+      document.getElementById("rangeBtns").addEventListener("click", e=>{
+        if(!e.target.classList.contains("chip")) return;
+        document.querySelectorAll(".chip").forEach(b=>b.classList.remove("active"));
+        e.target.classList.add("active");
+        loadQuote(input.value);
+      });
+
+      const canvas=document.getElementById("chart");
+      canvas.addEventListener("mousemove",e=>showTip(idxFromMouse(e)));
+      canvas.addEventListener("mouseleave",()=>{ if(!isDragging){ document.getElementById("tip").style.display="none"; drawChart(chartData);} });
+      canvas.addEventListener("mousedown",e=>{ isDragging=true; showTip(idxFromMouse(e)); });
+      window.addEventListener("mouseup",()=>{ isDragging=false; });
+      canvas.addEventListener("touchstart",e=>{ isDragging=true; showTip(idxFromMouse(e.touches[0]));},{passive:true});
+      canvas.addEventListener("touchmove", e=> showTip(idxFromMouse(e.touches[0])), {passive:true});
+      canvas.addEventListener("touchend", ()=>{ isDragging=false; });
+
+      // initial
       loadQuote(input.value);
     });
-
-    // chart interactions
-    const canvas=document.getElementById("chart");
-    canvas.addEventListener("mousemove",(e)=>{
-      if(!chartPoints.length) return;
-      const idx = idxFromMouse(e);
-      lastHover = idx;
-      showTip(idx);
-    });
-    canvas.addEventListener("mouseleave",()=>{ if(!isDragging){ document.getElementById("tip").style.display="none"; drawChart(chartData); }});
-    canvas.addEventListener("mousedown",(e)=>{ isDragging=true; const idx=idxFromMouse(e); showTip(idx); });
-    window.addEventListener("mouseup",()=>{ isDragging=false; });
-    canvas.addEventListener("touchstart",(e)=>{ isDragging=true; const t=e.touches[0]; showTip(idxFromMouse(t)); },{passive:true});
-    canvas.addEventListener("touchmove",(e)=>{ const t=e.touches[0]; showTip(idxFromMouse(t)); },{passive:true});
-    canvas.addEventListener("touchend",()=>{ isDragging=false; });
-
-    // initial load
-    loadQuote(input.value);
-  });
-</script>
+  </script>
 </body>
 </html>
+
 
 
 
