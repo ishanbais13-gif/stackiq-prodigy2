@@ -1,56 +1,69 @@
-# --- Historical candles from Finnhub -----------------------------------------
-import time
+# data_fetcher.py
 import os
 import requests
+from typing import Optional, Dict, Any
 
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+FINNHUB_BASE_URL = "https://finnhub.io/api/v1"
 
-def fetch_history(symbol: str, range_key: str):
+
+def _pct_change(current: Optional[float], prev_close: Optional[float]) -> Optional[float]:
+    if current is None or prev_close in (None, 0):
+        return None
+    try:
+        return round(((current - prev_close) / prev_close) * 100, 3)
+    except Exception:
+        return None
+
+
+def fetch_quote(symbol: str) -> Optional[Dict[str, Any]]:
     """
-    Return a list of {t, c} points for the given symbol and range_key in:
-      '1M', '3M', '6M', '1Y'
-    Uses Finnhub stock/candle with daily resolution.
+    Returns a normalized quote dict or None if the symbol isn't found / request fails.
+    Uses Finnhub /quote with FINNHUB_API_KEY.
     """
+    if not symbol:
+        return None
+
     if not FINNHUB_API_KEY:
-        return []
+        # No API key available — fail fast so the API can surface a clear error upstream if needed
+        return None
 
-    range_key = (range_key or "3M").upper()
-    now = int(time.time())
-
-    days_map = {
-        "1M": 30,
-        "3M": 90,
-        "6M": 180,
-        "1Y": 365,
-    }
-    days = days_map.get(range_key, 90)
-
-    frm = now - days * 24 * 60 * 60
-    url = "https://finnhub.io/api/v1/stock/candle"
-    params = {
-        "symbol": symbol.upper(),
-        "resolution": "D",
-        "from": frm,
-        "to": now,
-        "token": FINNHUB_API_KEY,
-    }
+    url = f"{FINNHUB_BASE_URL}/quote"
+    params = {"symbol": symbol.upper(), "token": FINNHUB_API_KEY}
 
     try:
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        j = r.json()
-        # Expected when OK: { "c": [...], "t": [...], "s": "ok", ... }
-        if j.get("s") != "ok" or not j.get("c") or not j.get("t"):
-            return []
+        resp = requests.get(url, params=params, timeout=10)
+    except requests.RequestException:
+        return None
 
-        closes = j["c"]
-        times = j["t"]
-        points = [{"t": int(t), "c": float(c)} for t, c in zip(times, closes)]
-        # Finnhub can return oldest->newest already; ensure sorted
-        points.sort(key=lambda p: p["t"])
-        return points
-    except Exception:
-        return []
+    if resp.status_code != 200:
+        return None
+
+    data = resp.json() or {}
+
+    # Finnhub returns 0/None for missing values; also 'c','h','l','o','pc' are standard keys
+    current = data.get("c")
+    high = data.get("h")
+    low = data.get("l")
+    open_ = data.get("o")
+    prev_close = data.get("pc")
+
+    # Some symbols return zeros when closed/invalid; treat all-zero as not found
+    if all(v in (0, None) for v in [current, high, low, open_, prev_close]):
+        return None
+
+    return {
+        "symbol": symbol.upper(),
+        "current": current,
+        "prev_close": prev_close,
+        "high": high,
+        "low": low,
+        "open": open_,
+        "percent_change": _pct_change(current, prev_close),
+        # raw payload if you want to inspect it on the UI
+        "raw": {"c": current, "pc": prev_close, "h": high, "l": low, "o": open_},
+    }
+
 
 
 
