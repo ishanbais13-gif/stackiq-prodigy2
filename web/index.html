@@ -1,336 +1,274 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>StackIQ — Live Quote</title>
-  <style>
-    :root {
-      --bg: #0f172a;
-      --panel: #111827;
-      --panel-2: #0b1220;
-      --text: #e5e7eb;
-      --muted: #9ca3af;
-      --accent: #3b82f6;
-      --ok: #10b981;
-      --bad: #ef4444;
-      --card-radius: 16px;
-    }
-    html, body {
-      height: 100%;
-      margin: 0;
-      background: var(--bg);
-      color: var(--text);
-      font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
-    }
-    .container {
-      max-width: 1100px;
-      margin: 48px auto;
-      padding: 0 16px;
-    }
-    h1 { font-size: 22px; letter-spacing: .3px; margin: 0 0 18px; }
-    .grid {
-      display: grid;
-      grid-template-columns: 1.2fr .9fr;
-      gap: 24px;
-    }
-    .card {
-      background: linear-gradient(180deg, var(--panel), var(--panel-2));
-      border: 1px solid rgba(255,255,255,.06);
-      border-radius: var(--card-radius);
-      box-shadow: 0 10px 24px rgba(0,0,0,.25);
-      padding: 18px;
-    }
-    .row { display: flex; align-items: center; gap: 10px; }
-    .grow { flex: 1 1 auto; }
-    input[type="text"]{
-      width: 100%;
-      padding: 12px 14px;
-      border-radius: 12px;
-      border: 1px solid rgba(255,255,255,.08);
-      background: rgba(255,255,255,.04);
-      color: var(--text);
-      outline: none;
-    }
-    button {
-      background: var(--accent);
-      color: white;
-      border: none;
-      padding: 10px 14px;
-      border-radius: 12px;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    button.secondary {
-      background: transparent;
-      border: 1px solid rgba(255,255,255,.12);
-      color: var(--text);
-    }
-    .kv {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      margin-top: 14px;
-      margin-bottom: 12px;
-    }
-    .kv .box {
-      background: rgba(255,255,255,.03);
-      border: 1px solid rgba(255,255,255,.06);
-      border-radius: 12px;
-      padding: 12px;
-      min-height: 62px;
-    }
-    .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-    .val { font-size: 18px; font-weight: 700; }
-    .api-note { color: var(--muted); font-size: 12px; margin-top: 10px; }
-    .status .ok { color: var(--ok); }
-    .status .bad { color: var(--bad); }
-    .range {
-      display: flex; gap: 8px; margin: 12px 0 8px;
-      flex-wrap: wrap;
-    }
-    .range button { padding: 6px 10px; border-radius: 999px; font-size: 12px; }
-    .range button.active { background: rgba(59,130,246,.2); border: 1px solid var(--accent); }
-    canvas { width: 100%; height: 240px; display: block; }
-    .footer { margin-top: 20px; color: var(--muted); font-size: 12px; text-align: center; }
-  </style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>StackIQ — Live Quote</title>
+<style>
+  :root{--bg:#0f172a;--panel:#111827;--panel-2:#0b1220;--text:#e5e7eb;--muted:#9ca3af;--accent:#3b82f6;--ok:#10b981;--bad:#ef4444;--r:16px}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--text);font:14px/1.4 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial}
+  .container{max-width:1100px;margin:48px auto;padding:0 16px}
+  h1{font-size:22px;letter-spacing:.3px;margin:0 0 18px}
+  .grid{display:grid;grid-template-columns:1.2fr .9fr;gap:24px}
+  .card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid rgba(255,255,255,.06);border-radius:var(--r);box-shadow:0 10px 24px rgba(0,0,0,.25);padding:18px}
+  .row{display:flex;align-items:center;gap:10px}.grow{flex:1 1 auto}
+  input[type=text]{width:100%;padding:12px 14px;border-radius:12px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.04);color:var(--text);outline:none}
+  button{background:var(--accent);color:#fff;border:none;padding:10px 14px;border-radius:12px;font-weight:600;cursor:pointer}
+  button.secondary{background:transparent;border:1px solid rgba(255,255,255,.12);color:var(--text)}
+  .kv{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:14px 0 12px}
+  .kv .box{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:12px;min-height:62px}
+  .label{color:var(--muted);font-size:12px;margin-bottom:6px}.val{font-size:18px;font-weight:700}
+  .range{display:flex;gap:8px;margin:12px 0 8px;flex-wrap:wrap}
+  .range button{padding:6px 10px;border-radius:999px;font-size:12px}
+  .range button.active{background:rgba(59,130,246,.2);border:1px solid var(--accent)}
+  .api-note{color:var(--muted);font-size:12px;margin-top:10px}
+  .status .ok{color:var(--ok)}.status .bad{color:var(--bad)}
+  .chart-wrap{position:relative}
+  canvas{width:100%;height:260px;display:block;cursor:crosshair}
+  .tooltip{position:absolute;pointer-events:none;background:#0b1020;border:1px solid rgba(255,255,255,.15);border-radius:8px;padding:6px 8px;font-size:12px;color:var(--text);box-shadow:0 6px 16px rgba(0,0,0,.35);transform:translate(-50%,-110%);white-space:nowrap}
+  .footer{margin-top:20px;color:var(--muted);font-size:12px;text-align:center}
+</style>
 </head>
 <body>
-  <div class="container">
-    <h1>StackIQ</h1>
+<div class="container">
+  <h1>StackIQ</h1>
 
-    <div class="grid">
-      <!-- Left: quote + chart -->
-      <div class="card">
-        <div class="row">
-          <input id="symbol" type="text" placeholder="AAPL" value="AAPL" class="grow" />
-          <button id="getQuoteBtn">Get Quote</button>
-          <button id="sparkBtn" class="secondary" title="Refresh chart only">↻</button>
-        </div>
+  <div class="grid">
+    <!-- LEFT -->
+    <div class="card">
+      <div class="row">
+        <input id="symbol" type="text" placeholder="AAPL" value="AAPL" class="grow" />
+        <button id="getQuoteBtn">Get Quote</button>
+        <button id="sparkBtn" class="secondary" title="Refresh chart only">↻</button>
+      </div>
 
-        <div class="kv">
-          <div class="box">
-            <div class="label">Session High</div>
-            <div class="val" id="high">—</div>
-          </div>
-          <div class="box">
-            <div class="label">Session Low</div>
-            <div class="val" id="low">—</div>
-          </div>
-          <div class="box">
-            <div class="label">Open</div>
-            <div class="val" id="open">—</div>
-          </div>
-          <div class="box">
-            <div class="label">Prev Close</div>
-            <div class="val" id="prev">—</div>
-          </div>
-        </div>
+      <div class="kv">
+        <div class="box"><div class="label">Session High</div><div class="val" id="high">—</div></div>
+        <div class="box"><div class="label">Session Low</div><div class="val" id="low">—</div></div>
+        <div class="box"><div class="label">Open</div><div class="val" id="open">—</div></div>
+        <div class="box"><div class="label">Prev Close</div><div class="val" id="prev">—</div></div>
+      </div>
 
-        <div class="range" id="rangeBtns">
-          <button data-range="1M" class="active">1M</button>
-          <button data-range="3M">3M</button>
-          <button data-range="6M">6M</button>
-          <button data-range="1Y">1Y</button>
-        </div>
+      <div class="range" id="rangeBtns">
+        <button data-range="1M" class="active">1M</button>
+        <button data-range="3M">3M</button>
+        <button data-range="6M">6M</button>
+        <button data-range="1Y">1Y</button>
+      </div>
 
+      <div class="chart-wrap">
         <canvas id="chart" width="900" height="260" aria-label="Price chart"></canvas>
-        <div class="api-note">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>, <code>/history/{symbol}</code></div>
+        <div id="tip" class="tooltip" style="display:none"></div>
       </div>
 
-      <!-- Right: status -->
-      <div class="card status">
-        <div class="label">Status</div>
-        <div id="statusLine" class="ok">Loaded.</div>
-        <div class="label" style="margin-top:12px">Version</div>
-        <div id="version">—</div>
-        <div class="label" style="margin-top:12px">Summary</div>
-        <div id="summary">—</div>
-      </div>
+      <div class="api-note">API: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>, <code>/history/{symbol}</code></div>
     </div>
 
-    <div class="footer">© 2025 StackIQ · minimal market data UI</div>
+    <!-- RIGHT -->
+    <div class="card status">
+      <div class="label">Status</div>
+      <div id="statusLine" class="ok">Loaded.</div>
+      <div class="label" style="margin-top:12px">Version</div>
+      <div id="version">—</div>
+      <div class="label" style="margin-top:12px">Summary</div>
+      <div id="summary">—</div>
+    </div>
   </div>
 
-  <script>
-    // ---------- helpers ----------
-    async function getJSON(url) {
-      const r = await fetch(url, { headers: { "Accept": "application/json" } });
-      if (!r.ok) {
-        let detail = "Request failed";
-        try {
-          const j = await r.json();
-          detail = j?.detail || detail;
-        } catch (_) {}
-        const err = new Error(`${r.status}: ${detail}`);
-        err.status = r.status;
-        throw err;
+  <div class="footer">© 2025 StackIQ · minimal market data UI</div>
+</div>
+
+<script>
+  // ========== helpers ==========
+  async function getJSON(url){
+    const r = await fetch(url,{headers:{"Accept":"application/json"}});
+    if(!r.ok){
+      let d="Request failed"; try{const j=await r.json(); d=j?.detail||d;}catch{}
+      const e=new Error(`${r.status}: ${d}`); e.status=r.status; throw e;
+    }
+    return r.json();
+  }
+  const fmt = n => (n==null||isNaN(n))? "—" : Number(n).toFixed(3);
+  function setStatus(msg,err=false){const el=document.getElementById("statusLine"); el.textContent=msg; el.className=err?"bad":"ok"}
+
+  // Chart state
+  let chartPoints = []; // [{x,y,val,label}]
+  let chartData   = []; // raw values (numbers)
+  let chartLabels = []; // label per point (date or index)
+  let isDragging=false, lastHover=-1;
+
+  function drawChart(points){
+    const canvas=document.getElementById("chart");
+    const ctx=canvas.getContext("2d");
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    chartPoints=[]; chartData = points || [];
+    if(!points || !points.length){
+      ctx.fillStyle="rgba(255,255,255,.4)";
+      ctx.font="14px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial";
+      ctx.fillText("No data", 12,24);
+      return;
+    }
+    const W=canvas.width, H=canvas.height, pad=20;
+    const min=Math.min(...points), max=Math.max(...points), span=(max-min)||1;
+
+    // line
+    ctx.lineWidth=2; ctx.strokeStyle="rgba(59,130,246,0.9)"; ctx.beginPath();
+    points.forEach((v,i)=>{
+      const x = pad + (i * (W - pad*2)) / (points.length - 1 || 1);
+      const y = H - pad - ((v - min)/span) * (H - pad*2);
+      chartPoints.push({x,y,val:v,label:chartLabels[i] || String(i)});
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+
+    // baseline
+    ctx.strokeStyle="rgba(255,255,255,.08)"; ctx.lineWidth=1; ctx.beginPath();
+    ctx.moveTo(pad, H-pad); ctx.lineTo(W-pad, H-pad); ctx.stroke();
+  }
+
+  function showTip(idx){
+    const tip=document.getElementById("tip");
+    if(idx<0 || !chartPoints[idx]){ tip.style.display="none"; return; }
+    const p = chartPoints[idx];
+    tip.innerHTML = `<strong>${fmt(p.val)}</strong><div style="color:#9ca3af">${p.label||""}</div>`;
+    tip.style.left = p.x + "px";
+    tip.style.top  = p.y + "px";
+    tip.style.display="block";
+
+    // crosshair
+    const canvas=document.getElementById("chart");
+    const ctx=canvas.getContext("2d");
+    drawChart(chartData); // redraw base
+    ctx.strokeStyle="rgba(255,255,255,.25)";
+    ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(p.x, 10); ctx.lineTo(p.x, canvas.height-10); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(10, p.y); ctx.lineTo(canvas.width-10, p.y); ctx.stroke();
+  }
+
+  function idxFromMouse(evt){
+    const canvas=document.getElementById("chart");
+    const rect = canvas.getBoundingClientRect();
+    const mx = (evt.clientX - rect.left) * (canvas.width/rect.width);
+    // find nearest x
+    let best=-1, bestd=1e9;
+    chartPoints.forEach((p,i)=>{
+      const d=Math.abs(p.x - mx);
+      if(d<bestd){best=i; bestd=d;}
+    });
+    return best;
+  }
+
+  // Fallback synthetic sparkline from a quote
+  function synthHistory(q){
+    if(!q) return [];
+    const base = q.prev_close || q.open || q.current || 100;
+    const hi = q.high || base*1.01, lo=q.low || base*0.99;
+    const pts=[base*0.995, lo, base*1.02, base*1.01, base*0.998, base*0.99, q.current||base];
+    return pts.map(p=>Math.min(hi, Math.max(lo,p)));
+  }
+
+  async function loadHistory(symbol, range="1M"){
+    try{
+      const rows = await getJSON(`/history/${encodeURIComponent(symbol)}?range=${range}`);
+      // Accept either [{c,t},…] or [number,…]
+      if(Array.isArray(rows) && rows.length){
+        const vals = rows.map(r => (typeof r==="number" ? r : Number(r.c)));
+        chartLabels = rows.map((r,i)=>{
+          if(typeof r==="number") return `${i+1}`;
+          const t = Number(r.t||r.time||0);
+          if(!t) return `${i+1}`;
+          const d = new Date((String(t).length>10?t: t*1000));
+          return d.toLocaleDateString();
+        });
+        return vals.filter(v => isFinite(v));
       }
-      return r.json();
-    }
+      return [];
+    }catch{ return []; }
+  }
 
-    function fmt(n) {
-      if (n == null || isNaN(n)) return "—";
-      return Number(n).toFixed(3);
-    }
+  // ========== page behaviors ==========
+  async function loadVersion(){
+    try{ const v=await getJSON("/version"); document.getElementById("version").textContent = `${v.app} ${v.version}`;}
+    catch{ document.getElementById("version").textContent="unknown"; }
+  }
 
-    function setStatus(msg, isErr=false) {
-      const el = document.getElementById("statusLine");
-      el.textContent = msg;
-      el.className = isErr ? "bad" : "ok";
-    }
+  async function loadQuote(symbol){
+    const sym=(symbol||"").trim().toUpperCase(); if(!sym) return;
+    setStatus("Loading…"); document.getElementById("summary").textContent="—";
 
-    function drawChart(points) {
-      const canvas = document.getElementById("chart");
-      const ctx = canvas.getContext("2d");
-      // clear
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    try{
+      const q = await getJSON(`/quote/${encodeURIComponent(sym)}`);
+      document.getElementById("high").textContent = fmt(q.high);
+      document.getElementById("low").textContent  = fmt(q.low);
+      document.getElementById("open").textContent = fmt(q.open);
+      document.getElementById("prev").textContent = fmt(q.prev_close);
 
-      if (!points || points.length === 0) {
-        ctx.fillStyle = "rgba(255,255,255,.4)";
-        ctx.font = "14px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-        ctx.fillText("No data", 12, 24);
-        return;
+      // summary
+      try{
+        const s=await getJSON(`/summary/${encodeURIComponent(sym)}`);
+        document.getElementById("summary").textContent = s.summary || "—";
+      }catch{
+        document.getElementById("summary").textContent = `${sym}: ${fmt(q.current)} (${fmt(q.percent_change)}%)`;
       }
 
-      const W = canvas.width;
-      const H = canvas.height;
-      const pad = 20;
-      const min = Math.min(...points);
-      const max = Math.max(...points);
-      const span = (max - min) || 1;
+      // range + history
+      const activeBtn = document.querySelector(".range button.active");
+      const selRange = activeBtn ? activeBtn.dataset.range : "1M";
+      const hist = await loadHistory(sym, selRange);
+      if(hist.length){ drawChart(hist); }
+      else { chartLabels = []; drawChart(synthHistory(q)); }
 
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = "rgba(59,130,246,0.9)";
-      ctx.beginPath();
-
-      points.forEach((v, i) => {
-        const x = pad + (i * (W - pad*2)) / (points.length - 1 || 1);
-        const y = H - pad - ((v - min) / span) * (H - pad*2);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
-
-      // baseline
-      ctx.strokeStyle = "rgba(255,255,255,.08)";
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(pad, H - pad);
-      ctx.lineTo(W - pad, H - pad);
-      ctx.stroke();
+      setStatus("Loaded.");
+    }catch(err){
+      setStatus(`Failed to load quote: ${err.message}`, true);
+      ["high","low","open","prev"].forEach(id=>document.getElementById(id).textContent="—");
+      drawChart([]);
     }
+  }
 
-    // Fallback synthetic sparkline from a quote
-    function synthHistory(q) {
-      if (!q) return [];
-      const base = q.prev_close || q.open || q.current || 100;
-      const hi = q.high || base * 1.01;
-      const lo = q.low || base * 0.99;
-      const pts = [base * 0.995, lo, base * 1.02, base * 1.01, base * 0.998, base * 0.99, q.current || base];
-      // clamp to session range
-      return pts.map(p => Math.min(hi, Math.max(lo, p)));
-    }
+  // ========== wire up ==========
+  window.addEventListener("DOMContentLoaded", ()=>{
+    loadVersion();
 
-    async function loadHistory(symbol, range = "1M") {
-      try {
-        return await getJSON(`/history/${encodeURIComponent(symbol)}?range=${range}`);
-      } catch (_) {
-        return [];
-      }
-    }
+    const input=document.getElementById("symbol");
+    document.getElementById("getQuoteBtn").addEventListener("click", ()=>loadQuote(input.value));
+    input.addEventListener("keydown",(e)=>{ if(e.key==="Enter") loadQuote(input.value); });
+    document.getElementById("sparkBtn").addEventListener("click", async ()=>{
+      const sym=input.value.trim().toUpperCase(); if(!sym) return;
+      const activeBtn=document.querySelector(".range button.active");
+      const selRange=activeBtn?activeBtn.dataset.range:"1M";
+      const hist=await loadHistory(sym, selRange);
+      if(hist.length) drawChart(hist);
+    });
 
-    // ---------- main behaviors ----------
-    async function loadVersion() {
-      try {
-        const v = await getJSON("/version");
-        document.getElementById("version").textContent = `${v.app} ${v.version}`;
-      } catch {
-        document.getElementById("version").textContent = "unknown";
-      }
-    }
-
-    async function loadQuote(symbol) {
-      const sym = (symbol || "").trim().toUpperCase();
-      if (!sym) return;
-
-      setStatus("Loading…");
-      document.getElementById("summary").textContent = "—";
-
-      try {
-        const q = await getJSON(`/quote/${encodeURIComponent(sym)}`);
-
-        // fill stat boxes
-        document.getElementById("high").textContent = fmt(q.high);
-        document.getElementById("low").textContent  = fmt(q.low);
-        document.getElementById("open").textContent = fmt(q.open);
-        document.getElementById("prev").textContent = fmt(q.prev_close);
-
-        // summary (nice to have; if summary fails we keep going)
-        try {
-          const s = await getJSON(`/summary/${encodeURIComponent(sym)}`);
-          document.getElementById("summary").textContent = s.summary || "—";
-        } catch {
-          document.getElementById("summary").textContent = `${sym}: ${fmt(q.current)} (${fmt(q.percent_change)}%)`;
-        }
-
-        // range button state
-        const activeBtn = document.querySelector('.range button.active');
-        const selRange = activeBtn ? activeBtn.dataset.range : "1M";
-
-        // try real history; else fallback
-        const hist = await loadHistory(sym, selRange);
-        if (hist.length) {
-          drawChart(hist.map(p => p.c));
-        } else {
-          drawChart(synthHistory(q));
-        }
-
-        setStatus("Loaded.");
-      } catch (err) {
-        setStatus(`Failed to load quote: ${err.message}`, true);
-        // clear values
-        ["high","low","open","prev"].forEach(id => document.getElementById(id).textContent = "—");
-        drawChart([]);
-      }
-    }
-
-    // ---------- wiring ----------
-    window.addEventListener("DOMContentLoaded", () => {
-      loadVersion();
-
-      const input = document.getElementById("symbol");
-      const btn = document.getElementById("getQuoteBtn");
-      const sparkBtn = document.getElementById("sparkBtn");
-
-      btn.addEventListener("click", () => loadQuote(input.value));
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") loadQuote(input.value);
-      });
-
-      // refresh chart only (keeps stats)
-      sparkBtn.addEventListener("click", async () => {
-        const sym = document.getElementById("symbol").value.trim().toUpperCase();
-        if (!sym) return;
-        const activeBtn = document.querySelector('.range button.active');
-        const selRange = activeBtn ? activeBtn.dataset.range : "1M";
-        const hist = await loadHistory(sym, selRange);
-        if (hist.length) drawChart(hist.map(p => p.c));
-      });
-
-      // range switches
-      document.getElementById("rangeBtns").addEventListener("click", (e) => {
-        if (e.target.tagName !== "BUTTON") return;
-        document.querySelectorAll(".range button").forEach(b => b.classList.remove("active"));
-        e.target.classList.add("active");
-        // reload with new range
-        loadQuote(document.getElementById("symbol").value);
-      });
-
-      // initial load
+    // range buttons
+    document.getElementById("rangeBtns").addEventListener("click", (e)=>{
+      if(e.target.tagName!=="BUTTON") return;
+      document.querySelectorAll(".range button").forEach(b=>b.classList.remove("active"));
+      e.target.classList.add("active");
       loadQuote(input.value);
     });
-  </script>
+
+    // chart interactions
+    const canvas=document.getElementById("chart");
+    canvas.addEventListener("mousemove",(e)=>{
+      if(!chartPoints.length) return;
+      const idx = idxFromMouse(e);
+      lastHover = idx;
+      showTip(idx);
+    });
+    canvas.addEventListener("mouseleave",()=>{ if(!isDragging){ document.getElementById("tip").style.display="none"; drawChart(chartData); }});
+    canvas.addEventListener("mousedown",(e)=>{ isDragging=true; const idx=idxFromMouse(e); showTip(idx); });
+    window.addEventListener("mouseup",()=>{ isDragging=false; });
+    canvas.addEventListener("touchstart",(e)=>{ isDragging=true; const t=e.touches[0]; showTip(idxFromMouse(t)); },{passive:true});
+    canvas.addEventListener("touchmove",(e)=>{ const t=e.touches[0]; showTip(idxFromMouse(t)); },{passive:true});
+    canvas.addEventListener("touchend",()=>{ isDragging=false; });
+
+    // initial load
+    loadQuote(input.value);
+  });
+</script>
 </body>
 </html>
 
