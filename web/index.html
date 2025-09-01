@@ -2,271 +2,356 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, initial-scale=1" />
-  <title>StackIQ — minimal market data UI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>StackIQ – minimal market data UI</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
-    :root{
-      --bg:#0b1320; --panel:#111a2e; --muted:#7f8ba6; --text:#e6ecff;
-      --brand:#63a3ff; --brand2:#86cbff; --success:#25d02a; --danger:#ff7a7a;
-      --shadow:0 10px 40px rgba(0,0,0,.45); --radius:16px;
+    :root {
+      --bg: #0b1320;
+      --panel: #111a2e;
+      --muted: #7f8ba6;
+      --text: #e6ecff;
+      --brand: #63a3ff;
+      --brand-2: #8cb6ff;
+      --success: #25d02a;
+      --danger: #ff7aa9;
+      --shadow: 0 10px 40px rgba(0,0,0,.45);
+      --radius: 16px;
     }
-    *{box-sizing:border-box}
-    body{
-      margin:0; font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;
-      color:var(--text);
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      color: var(--text);
       background: radial-gradient(1200px 700px at 85% 20%, rgba(96,70,255,.20), transparent),
                   radial-gradient(900px 600px at 15% 10%, rgba(74,166,255,.18), transparent),
                   var(--bg);
     }
-    .page{max-width:1120px;margin:48px auto 80px;padding:0 20px;}
-    header{display:flex;align-items:center;gap:14px;margin-bottom:18px;}
-    .logo-dot{width:18px;height:18px;border-radius:6px;
-      background:linear-gradient(135deg,var(--brand),var(--brand2));box-shadow:0 6px 20px rgba(106,163,255,.35);}
-    .brand{font-weight:700;font-size:22px;letter-spacing:.2px;}
-    .sublabel{font-size:12px;color:var(--muted);margin-left:2px;}
-    .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:10px;}
-    @media (max-width:980px){.grid{grid-template-columns:1fr}}
-    .card{background:linear-gradient(180deg,rgba(255,255,255,.03),rgba(255,255,255,.01));
-      border:1px solid rgba(255,255,255,.06); border-radius:var(--radius); box-shadow:var(--shadow);}
-    .pad{padding:18px;} .row{display:flex;align-items:center;gap:10px;} .grow{flex:1}
-    .input{width:100%;height:42px;border-radius:10px;background:rgba(255,255,255,.04);
-      border:1px solid rgba(255,255,255,.08); padding:0 14px; color:var(--text); outline:none;}
-    .btn{height:42px;padding:0 14px;border-radius:10px;border:0;cursor:pointer;font-weight:600;color:#0b1320;
-      background:linear-gradient(135deg,var(--brand),var(--brand2)); box-shadow:0 6px 22px rgba(106,163,255,.35);}
-    .btn-ghost{height:42px;padding:0 12px;border-radius:10px;border:1px solid rgba(255,255,255,.06);
-      color:var(--text);background:rgba(255,255,255,.02);}
-    .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:10px;}
-    @media (max-width:640px){.stats{grid-template-columns:repeat(2,1fr)}}
-    .stat{border:1px solid rgba(255,255,255,.06); border-radius:12px; padding:10px 12px;}
-    .stat .label{font-size:12px;color:var(--muted);margin-bottom:4px}
-    .stat .val{font-size:16px;font-weight:700;letter-spacing:.2px}
-    .ranges{display:flex;gap:8px;margin:12px 0 2px}
-    .chip{padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.05);
-      border:1px solid rgba(255,255,255,.08); color:var(--text); font-weight:600; font-size:12px; cursor:pointer;}
-    .chip.active{background:rgba(106,163,255,.14); border-color:rgba(106,163,255,.45); box-shadow:inset 0 0 1px rgba(106,163,255,.3);}
-    .chart-wrap{margin-top:12px;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.06);
-      background:rgba(12,22,40,.45);}
-    canvas{display:block;width:100%;height:300px}
-    aside .title{font-weight:700} .kv{margin-top:6px} .kv .k{font-size:12px;color:var(--muted)} .kv .v{font-size:14px;font-weight:600}
-    footer{text-align:center;color:var(--muted);font-size:12px;margin-top:18px}
+    .page {
+      max-width: 1120px;
+      margin: 48px auto 80px;
+      padding: 0 20px;
+    }
+    header { display:flex; align-items:center; gap:14px; margin-bottom:18px; }
+    .logo-dot {
+      width: 18px; height: 18px; border-radius: 6px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-2));
+      box-shadow: 0 6px 20px rgba(106,163,255,.35), inset 0 16px rgba(255,255,255,.10);
+    }
+    .brand { font-weight: 700; font-size: 22px; letter-spacing:.2px; }
+    .subtitle { font-size: 12px; color: var(--muted); margin-left: 2px; }
+    .grid { display:grid; grid-template-columns: 1.15fr .85fr; gap: 26px; }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015));
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .pad { padding: 18px; }
+    .row { display:flex; align-items:center; gap:10px; }
+    .grow { flex: 1; }
+    .muted { color: var(--muted); }
+    .input {
+      width: 100%; height: 42px; border-radius: 10px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      color: var(--text); padding: 0 14px; font-size:14px;
+      outline: none;
+    }
+    .btn {
+      height: 42px; padding: 0 14px; border-radius: 10px; border: 0; cursor: pointer;
+      font-weight: 600; color: #0b1320; background: linear-gradient(135deg, var(--brand), var(--brand-2));
+      box-shadow: 0 6px 20px rgba(106,163,255,.35);
+    }
+    .btn-ghost {
+      height: 42px; padding: 0 12px; border-radius: 10px;
+      color: var(--text); background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.08); cursor: pointer;
+    }
+    .stats { display:grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
+    @media (max-width: 640px) {
+      .stats { grid-template-columns: repeat(2, 1fr); }
+    }
+    .stat { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06);
+            border-radius: 12px; padding: 12px 10px; }
+    .stat .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .stat .val { font-size: 16px; font-weight: 700; letter-spacing:.2px; }
+    .ranges { display:flex; gap: 8px; margin: 12px 0 2px; }
+    .chip {
+      padding: 6px 10px; border-radius: 999px;
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.08);
+      color: var(--text); font-weight: 600; font-size: 12px; cursor: pointer;
+    }
+    .chip.active {
+      background: rgba(106,163,255,.14);
+      border-color: rgba(106,163,255,.45);
+      box-shadow: inset 0 0 1px rgba(106,163,255,.3);
+    }
+    .chart-wrap { margin-top: 12px; border-radius: 14px; overflow: hidden;
+                  border:1px solid rgba(255,255,255,.06); }
+    canvas { display:block; width: 100%; height: 300px; background: rgba(12,12,30,.45); }
+    .api-note {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-size: 12px; color: rgba(230,236,255,.6);
+      margin: 10px 2px 0;
+    }
+    .tooltip {
+      position: absolute; pointer-events:none; padding: 6px 8px;
+      font-size: 12px;
+      background: #0b1320;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 6px;
+      box-shadow: var(--shadow);
+      color: var(--text);
+      display:none;
+      transform: translate(-50%, -120%);
+      white-space: nowrap;
+    }
+    footer { text-align:center; color: var(--muted); font-size: 12px; margin-top: 16px; }
   </style>
 </head>
 <body>
-  <div class="page">
-    <header>
-      <div class="logo-dot"></div>
-      <div class="brand">StackIQ</div>
-      <div class="sublabel">live quote · summary · chart</div>
-    </header>
+<div class="page">
+  <header>
+    <div class="logo-dot"></div>
+    <div class="brand">StackIQ</div>
+    <div class="subtitle">Minimal market data UI</div>
+  </header>
 
-    <div class="grid">
-      <!-- LEFT: quote + chart -->
-      <section class="card pad" style="grid-column: span 3">
-        <div class="row" style="gap:8px">
-          <input id="symbolInput" class="input grow" value="AAPL" spellcheck="false" />
-          <button id="getBtn" class="btn">Get Quote</button>
-          <button id="refreshBtn" class="btn-ghost">Refresh</button>
-        </div>
+  <div class="grid">
+    <!-- LEFT: quote + chart -->
+    <section class="card pad">
+      <div class="row" style="gap:8px;">
+        <input id="symbolInput" class="input grow" value="AAPL" spellcheck="false" />
+        <button id="getBtn" class="btn">Get Quote</button>
+        <button id="refreshBtn" class="btn-ghost">Refresh</button>
+      </div>
 
-        <div class="stats">
-          <div class="stat"><div class="label">Session High</div><div id="statHigh" class="val">–</div></div>
-          <div class="stat"><div class="label">Session Low</div><div id="statLow"  class="val">–</div></div>
-          <div class="stat"><div class="label">Open</div><div id="statOpen" class="val">–</div></div>
-          <div class="stat"><div class="label">Prev Close</div><div id="statClose" class="val">–</div></div>
-        </div>
+      <div class="stats">
+        <div class="stat"><div class="label">Session High</div><div id="statHigh" class="val">—</div></div>
+        <div class="stat"><div class="label">Session Low</div><div id="statLow" class="val">—</div></div>
+        <div class="stat"><div class="label">Open</div><div id="statOpen" class="val">—</div></div>
+        <div class="stat"><div class="label">Prev Close</div><div id="statClose" class="val">—</div></div>
+      </div>
 
-        <div class="ranges">
-          <button class="chip active" data-range="1M">1M</button>
-          <button class="chip" data-range="3M">3M</button>
-          <button class="chip" data-range="6M">6M</button>
-          <button class="chip" data-range="1Y">1Y</button>
-        </div>
+      <div class="ranges">
+        <button class="chip active" data-range="1M">1M</button>
+        <button class="chip" data-range="3M">3M</button>
+        <button class="chip" data-range="6M">6M</button>
+        <button class="chip" data-range="1Y">1Y</button>
+      </div>
 
-        <div class="chart-wrap">
-          <canvas id="chartCanvas" width="1000" height="300"></canvas>
-        </div>
+      <div class="chart-wrap" style="position:relative;">
+        <canvas id="chartCanvas" width="1000" height="300"></canvas>
+        <div id="tooltip" class="tooltip"></div>
+      </div>
 
-        <div class="api-note muted" style="margin-top:10px;font-size:12px">
-          Endpoints: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>, <code>/history/{symbol}?range=1M</code>
-        </div>
-      </section>
+      <div class="api-note">Endpoints: /quote/{symbol}, /summary/{symbol}, /history/{symbol}?range=1M</div>
+    </section>
 
-      <!-- RIGHT: status -->
-      <aside class="card pad">
-        <div class="title muted">Status</div>
-        <div class="kv"><span class="k">State:</span> <span id="status" class="v">Loading…</span></div>
-        <div class="kv"><span class="k">Version:</span> <span id="version" class="v">–</span></div>
-        <div class="title muted" style="margin-top:12px">Summary</div>
-        <div id="summary" style="font-size:13px;line-height:1.5;margin-top:6px;color:#ccd6f4;">–</div>
-      </aside>
-    </div>
-
-    <footer>© 2025 StackIQ</footer>
+    <!-- RIGHT: status + summary -->
+    <aside class="card pad">
+      <div class="title muted">Status</div>
+      <div id="status" class="kv"><span class="k">State:</span> <span class="v">Loading…</span></div>
+      <div id="version" class="kv" style="margin-top:6px;"><span class="k">Version:</span> <span class="v">—</span></div>
+      <div class="title muted" style="margin-top:16px;">Summary</div>
+      <div id="summary" style="font-size:13px; line-height:1.5; margin-top:6px; color:#cdd6f4;">—</div>
+    </aside>
   </div>
 
-  <script>
-    // ---------- tiny helper so it works from / or /web/ ----------
-    function api(path){
-      const base = location.pathname.startsWith("/web") ? "/" : "/";
-      return base + path.replace(/^\//,"");
+  <footer>© 2025 StackIQ</footer>
+</div>
+
+<script>
+  const $  = (sel) => document.querySelector(sel);
+  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+  const statHigh   = $('#statHigh');
+  const statLow    = $('#statLow');
+  const statOpen   = $('#statOpen');
+  const statClose  = $('#statClose');
+
+  const statusEl   = $('#status .v');
+  const versionEl  = $('#version .v');
+  const summaryEl  = $('#summary');
+
+  const symbolInput = $('#symbolInput');
+  const getBtn      = $('#getBtn');
+  const refreshBtn  = $('#refreshBtn');
+
+  const canvas      = $('#chartCanvas');
+  const ctx         = canvas.getContext('2d');
+  const tooltip     = $('#tooltip');
+
+  let activeRange = '1M';
+  let isLoading   = false;
+  let _chartMeta  = null;
+
+  function api(path) {
+    const base = location.pathname.startsWith('/web') ? '/' : '/';
+    return base + path.replace(/^\//, '');
+  }
+
+  function fmt(n) {
+    return (n === null || n === undefined || isNaN(n)) ? '—' : Number(n).toFixed(2);
+  }
+
+  function setStatus(text) {
+    statusEl.textContent = text;
+  }
+
+  async function loadVersion() {
+    try {
+      const r = await fetch(api('/version'));
+      const j = await r.json();
+      versionEl.textContent = `${j.app} ${j.version}`;
+      setStatus('OK');
+    } catch {
+      setStatus('Error loading version');
+    }
+  }
+
+  async function loadQuote(sym) {
+    try {
+      const r = await fetch(api(`/quote/${encodeURIComponent(sym)}`));
+      if (!r.ok) throw new Error('quote failed');
+      const j = await r.json();
+      statHigh.textContent  = fmt(j.high);
+      statLow.textContent   = fmt(j.low);
+      statOpen.textContent  = fmt(j.open);
+      statClose.textContent = fmt(j.prev_close);
+      return j;
+    } catch {
+      statHigh.textContent  = '—';
+      statLow.textContent   = '—';
+      statOpen.textContent  = '—';
+      statClose.textContent = '—';
+      return null;
+    }
+  }
+
+  async function loadSummary(sym) {
+    try {
+      const r = await fetch(api(`/summary/${encodeURIComponent(sym)}`));
+      if (!r.ok) throw new Error('summary failed');
+      const j = await r.json();
+      summaryEl.textContent = j.summary || '—';
+    } catch {
+      summaryEl.textContent = '—';
+    }
+  }
+
+  async function loadHistory(sym, rangeKey) {
+    try {
+      setStatus(`Loading ${rangeKey}…`);
+      const r = await fetch(api(`/history/${encodeURIComponent(sym)}?range=${rangeKey}`));
+      if (!r.ok) throw new Error('history failed');
+      const j = await r.json();
+      drawLineChart(j.points);
+      setStatus('OK');
+    } catch {
+      drawLineChart([]);
+      setStatus('History error');
+    }
+  }
+
+  function clearCanvas() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'rgba(255,255,255,.02)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function drawLineChart(points) {
+    clearCanvas();
+    if (!points || !points.length) {
+      _chartMeta = null;
+      return;
     }
 
-    // ---------- DOM ----------
-    const $ = sel => document.querySelector(sel);
-    const $$ = sel => Array.from(document.querySelectorAll(sel));
+    const padX = 36, padY = 22;
+    const w = canvas.width  - padX * 2;
+    const h = canvas.height - padY * 2;
 
-    const statHigh = $('#statHigh');
-    const statLow  = $('#statLow');
-    const statOpen = $('#statOpen');
-    const statClose= $('#statClose');
+    const min = Math.min(...points.map(p => p.p));
+    const max = Math.max(...points.map(p => p.p));
+    const span = (max - min) || 1;
 
-    const statusEl  = $('#status');
-    const versionEl = $('#version');
-    const summaryEl = $('#summary');
-
-    const symbolInput = $('#symbolInput');
-    const getBtn      = $('#getBtn');
-    const refreshBtn  = $('#refreshBtn');
-
-    const canvas = $('#chartCanvas');
-    const ctx = canvas.getContext('2d');
-
-    let activeRange = '1M';
-    let lastPoints = [];
-    let isLoading = false;
-
-    function fmt(n){ return (n==null||isNaN(n)) ? '–' : Number(n).toFixed(2); }
-
-    async function loadVersion(){
-      try{
-        const r = await fetch(api('/version'));
-        const j = await r.json();
-        versionEl.textContent = `${j.app} ${j.version}`;
-        statusEl.textContent = 'OK';
-      }catch{
-        statusEl.textContent = 'Error loading version';
-      }
+    ctx.strokeStyle = 'rgba(255,255,255,.06)';
+    ctx.lineWidth = 1;
+    for (let i = 0; i < 5; i++) {
+      const y = padY + (h * i / 4);
+      ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(padX + w, y); ctx.stroke();
     }
 
-    async function loadQuote(sym){
-      try{
-        const r = await fetch(api(`/quote/${encodeURIComponent(sym)}`));
-        if(!r.ok) throw new Error('quote failed');
-        const j = await r.json();
-        statHigh.textContent = fmt(j.high);
-        statLow.textContent  = fmt(j.low);
-        statOpen.textContent = fmt(j.open);
-        statClose.textContent= fmt(j.prev_close);
-        return j;
-      }catch{
-        statHigh.textContent = statLow.textContent = statOpen.textContent = statClose.textContent = '–';
-        return null;
-      }
+    ctx.beginPath();
+    points.forEach((p, i) => {
+      const x = padX + (w * i / (points.length - 1 || 1));
+      const y = padY + (h - ((p.p - min) / span) * h);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = '#63a3ff';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    _chartMeta = { padX, padY, w, h, min, max, span, pts: points };
+  }
+
+  canvas.addEventListener('mousemove', ev => {
+    if (!_chartMeta) { tooltip.style.display = 'none'; return; }
+    const c = _chartMeta;
+    const rect = canvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const my = ev.clientY - rect.top;
+    if (mx < c.padX || mx > c.padX + c.w || my < c.padY || my > c.padY + c.h) {
+      tooltip.style.display = 'none'; return;
     }
+    const idx = Math.max(0, Math.min(c.pts.length - 1,
+              Math.round((mx - c.padX) / (c.w) * (c.pts.length - 1))));
+    const pt = c.pts[idx];
+    tooltip.textContent = `${new Date(pt.t * 1000).toLocaleDateString()} • ${fmt(pt.p)}`;
+    tooltip.style.display = 'block';
+    tooltip.style.left = (mx + 14) + 'px';
+    tooltip.style.top  = (my + 14) + 'px';
+  });
+  canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
-    async function loadSummary(sym){
-      try{
-        const r = await fetch(api(`/summary/${encodeURIComponent(sym)}`));
-        const j = await r.json();
-        summaryEl.textContent = j.summary || '–';
-      }catch{
-        summaryEl.textContent = '–';
-      }
-    }
-
-    async function loadHistory(sym, rangeKey){
-      try{
-        statusEl.textContent = `Loading ${rangeKey}…`;
-        const r = await fetch(api(`/history/${encodeURIComponent(sym)}?range=${encodeURIComponent(rangeKey)}`));
-        if(!r.ok) throw new Error('history failed');
-        const j = await r.json();
-        lastPoints = j.points || [];
-        drawLineChart(lastPoints);
-        statusEl.textContent = 'OK';
-      }catch{
-        lastPoints = [];
-        drawLineChart([]);
-        statusEl.textContent = 'History error';
-      }
-    }
-
-    // ---------- chart drawing (simple + crisp) ----------
-    function clearCanvas(){
-      ctx.clearRect(0,0,canvas.width,canvas.height);
-      ctx.fillStyle = 'rgba(255,255,255,.02)';
-      ctx.fillRect(0,0,canvas.width,canvas.height);
-    }
-
-    function drawLineChart(pts){
-      clearCanvas();
-      if(!pts.length) return;
-
-      const padX = 36, padY = 22;
-      const w = canvas.width - padX * 2;
-      const h = canvas.height - padY * 2;
-
-      const xs = pts.map(p=>p.t);
-      const ys = pts.map(p=>p.c);
-      const tMin = Math.min(...xs), tMax = Math.max(...xs);
-      const yMin = Math.min(...ys), yMax = Math.max(...ys);
-      const ySpan = (yMax - yMin) || 1;
-      const tSpan = (tMax - tMin) || 1;
-
-      // grid
-      ctx.strokeStyle = 'rgba(255,255,255,.08)';
-      ctx.lineWidth = 1;
-      for(let i=0;i<5;i++){
-        const gy = padY + (h * i / 4);
-        ctx.beginPath(); ctx.moveTo(padX, gy); ctx.lineTo(padX + w, gy); ctx.stroke();
-      }
-
-      // line
-      ctx.beginPath();
-      pts.forEach((p,i)=>{
-        const x = padX + ( (p.t - tMin) / tSpan ) * w;
-        const y = padY + ( (yMax - p.c) / ySpan ) * h;
-        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-      });
-      ctx.strokeStyle = '#63a3ff';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-    }
-
-    // ---------- interactions ----------
-    function getSymbol(){ return (symbolInput.value||'').trim().toUpperCase(); }
-
-    async function refreshAll(){
-      if(isLoading) return;
-      isLoading = true;
-      const sym = getSymbol() || 'AAPL';
-      await loadVersion();
-      await loadQuote(sym);
-      await loadSummary(sym);
-      await loadHistory(sym, activeRange);
+  async function run(sym) {
+    if (isLoading) return;
+    isLoading = true;
+    try {
+      await Promise.all([
+        loadVersion(),
+        loadQuote(sym),
+        loadSummary(sym),
+        loadHistory(sym, activeRange),
+      ]);
+    } finally {
       isLoading = false;
     }
+  }
 
-    getBtn.addEventListener('click', refreshAll);
-    refreshBtn.addEventListener('click', refreshAll);
-    symbolInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter') refreshAll(); });
+  getBtn.addEventListener('click', () => run(symbolInput.value.trim() || 'AAPL'));
+  refreshBtn.addEventListener('click', () => run(symbolInput.value.trim() || 'AAPL'));
 
-    $$('.chip').forEach(btn=>{
-      btn.addEventListener('click', ()=>{
-        $$('.chip').forEach(b=>b.classList.remove('active'));
-        btn.classList.add('active');
-        activeRange = btn.dataset.range;
-        const sym = getSymbol() || 'AAPL';
-        loadHistory(sym, activeRange);
-      });
+  $$('.ranges .chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      $$('.ranges .chip').forEach(b => b.classList.toggle('active', b === btn));
+      activeRange = btn.getAttribute('data-range') || '1M';
+      loadHistory(symbolInput.value.trim() || 'AAPL', activeRange);
     });
+  });
 
-    // kick off
-    refreshAll();
-  </script>
+  run(symbolInput.value.trim() || 'AAPL');
+</script>
 </body>
 </html>
+
 
 
 
