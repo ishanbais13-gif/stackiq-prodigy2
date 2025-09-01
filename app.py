@@ -110,3 +110,4 @@ def history(symbol: str, range: str = Query("1M", pattern="^(1M|3M|6M|1Y)$")):
 
 
 
+
