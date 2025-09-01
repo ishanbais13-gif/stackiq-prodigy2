@@ -1,86 +1,110 @@
 import os
+import time
 import requests
-from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Tuple
 
-API_KEY = os.getenv("FINNHUB_API_KEY")
-BASE_URL = "https://finnhub.io/api/v1"
+_FINNHUB_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+_FINN_BASE = "https://finnhub.io/api/v1"
 
-def _require_key():
-    if not API_KEY:
-        # Make it obvious in logs if the key is missing
-        raise RuntimeError("FINNHUB_API_KEY is not set")
-
-def fetch_quote(symbol: str):
-    """
-    Returns a normalized quote dict or None on error.
-    """
+def _get(url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not _FINNHUB_KEY:
+        return None
     try:
-        _require_key()
-        url = f"{BASE_URL}/quote"
-        params = {"symbol": symbol, "token": API_KEY}
-        r = requests.get(url, params=params, timeout=12)
+        params = {**params, "token": _FINNHUB_KEY}
+        r = requests.get(url, params=params, timeout=10)
         if r.status_code != 200:
             return None
-        j = r.json() or {}
-        # Finnhub returns { c, h, l, o, pc, d, dp, t? }
-        if j.get("c") is None:
-            return None
-        return {
-            "symbol": symbol.upper(),
-            "current": j.get("c"),
-            "prev_close": j.get("pc"),
-            "high": j.get("h"),
-            "low": j.get("l"),
-            "open": j.get("o"),
-            "percent_change": j.get("d"),  # absolute delta; dp is %
-            "raw": j,
-        }
+        return r.json()
     except Exception:
         return None
 
-def fetch_history(symbol: str, range_key: str):
+def fetch_quote(symbol: str) -> Optional[Dict[str, Any]]:
     """
-    Fetch daily candles for {1M,3M,6M,1Y}.
-    Returns: list of {time, close}
+    Returns:
+      {
+        "symbol": "AAPL",
+        "current": 232.14,
+        "prev_close": 232.56,
+        "high": 233.38,
+        "low": 231.37,
+        "open": 232.51,
+        "percent_change": -0.18,
+        "volume": null,
+        "raw": {...}
+      }
     """
-    try:
-        _require_key()
+    j = _get(f"{_FINN_BASE}/quote", {"symbol": symbol.upper()})
+    if not j or "c" not in j:
+        return None
+    cur = j.get("c")
+    pc  = j.get("pc")
+    hi  = j.get("h")
+    lo  = j.get("l")
+    op  = j.get("o")
+    pct = None
+    if isinstance(cur, (int, float)) and isinstance(pc, (int, float)) and pc:
+        pct = ((cur - pc) / pc) * 100.0
+    return {
+        "symbol": symbol.upper(),
+        "current": cur,
+        "prev_close": pc,
+        "high": hi,
+        "low": lo,
+        "open": op,
+        "percent_change": pct,
+        "volume": j.get("v"),
+        "raw": j
+    }
 
-        days_map = {
-            "1M": 30,
-            "3M": 90,
-            "6M": 180,
-            "1Y": 365,
-        }
-        days = days_map.get((range_key or "").upper(), 30)
+def _range_to_window(range_key: str) -> Tuple[int, str]:
+    """
+    Returns (seconds_back, resolution)
+    - 1M -> last 30 days, 'D'
+    - 3M -> 90 days, 'D'
+    - 6M -> 180 days, 'D'
+    - 1Y -> 365 days, 'W' (weekly to limit points)
+    """
+    rk = (range_key or "1M").upper()
+    if rk == "1M":
+        return (30 * 24 * 3600, "D")
+    if rk == "3M":
+        return (90 * 24 * 3600, "D")
+    if rk == "6M":
+        return (180 * 24 * 3600, "D")
+    # default 1Y
+    return (365 * 24 * 3600, "W")
 
-        end = datetime.utcnow()
-        start = end - timedelta(days=days)
+def fetch_history(symbol: str, range_key: str = "1M") -> Optional[List[Dict[str, Any]]]:
+    """
+    Returns list of { "t": unix_sec, "c": close } sorted by time asc.
+    """
+    if not _FINNHUB_KEY:
+        return None
 
-        url = f"{BASE_URL}/stock/candle"
-        params = {
-            "symbol": symbol,
-            "resolution": "D",
-            "from": int(start.timestamp()),
-            "to": int(end.timestamp()),
-            "token": API_KEY,
-        }
-        r = requests.get(url, params=params, timeout=20)
-        if r.status_code != 200:
-            return []
+    seconds_back, resolution = _range_to_window(range_key)
+    now = int(time.time())
+    frm = now - seconds_back
 
-        j = r.json() or {}
-        if j.get("s") != "ok":
-            return []
-
-        ts = j.get("t", [])
-        closes = j.get("c", [])
-        points = []
-        for t, c in zip(ts, closes):
-            points.append({"time": int(t), "close": float(c)})
-        return points
-    except Exception:
+    j = _get(
+        f"{_FINN_BASE}/stock/candle",
+        {"symbol": symbol.upper(), "resolution": resolution, "from": frm, "to": now},
+    )
+    if not j or j.get("s") != "ok":
+        # Could be 'no_data' or error — return empty list (front-end can handle)
         return []
+
+    ts = j.get("t") or []
+    cs = j.get("c") or []
+    points: List[Dict[str, Any]] = []
+    # Ensure same length and monotonic time order
+    for t, c in zip(ts, cs):
+        if isinstance(t, int) and isinstance(c, (int, float)):
+            points.append({"t": int(t), "c": float(c)})
+
+    # Finnhub returns ascending times already, but sort just in case
+    points.sort(key=lambda p: p["t"])
+    return points
+
 
 
 
