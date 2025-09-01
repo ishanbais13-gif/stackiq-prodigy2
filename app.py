@@ -128,3 +128,4 @@ def history(symbol: str, range: str = "1M"):
 
 
 
+
