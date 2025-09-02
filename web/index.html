@@ -7,104 +7,98 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
   <style>
-    :root{
-      --bg:#0b1320;
-      --panel:#111a2e;
-      --muted:#7f8ba6;
-      --text:#e6ecff;
-      --brand:#63a3ff;
-      --brand2:#86cbff;
-      --success:#25d0a2;
-      --danger:#ff7a7a;
-      --shadow:10px 40px 40px rgba(0,0,0,.45);
-      --radius:16px;
-      --card-border:1px solid rgba(255,255,255,.06);
+    :root {
+      --bg: #0b1320;
+      --panel: #111a2e;
+      --muted: #7f8ba6;
+      --text: #e6ecff;
+      --brand: #63a3ff;
+      --brand-2: #286bff;
+      --success: #25d02a;
+      --danger: #ff7ba9;
+      --shadow: 0 10px 40px rgba(0,0,0,.45);
+      --radius: 16px;
     }
-    *{ box-sizing:border-box; }
-    html,body{ height:100%; }
-    body{
-      margin:0;
-      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
-      color:var(--text);
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial;
+      color: var(--text);
       background:
-        radial-gradient(1200px 700px at 85% 20%, rgba(96,70,255,.20), transparent),
-        radial-gradient(900px 600px at 15% 10%, rgba(14,166,255,.18), transparent),
+        radial-gradient(1200px 700px at 85% 20%, rgba(96, 70, 255, .20), transparent),
+        radial-gradient(900px 600px at 15% 10%, rgba(74, 166, 255, .18), transparent),
         var(--bg);
     }
-    .page{ max-width:1120px; margin:48px auto 80px; padding:0 20px; }
-    header{ display:flex; align-items:center; gap:14px; margin-bottom:18px; }
-    .logo-dot{ width:18px; height:18px; border-radius:6px;
-      background:linear-gradient(135deg,var(--brand),var(--brand2));
-      box-shadow: 0 6px 20px rgba(106,163,255,.35), inset 0 0 16px rgba(255,255,255,.18);
+    .page { max-width: 1120px; margin: 48px auto 80px; padding: 0 20px; }
+    header { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+    .logo-dot {
+      width: 12px; height: 12px; border-radius: 999px;
+      background: linear-gradient(135deg, var(--brand), var(--brand-2));
+      box-shadow: 0 0 0 6px rgba(255,255,255,.04);
     }
-    .brand{ font-weight:700; font-size:20px; letter-spacing:.2px; }
-    .subtitle{ font-size:12px; color:var(--muted); margin-left:4px; }
+    .brand { font-weight: 700; letter-spacing: .3px; }
+    .subtitle { font-size: 12px; color: var(--muted); margin-left: 4px; }
 
-    .grid{ display:grid; grid-template-columns: 1.15fr .85fr; gap:26px; }
-    @media (max-width: 980px){
-      .grid{ grid-template-columns: 1fr; }
-    }
+    .grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 26px; }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
 
-    .card{
-      background: linear-gradient(180deg, rgba(18,26,46,1), rgba(14,20,38,1));
-      border: var(--card-border);
+    .card {
+      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015));
+      border: 1px solid rgba(255,255,255,.06);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
     }
-    .pad{ padding:18px; }
-    .row{ display:flex; align-items:center; gap:10px; }
-    .grow{ flex:1; }
-    .muted{ color:var(--muted); }
+    .pad { padding: 18px; }
+    .row { display: flex; align-items: center; gap: 10px; }
+    .grow { flex: 1; }
+    .muted { color: var(--muted); }
 
-    .input{
-      width:100%; height:42px; border-radius:10px;
-      background:rgba(255,255,255,.06);
-      border:1px solid rgba(255,255,255,.08);
-      color:var(--text); padding:0 14px; font-size:14px;
-      outline:none;
+    .input {
+      width: 100%; height: 42px; border-radius: 10px;
+      background: rgba(255,255,255,.04);
+      border: 1px solid rgba(255,255,255,.08);
+      color: var(--text); padding: 0 14px; font-size: 14px; outline: none;
     }
-    .btn{
-      height:42px; padding:0 14px; border-radius:10px; border:0; cursor:pointer;
-      font-weight:600; color:#0b1320; background:linear-gradient(135deg,var(--brand),var(--brand2));
+    .btn {
+      height: 42px; padding: 0 14px; border-radius: 10px;
+      border: 0; cursor: pointer; font-weight: 600; color: #0b1320;
+      background: linear-gradient(135deg, var(--brand), var(--brand-2));
       box-shadow: 0 6px 22px rgba(106,163,255,.35);
     }
-    .btn-ghost{
-      height:42px; padding:0 12px; border-radius:10px; border:1px solid rgba(255,255,255,.08);
-      color:var(--text); background:rgba(255,255,255,.03);
+    .btn-ghost {
+      height: 42px; padding: 0 12px; border-radius: 10px;
+      color: var(--text); background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.08); cursor: pointer;
     }
 
-    .stats{ display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-top:10px; }
-    @media (max-width: 640px){
-      .stats{ grid-template-columns: repeat(2, 1fr); }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
+    @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+    .stat {
+      background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.06);
+      border-radius: 12px; padding: 10px 12px;
     }
-    .stat{ background: rgba(255,255,255,.03); border: var(--card-border); border-radius:12px; padding:10px 12px; }
-    .stat .label{ font-size:12px; color:var(--muted); }
-    .stat .val{ font-size:16px; font-weight:700; }
+    .stat .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+    .stat .val { font-size: 16px; font-weight: 700; letter-spacing: .2px; }
 
-    .ranges{ display:flex; gap: 8px; margin: 12px 0 2px; }
-    .chip{
-      padding:6px 10px; border-radius:999px; background:rgba(255,255,255,.03);
-      border:1px solid rgba(255,255,255,.08); color:var(--text); font-weight:600; font-size:12px; cursor:pointer;
+    .ranges { display: flex; gap: 8px; margin: 12px 2px 6px; }
+    .chip {
+      padding: 6px 10px; border-radius: 999px; background: rgba(255,255,255,.03);
+      border: 1px solid rgba(255,255,255,.08); color: var(--text);
+      font-weight: 600; font-size: 12px; cursor: pointer;
     }
-    .chip.active{ background:rgba(106,163,255,.14); border-color:rgba(106,163,255,.45); box-shadow: inset 0 0 1px rgba(106,163,255,.3); }
+    .chip.active { background: rgba(106,163,255,.14); border-color: rgba(106,163,255,.45); box-shadow: inset 0 0 1px rgba(106,163,255,.3); }
 
-    .chart-wrap{ margin-top: 12px; border-radius: 14px; overflow: hidden; border: var(--card-border); background: rgba(12,18,30,.45); }
-    canvas{ display:block; width:100%; height:300px; background: transparent; }
+    .chart-wrap { margin-top: 12px; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); }
+    canvas { display: block; width: 100%; height: 300px; background: rgba(2,12,30,.45); }
 
-    aside .title{ font-weight:700; }
-    aside .kv{ margin-top:8px; }
-    .kv x{ font-size:12px; color:var(--muted); }
-    .kv v{ font-size:14px; font-weight:600; }
+    .api-note { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: rgba(230,236,255,.6); margin: 8px 0 0; }
 
-    .api-note{ font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:12px; color:rgba(230,236,255,.6); margin:12px 0 2px; }
+    .title { font-weight: 700; }
+    .kv { font-size: 12px; color: var(--muted); }
+    .kv .v { font-size: 14px; font-weight: 600; }
 
-    .tooltip{
-      position:absolute; pointer-events:none; padding:6px 8px; border-radius:8px;
-      background:rgba(15,22,38,.92); border:1px solid rgba(255,255,255,.06); color:var(--text); font-size:12px;
-      box-shadow: var(--shadow); display:none;
-    }
-
-    footer{ text-align:center; color:var(--muted); font-size:12px; margin-top:18px; }
+    footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 16px; }
   </style>
 </head>
 <body>
@@ -132,10 +126,10 @@
         </div>
 
         <div class="ranges">
-          <button class="chip active" data-range="1M">1M</button>
+          <button class="chip" data-range="1M">1M</button>
           <button class="chip" data-range="3M">3M</button>
           <button class="chip" data-range="6M">6M</button>
-          <button class="chip" data-range="1Y">1Y</button>
+          <button class="chip active" data-range="1Y">1Y</button>
         </div>
 
         <div class="chart-wrap">
@@ -148,33 +142,29 @@
       <!-- RIGHT: status -->
       <aside class="card pad">
         <div class="title muted">Status</div>
-        <div class="kv" style="margin-top:6px;"><x>State:</x> <v id="status">Loading…</v></div>
-        <div class="kv" style="margin-top:6px;"><x>Version:</x> <v id="version"></v></div>
+        <div class="kv" style="margin-top:6px;">State: <span id="status" class="v">Loading…</span></div>
+        <div class="kv" style="margin-top:6px;">Version: <span id="version" class="v">—</span></div>
+
         <div class="title muted" style="margin-top:16px;">Summary</div>
-        <div id="summary" style="font-size:13px; line-height:1.5; margin-top:6px; color:#cdd6f4;"></div>
+        <div id="summary" style="font-size:13px; line-height:1.5; margin-top:6px; color:#cdd6f4;">—</div>
       </aside>
     </div>
 
     <footer>© 2025 StackIQ</footer>
   </div>
 
-  <div id="tooltip" class="tooltip"></div>
-
   <script>
-    // ------------- helpers -------------
+    // Build relative API URL (works whether served at root or under /web/)
+    function api(path) {
+      const base = location.pathname.startsWith("/web") ? "/" : "/";
+      return base + String(path).replace(/^\//, "");
+    }
+
+    // Dom helpers
     const $  = (sel) => document.querySelector(sel);
     const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
-    // API path (works on root or /web since we use absolute)
-    const api = (p) => "/" + String(p || "").replace(/^\/+/, "");
-
-    const fmt = (n) => (n == null || Number.isNaN(+n)) ? "—" : Number(n).toFixed(2);
-    const fmtDate = (unixSec) => {
-      const d = new Date(unixSec * 1000);
-      return d.toLocaleDateString(undefined, { year: "2-digit", month: "short", day: "2-digit" });
-    };
-
-    // ------------- elements -------------
+    // UI elements
     const statHigh  = $("#statHigh");
     const statLow   = $("#statLow");
     const statOpen  = $("#statOpen");
@@ -182,34 +172,31 @@
     const statusEl  = $("#status");
     const versionEl = $("#version");
     const summaryEl = $("#summary");
-
     const symbolInput = $("#symbolInput");
-    const getBtn      = $("#getBtn");
-    const refreshBtn  = $("#refreshBtn");
-
+    const getBtn = $("#getBtn");
+    const refreshBtn = $("#refreshBtn");
     const canvas = $("#chartCanvas");
-    const ctx    = canvas.getContext("2d");
-    const tooltip = $("#tooltip");
+    const ctx = canvas.getContext("2d");
 
-    let activeRange = "1M";
-    let lastSymbol  = "AAPL";
-    let _chartCtx   = null;
+    let activeRange = "1Y";
+    let lastSymbol = "AAPL";
 
-    function setStatus(text){ statusEl.textContent = text; }
+    function fmt(n) {
+      return (n == null || isNaN(n)) ? "—" : Number(n).toFixed(2);
+    }
 
-    // ------------- load version -------------
-    async function loadVersion(){
+    async function loadVersion() {
       try {
         const r = await fetch(api("/version"));
         const j = await r.json();
         versionEl.textContent = `${j.app} ${j.version}`;
+        statusEl.textContent = "OK";
       } catch {
-        versionEl.textContent = "unknown";
+        statusEl.textContent = "Error loading version";
       }
     }
 
-    // ------------- quote / summary -------------
-    async function loadQuote(sym){
+    async function loadQuote(sym) {
       try {
         const r = await fetch(api(`/quote/${encodeURIComponent(sym)}`));
         if (!r.ok) throw new Error("quote failed");
@@ -220,12 +207,15 @@
         statClose.textContent = fmt(j.prev_close);
         return j;
       } catch {
-        statHigh.textContent = statLow.textContent = statOpen.textContent = statClose.textContent = "—";
+        statHigh.textContent  = "—";
+        statLow.textContent   = "—";
+        statOpen.textContent  = "—";
+        statClose.textContent = "—";
         return null;
       }
     }
 
-    async function loadSummary(sym){
+    async function loadSummary(sym) {
       try {
         const r = await fetch(api(`/summary/${encodeURIComponent(sym)}`));
         if (!r.ok) throw new Error("summary failed");
@@ -236,129 +226,95 @@
       }
     }
 
-    // ------------- history / chart -------------
-    function clearCanvas(){
-      ctx.clearRect(0,0,canvas.width,canvas.height);
+    // ---- Chart helpers ----
+    function clearCanvas() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = "rgba(255,255,255,.02)";
-      ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
-    function drawLineChart(pts){
+    function drawLineChart(points) {
       clearCanvas();
-      if (!pts || !pts.length){
-        _chartCtx = null;
-        return;
-      }
+      if (!points.length) return;
 
       const padX = 36, padY = 22;
       const w = canvas.width - padX * 2;
       const h = canvas.height - padY * 2;
 
-      const min = Math.min(...pts.map(p => p.c));
-      const max = Math.max(...pts.map(p => p.c));
+      const vals = points.map(p => p.c);
+      const min = Math.min(...vals);
+      const max = Math.max(...vals);
       const span = (max - min) || 1;
 
       // grid
-      ctx.strokeStyle = "rgba(255,255,255,.08)";
+      ctx.strokeStyle = "rgba(255,255,255,.06)";
       ctx.lineWidth = 1;
-      for (let i=0;i<=4;i++){
+      for (let i = 0; i <= 4; i++) {
         const y = padY + (h * i / 4);
         ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(padX + w, y); ctx.stroke();
       }
 
       // line
       ctx.beginPath();
-      pts.forEach((p, i) => {
-        const x = padX + (w * i / (pts.length - 1));
+      points.forEach((p, i) => {
+        const x = padX + (w * i / (points.length - 1));
         const y = padY + (h - ((p.c - min) / span) * h);
         if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
       });
       ctx.strokeStyle = "#63a3ff";
-      ctx.lineWidth = 2.4;
+      ctx.lineWidth = 2.5;
       ctx.stroke();
-
-      _chartCtx = { padX, padY, w, h, min, max, span, pts };
     }
 
-    function handleHover(ev){
-      if (!_chartCtx) return;
-      const c = _chartCtx;
-      const rect = canvas.getBoundingClientRect();
-      const mx = ev.clientX - rect.left;
-      const my = ev.clientY - rect.top;
-
-      // inside plot?
-      if (mx < c.padX || mx > c.padX + c.w || my < c.padY || my > c.padY + c.h){
-        tooltip.style.display = "none";
-        return;
-      }
-
-      // nearest index
-      const ratio = (mx - c.padX) / c.w;
-      const idx = Math.max(0, Math.min(c.pts.length - 1, Math.round(ratio * (c.pts.length - 1))));
-      const p = c.pts[idx];
-
-      // guide line
-      clearCanvas();
-      drawLineChart(c.pts); // redraw
-      const x = c.padX + (c.w * idx / (c.pts.length - 1));
-      ctx.beginPath(); ctx.moveTo(x, c.padY); ctx.lineTo(x, c.padY + c.h);
-      ctx.strokeStyle = "rgba(255,255,255,.18)"; ctx.lineWidth = 1; ctx.stroke();
-
-      tooltip.style.display = "block";
-      tooltip.innerHTML = `<div style="white-space:nowrap"><b>${fmt(p.c)}</b> &nbsp; <span class="muted">${fmtDate(p.t)}</span></div>`;
-      const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
-      let tx = rect.left + x - tw/2, ty = rect.top + c.padY - th - 10;
-      tooltip.style.left = Math.max(8, Math.min(window.innerWidth - tw - 8, tx)) + "px";
-      tooltip.style.top  = Math.max(8, ty) + "px";
-    }
-
-    canvas.addEventListener("mousemove", handleHover);
-    canvas.addEventListener("mouseleave", () => { tooltip.style.display = "none"; });
-
-    async function loadHistory(sym, rangeKey){
-      setStatus(`Loading ${rangeKey}…`);
+    async function loadHistory(sym, rangeKey) {
+      statusEl.textContent = `Loading ${rangeKey}…`;
       try {
         const r = await fetch(api(`/history/${encodeURIComponent(sym)}?range=${encodeURIComponent(rangeKey)}`));
+        if (!r.ok) throw new Error("history failed");
         const j = await r.json();
-        const pts = (j && j.points) ? j.points : [];
-        drawLineChart(pts);
-        setStatus("OK");
-      } catch (e){
+        drawLineChart(j.points || []);
+        statusEl.textContent = "OK";
+      } catch {
         drawLineChart([]);
-        setStatus("History error");
-        console.error(e);
+        statusEl.textContent = "History error";
       }
     }
 
-    // ------------- wiring -------------
-    async function refreshAll(){
-      const sym = (symbolInput.value || "AAPL").trim().toUpperCase();
+    // Wire up
+    getBtn.addEventListener("click", async () => {
+      const sym = (symbolInput.value || "").trim().toUpperCase();
+      if (!sym) return;
       lastSymbol = sym;
       await loadQuote(sym);
       await loadSummary(sym);
       await loadHistory(sym, activeRange);
-    }
+    });
 
-    getBtn.addEventListener("click", refreshAll);
-    refreshBtn.addEventListener("click", refreshAll);
-    symbolInput.addEventListener("keydown", (e) => { if (e.key === "Enter") refreshAll(); });
+    refreshBtn.addEventListener("click", () => {
+      getBtn.click();
+    });
 
-    $$(".chip").forEach(el => el.addEventListener("click", () => {
-      $$(".chip").forEach(c => c.classList.remove("active"));
-      el.classList.add("active");
-      activeRange = el.getAttribute("data-range");
-      loadHistory(lastSymbol, activeRange);
-    }));
+    $$(".chip").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        $$(".chip").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        activeRange = btn.dataset.range;
+        await loadHistory(lastSymbol, activeRange);
+      });
+    });
 
-    // ------------- boot -------------
-    (async function(){
+    // initial
+    (async function init() {
       await loadVersion();
-      await refreshAll();
+      lastSymbol = (symbolInput.value || "AAPL").trim().toUpperCase();
+      await loadQuote(lastSymbol);
+      await loadSummary(lastSymbol);
+      await loadHistory(lastSymbol, activeRange);
     })();
   </script>
 </body>
 </html>
+
 
 
 
