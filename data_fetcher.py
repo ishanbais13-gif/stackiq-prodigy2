@@ -1,100 +1,83 @@
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 import requests
 
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
-BASE_URL = "https://finnhub.io/api/v1"
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+FINNHUB_BASE = "https://finnhub.io/api/v1"
 
-def _get(url: str, params: dict) -> dict:
+
+def _get(url: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not FINNHUB_API_KEY:
-        raise RuntimeError("FINNHUB_API_KEY is not set")
-    params = {**params, "token": FINNHUB_API_KEY}
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
-    return r.json()
+        # Still return shape so frontend doesn't crash
+        return None
+    p = dict(params)
+    p["token"] = FINNHUB_API_KEY
+    try:
+        r = requests.get(url, params=p, timeout=10)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
 
-# ------------------------
-# Quotes / Summary helpers
-# ------------------------
-def fetch_quote(symbol: str) -> dict:
-    """
-    Returns Finnhub quote normalized into:
-    {
-      "symbol": "AAPL",
-      "current": 232.14,
-      "prev_close": 232.56,
-      "high": 233.38,
-      "low": 231.37,
-      "open": 232.51,
-      "percent_change": -0.181,
-      "volume": null,
-      "raw": { ... original fields ... }
-    }
-    """
-    data = _get(f"{BASE_URL}/quote", {"symbol": symbol.upper()})
-    # Finnhub fields: c=current, pc=prev close, h=high, l=low, o=open, t=timestamp, d (abs change), dp (percent change)
+
+def fetch_quote(symbol: str) -> Optional[Dict[str, Any]]:
+    """Return normalized quote for the symbol, or None on failure."""
+    j = _get(f"{FINNHUB_BASE}/quote", {"symbol": symbol.upper()})
+    if not j or "c" not in j:
+        return None
+
+    # Finnhub fields: c=current, pc=prev close, h=high, l=low, o=open, t=timestamp
+    cur = float(j.get("c") or 0)
+    prev = float(j.get("pc") or 0)
+    pct = ((cur - prev) / prev * 100.0) if prev else 0.0
+
     return {
         "symbol": symbol.upper(),
-        "current": data.get("c"),
-        "prev_close": data.get("pc"),
-        "high": data.get("h"),
-        "low": data.get("l"),
-        "open": data.get("o"),
-        "percent_change": data.get("dp"),
-        "volume": data.get("v"),
-        "raw": data,
+        "current": cur,
+        "prev_close": float(j.get("pc") or 0),
+        "high": float(j.get("h") or 0),
+        "low": float(j.get("l") or 0),
+        "open": float(j.get("o") or 0),
+        "percent_change": pct,
+        "volume": j.get("v"),
+        "raw": j,
     }
 
-# ------------------------
-# History helper
-# ------------------------
-def _range_to_days(range_key: str) -> int:
-    rk = (range_key or "1M").upper()
-    if rk == "1M":
-        return 30
-    if rk == "3M":
-        return 90
-    if rk == "6M":
-        return 180
-    if rk == "1Y":
-        return 365
-    # default
-    return 30
 
-def fetch_history(symbol: str, range_key: str = "1M") -> dict:
+def fetch_history(
+    symbol: str,
+    start: datetime,
+    end: datetime,
+    resolution: str = "D",
+) -> List[Dict[str, Any]]:
     """
-    Returns normalized history for the chart:
-    {
-      "symbol": "AAPL",
-      "points": [ {"t": 1717027200, "c": 190.12}, ... ]   # t is unix seconds, c is close
-    }
+    Fetch OHLC candles for [start, end] and return [{"t": unix, "c": close}, ...].
+    Resolution: "1", "5", "15", "30", "60", "D", "W", "M".
     """
-    days = _range_to_days(range_key)
-    # Finnhub /stock/candle uses 'from' and 'to' unix seconds, not 'count'
-    to_ts = int(time.time())
-    from_ts = int((datetime.utcnow() - timedelta(days=days)).timestamp())
+    if not FINNHUB_API_KEY:
+        return []
 
-    data = _get(
-        f"{BASE_URL}/stock/candle",
-        {"symbol": symbol.upper(), "resolution": "D", "from": from_ts, "to": to_ts},
+    fr = int(start.timestamp())
+    to = int(end.timestamp())
+    j = _get(
+        f"{FINNHUB_BASE}/stock/candle",
+        {"symbol": symbol.upper(), "resolution": resolution, "from": fr, "to": to},
     )
+    if not j or j.get("s") != "ok":
+        return []
+    t = j.get("t") or []
+    c = j.get("c") or []
+    out = []
+    for ts, close in zip(t, c):
+        try:
+            out.append({"t": int(ts), "c": float(close)})
+        except Exception:
+            pass
+    return out
 
-    # Finnhub returns: s = "ok" | "no_data"
-    if data.get("s") != "ok":
-        return {"symbol": symbol.upper(), "points": []}
-
-    closes = data.get("c", [])
-    times_ = data.get("t", [])
-    points = []
-    for i in range(min(len(closes), len(times_))):
-        c = closes[i]
-        t = times_[i]         # unix seconds
-        if c is None or t is None:
-            continue
-        points.append({"t": int(t), "c": float(c)})
-
-    return {"symbol": symbol.upper(), "points": points}
 
 
 
