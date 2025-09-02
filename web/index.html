@@ -1,5 +1,5 @@
-<!doctype html>
-<html lang="en">
+ <!doctype html>
+<html lang="en" data-theme="auto">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
@@ -8,6 +8,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
+      /* dark defaults */
       --bg: #0b1320;
       --panel: #111a2e;
       --muted: #7f8ba6;
@@ -18,36 +19,87 @@
       --danger: #ff7ba9;
       --shadow: 0 10px 40px rgba(0,0,0,.45);
       --radius: 16px;
+      --grid: rgba(255,255,255,.06);
+      --panel-tint: rgba(2,12,30,.45);
+      --chip-on: rgba(106,163,255,.14);
+      --chip-on-b: rgba(106,163,255,.45);
     }
+    /* light palette */
+    html[data-theme="light"] {
+      --bg: #f6f8fe;
+      --panel: #ffffff;
+      --muted: #68748f;
+      --text: #0b1220;
+      --brand: #2b6cff;
+      --brand-2: #6aa3ff;
+      --success: #0a8f2e;
+      --danger: #d23969;
+      --shadow: 0 12px 40px rgba(0, 32, 90, .10);
+      --grid: rgba(0,0,0,.08);
+      --panel-tint: rgba(240,245,255,.8);
+      --chip-on: rgba(43,108,255,.10);
+      --chip-on-b: rgba(43,108,255,.35);
+    }
+    @media (prefers-color-scheme: light) {
+      html[data-theme="auto"] {
+        --bg: #f6f8fe;
+        --panel: #ffffff;
+        --muted: #68748f;
+        --text: #0b1220;
+        --brand: #2b6cff;
+        --brand-2: #6aa3ff;
+        --success: #0a8f2e;
+        --danger: #d23969;
+        --shadow: 0 12px 40px rgba(0, 32, 90, .10);
+        --grid: rgba(0,0,0,.08);
+        --panel-tint: rgba(240,245,255,.8);
+        --chip-on: rgba(43,108,255,.10);
+        --chip-on-b: rgba(43,108,255,.35);
+      }
+    }
+
     * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial;
       color: var(--text);
       background:
-        radial-gradient(1200px 700px at 85% 20%, rgba(96, 70, 255, .20), transparent),
-        radial-gradient(900px 600px at 15% 10%, rgba(74, 166, 255, .18), transparent),
+        radial-gradient(1200px 700px at 85% 20%, rgba(96, 70, 255, .18), transparent),
+        radial-gradient(900px 600px at 15% 10%, rgba(74, 166, 255, .14), transparent),
         var(--bg);
     }
     .page { max-width: 1120px; margin: 48px auto 80px; padding: 0 20px; }
     header { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+    .spacer { flex: 1; }
     .logo-dot {
       width: 12px; height: 12px; border-radius: 999px;
       background: linear-gradient(135deg, var(--brand), var(--brand-2));
-      box-shadow: 0 0 0 6px rgba(255,255,255,.04);
+      box-shadow: 0 0 0 6px rgba(0,0,0,.06);
     }
     .brand { font-weight: 700; letter-spacing: .3px; }
     .subtitle { font-size: 12px; color: var(--muted); margin-left: 4px; }
+    .mode {
+      appearance: none; border: 1px solid rgba(0,0,0,.08);
+      background: var(--panel); color: var(--text); padding: 8px 10px;
+      border-radius: 10px; font-weight: 600; cursor: pointer;
+      box-shadow: var(--shadow);
+    }
 
     .grid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 26px; }
     @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
 
     .card {
       background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015));
-      border: 1px solid rgba(255,255,255,.06);
+      border: 1px solid rgba(0,0,0,.06);
       border-radius: var(--radius);
       box-shadow: var(--shadow);
     }
+    html[data-theme="light"] .card,
+    html[data-theme="auto"][data-light="1"] .card {
+      background: #fff;
+      border-color: rgba(0,0,0,.06);
+    }
+
     .pad { padding: 18px; }
     .row { display: flex; align-items: center; gap: 10px; }
     .grow { flex: 1; }
@@ -56,7 +108,7 @@
     .input {
       width: 100%; height: 42px; border-radius: 10px;
       background: rgba(255,255,255,.04);
-      border: 1px solid rgba(255,255,255,.08);
+      border: 1px solid rgba(0,0,0,.08);
       color: var(--text); padding: 0 14px; font-size: 14px; outline: none;
     }
     .btn {
@@ -68,37 +120,40 @@
     .btn-ghost {
       height: 42px; padding: 0 12px; border-radius: 10px;
       color: var(--text); background: rgba(255,255,255,.03);
-      border: 1px solid rgba(255,255,255,.08); cursor: pointer;
+      border: 1px solid rgba(0,0,0,.08); cursor: pointer;
     }
 
     .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
     @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
     .stat {
       background: rgba(255,255,255,.03);
-      border: 1px solid rgba(255,255,255,.06);
+      border: 1px solid rgba(0,0,0,.06);
       border-radius: 12px; padding: 10px 12px;
     }
     .stat .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
     .stat .val { font-size: 16px; font-weight: 700; letter-spacing: .2px; }
 
-    .ranges { display: flex; gap: 8px; margin: 12px 2px 6px; }
+    .ranges { display: flex; gap: 8px; margin: 12px 2px 6px; flex-wrap: wrap; }
     .chip {
       padding: 6px 10px; border-radius: 999px; background: rgba(255,255,255,.03);
-      border: 1px solid rgba(255,255,255,.08); color: var(--text);
-      font-weight: 600; font-size: 12px; cursor: pointer;
+      border: 1px solid rgba(0,0,0,.06); cursor: pointer; font-weight: 600; font-size: 12px;
+      color: var(--text);
     }
-    .chip.active { background: rgba(106,163,255,.14); border-color: rgba(106,163,255,.45); box-shadow: inset 0 0 1px rgba(106,163,255,.3); }
+    .chip.active { background: var(--chip-on); border-color: var(--chip-on-b); }
 
-    .chart-wrap { margin-top: 12px; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); }
-    canvas { display: block; width: 100%; height: 300px; background: rgba(2,12,30,.45); }
+    .chart-wrap { margin-top: 12px; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); background: var(--panel-tint); position: relative; }
+    canvas { display: block; width: 100%; height: 300px; }
+    .empty {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-size: 13px; color: var(--muted);
+    }
 
-    .api-note { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: rgba(230,236,255,.6); margin: 8px 0 0; }
-
-    .title { font-weight: 700; }
+    .aside .title { font-weight: 700; }
     .kv { font-size: 12px; color: var(--muted); }
-    .kv .v { font-size: 14px; font-weight: 600; }
+    .kv .v { font-size: 14px; font-weight: 600; color: var(--text); }
 
-    footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 16px; }
+    .api-note { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; color: rgba(230,236,255,.6); margin: 10px 2px 0; }
+    footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 18px; }
   </style>
 </head>
 <body>
@@ -107,10 +162,16 @@
       <div class="logo-dot"></div>
       <div class="brand">StackIQ</div>
       <div class="subtitle">Minimal market data UI</div>
+      <div class="spacer"></div>
+      <select id="modeSel" class="mode" title="Theme">
+        <option value="auto">Auto</option>
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
+      </select>
     </header>
 
     <div class="grid">
-      <!-- LEFT: controls + chart -->
+      <!-- LEFT: quote + chart -->
       <section class="card pad">
         <div class="row" style="gap:8px;">
           <input id="symbolInput" class="input grow" value="AAPL" spellcheck="false" />
@@ -126,27 +187,28 @@
         </div>
 
         <div class="ranges">
-          <button class="chip" data-range="1M">1M</button>
+          <button class="chip active" data-range="1M">1M</button>
           <button class="chip" data-range="3M">3M</button>
           <button class="chip" data-range="6M">6M</button>
-          <button class="chip active" data-range="1Y">1Y</button>
+          <button class="chip" data-range="1Y">1Y</button>
         </div>
 
         <div class="chart-wrap">
           <canvas id="chartCanvas" width="1000" height="300"></canvas>
+          <div id="empty" class="empty" style="display:none;">No data</div>
         </div>
 
-        <div class="api-note">Endpoints: <code>/quote/{symbol}</code>, <code>/summary/{symbol}</code>, <code>/history/{symbol}?range=1M</code></div>
+        <div class="api-note">Endpoints: /quote/{symbol}, /summary/{symbol}, /history/{symbol}?range=1M</div>
       </section>
 
       <!-- RIGHT: status -->
-      <aside class="card pad">
+      <aside class="card pad aside">
         <div class="title muted">Status</div>
         <div class="kv" style="margin-top:6px;">State: <span id="status" class="v">Loading…</span></div>
         <div class="kv" style="margin-top:6px;">Version: <span id="version" class="v">—</span></div>
 
         <div class="title muted" style="margin-top:16px;">Summary</div>
-        <div id="summary" style="font-size:13px; line-height:1.5; margin-top:6px; color:#cdd6f4;">—</div>
+        <div id="summary" style="font-size:13px; line-height:1.5; margin-top:6px; color:#cdd6f4;"></div>
       </aside>
     </div>
 
@@ -154,166 +216,217 @@
   </div>
 
   <script>
-    // Build relative API URL (works whether served at root or under /web/)
-    function api(path) {
-      const base = location.pathname.startsWith("/web") ? "/" : "/";
-      return base + String(path).replace(/^\//, "");
+    // ---- theme --------------------------------------------------------------
+    const modeSel = document.getElementById('modeSel');
+    const html = document.documentElement;
+    const savedMode = localStorage.getItem('stackiq-mode') || 'auto';
+    modeSel.value = savedMode;
+    applyMode(savedMode);
+    modeSel.addEventListener('change', () => {
+      const val = modeSel.value;
+      localStorage.setItem('stackiq-mode', val);
+      applyMode(val);
+    });
+    function applyMode(val) {
+      html.setAttribute('data-theme', val);
+      // little hint for CSS to render light cards inside auto/light
+      if (val === 'light') html.setAttribute('data-light', '1'); else html.removeAttribute('data-light');
     }
 
-    // Dom helpers
-    const $  = (sel) => document.querySelector(sel);
+    // ---- tiny helpers -------------------------------------------------------
+    const $ = (sel) => document.querySelector(sel);
     const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+    const statHigh = $('#statHigh');
+    const statLow  = $('#statLow');
+    const statOpen = $('#statOpen');
+    const statClose= $('#statClose');
+    const statusEl = $('#status');
+    const versionEl= $('#version');
+    const summaryEl= $('#summary');
+    const symbolInput = $('#symbolInput');
+    const getBtn = $('#getBtn');
+    const refreshBtn = $('#refreshBtn');
+    const canvas = $('#chartCanvas');
+    const ctx = canvas.getContext('2d');
+    const emptyEl = $('#empty');
 
-    // UI elements
-    const statHigh  = $("#statHigh");
-    const statLow   = $("#statLow");
-    const statOpen  = $("#statOpen");
-    const statClose = $("#statClose");
-    const statusEl  = $("#status");
-    const versionEl = $("#version");
-    const summaryEl = $("#summary");
-    const symbolInput = $("#symbolInput");
-    const getBtn = $("#getBtn");
-    const refreshBtn = $("#refreshBtn");
-    const canvas = $("#chartCanvas");
-    const ctx = canvas.getContext("2d");
-
-    let activeRange = "1Y";
-    let lastSymbol = "AAPL";
-
+    let activeRange = '1M';
+    let chartCache = null; // {padX, padY, w, h, min, max, span, pts}
     function fmt(n) {
-      return (n == null || isNaN(n)) ? "—" : Number(n).toFixed(2);
+      return (n==null || Number.isNaN(Number(n))) ? '—' : Number(n).toFixed(2);
     }
 
-    async function loadVersion() {
+    // Always call root API (app serves index under /web but APIs at /)
+    function api(path) { return '/' + String(path).replace(/^\//,''); }
+
+    // ---- load version (for the status card) ---------------------------------
+    async function loadVersion(){
       try {
-        const r = await fetch(api("/version"));
+        const r = await fetch(api('/version'));
         const j = await r.json();
-        versionEl.textContent = `${j.app} ${j.version}`;
-        statusEl.textContent = "OK";
+        versionEl.textContent = `${j.app} v${j.version}`;
+        setStatus('OK');
       } catch {
-        statusEl.textContent = "Error loading version";
+        setStatus('Error loading version');
       }
     }
+    function setStatus(text){ statusEl.textContent = text; }
 
-    async function loadQuote(sym) {
+    // ---- quote + summary ----------------------------------------------------
+    async function loadQuote(sym){
       try {
         const r = await fetch(api(`/quote/${encodeURIComponent(sym)}`));
-        if (!r.ok) throw new Error("quote failed");
+        if(!r.ok) throw new Error('quote failed');
         const j = await r.json();
-        statHigh.textContent  = fmt(j.high);
-        statLow.textContent   = fmt(j.low);
-        statOpen.textContent  = fmt(j.open);
-        statClose.textContent = fmt(j.prev_close);
+        statHigh.textContent = fmt(j.high);
+        statLow.textContent  = fmt(j.low);
+        statOpen.textContent = fmt(j.open);
+        statClose.textContent= fmt(j.prev_close);
         return j;
       } catch {
-        statHigh.textContent  = "—";
-        statLow.textContent   = "—";
-        statOpen.textContent  = "—";
-        statClose.textContent = "—";
+        statHigh.textContent = statLow.textContent = statOpen.textContent = statClose.textContent = '—';
         return null;
       }
     }
 
-    async function loadSummary(sym) {
+    async function loadSummary(sym){
       try {
         const r = await fetch(api(`/summary/${encodeURIComponent(sym)}`));
-        if (!r.ok) throw new Error("summary failed");
+        if(!r.ok) throw new Error('summary failed');
         const j = await r.json();
-        summaryEl.textContent = j.summary || "—";
+        summaryEl.textContent = j.summary || '—';
       } catch {
-        summaryEl.textContent = "—";
+        summaryEl.textContent = '—';
       }
     }
 
-    // ---- Chart helpers ----
-    function clearCanvas() {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.fillStyle = "rgba(255,255,255,.02)";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // ---- history + chart ----------------------------------------------------
+    async function loadHistory(sym, rangeKey){
+      setStatus(`Loading ${rangeKey}…`);
+      try {
+        const r = await fetch(api(`/history/${encodeURIComponent(sym)}?range=${rangeKey}`));
+        if(!r.ok) throw new Error('history failed');
+        const j = await r.json();
+        const pts = j.points || [];
+        drawLineChart(pts);
+        setStatus('OK');
+      } catch {
+        drawLineChart([]); // ensure UI shows "No data"
+        setStatus('History error');
+      }
     }
 
-    function drawLineChart(points) {
+    function clearCanvas(){
+      ctx.clearRect(0,0,canvas.width, canvas.height);
+      ctx.fillStyle = 'rgba(255,255,255,.02)';
+      ctx.fillRect(0,0,canvas.width, canvas.height);
+    }
+
+    function drawLineChart(pts){
       clearCanvas();
-      if (!points.length) return;
+      if(!pts || !pts.length){
+        emptyEl.style.display = 'flex';
+        chartCache = null;
+        return;
+      }
+      emptyEl.style.display = 'none';
 
       const padX = 36, padY = 22;
-      const w = canvas.width - padX * 2;
-      const h = canvas.height - padY * 2;
-
-      const vals = points.map(p => p.c);
-      const min = Math.min(...vals);
-      const max = Math.max(...vals);
-      const span = (max - min) || 1;
+      const w = canvas.width - padX*2;
+      const h = canvas.height - padY*2;
+      const min = Math.min(...pts.map(p=>p.c));
+      const max = Math.max(...pts.map(p=>p.c));
+      const span = (max-min) || 1;
 
       // grid
-      ctx.strokeStyle = "rgba(255,255,255,.06)";
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim() || 'rgba(255,255,255,.06)';
       ctx.lineWidth = 1;
-      for (let i = 0; i <= 4; i++) {
-        const y = padY + (h * i / 4);
+      for(let i=0;i<5;i++){
+        const y = padY + (h*i/4);
         ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(padX + w, y); ctx.stroke();
       }
 
       // line
       ctx.beginPath();
-      points.forEach((p, i) => {
-        const x = padX + (w * i / (points.length - 1));
-        const y = padY + (h - ((p.c - min) / span) * h);
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      pts.forEach((p, i) => {
+        const x = padX + (w * i / (pts.length-1 || 1));
+        const y = padY + (h - ((p.c - min)/span)*h);
+        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
       });
-      ctx.strokeStyle = "#63a3ff";
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--brand').trim() || '#63a3ff';
+      ctx.lineWidth = 2.5; ctx.stroke();
+
+      chartCache = {padX, padY, w, h, min, max, span, pts};
     }
 
-    async function loadHistory(sym, rangeKey) {
-      statusEl.textContent = `Loading ${rangeKey}…`;
-      try {
-        const r = await fetch(api(`/history/${encodeURIComponent(sym)}?range=${encodeURIComponent(rangeKey)}`));
-        if (!r.ok) throw new Error("history failed");
-        const j = await r.json();
-        drawLineChart(j.points || []);
-        statusEl.textContent = "OK";
-      } catch {
-        drawLineChart([]);
-        statusEl.textContent = "History error";
-      }
-    }
+    canvas.addEventListener('mousemove', (ev)=>{
+      if(!chartCache) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = ev.clientX - rect.left;
+      const my = ev.clientY - rect.top;
 
-    // Wire up
-    getBtn.addEventListener("click", async () => {
-      const sym = (symbolInput.value || "").trim().toUpperCase();
-      if (!sym) return;
-      lastSymbol = sym;
+      // simple highlight: vertical line + value bubble
+      const {padX, padY, w, h, min, span, pts} = chartCache;
+      if(mx < padX || mx > padX + w || my < padY || my > padY + h) { drawLineChart(pts); return; }
+
+      const ratio = (mx - padX) / w;
+      const idx = Math.max(0, Math.min(pts.length-1, Math.round(ratio*(pts.length-1))));
+      drawLineChart(pts);
+      // vertical
+      ctx.beginPath();
+      ctx.moveTo(mx, padY); ctx.lineTo(mx, padY+h);
+      ctx.strokeStyle = 'rgba(106,163,255,.65)';
+      ctx.lineWidth = 1.2; ctx.stroke();
+
+      // value bubble
+      const v = pts[idx].c;
+      const y = padY + (h - ((v - min)/span)*h);
+      const txt = fmt(v);
+      ctx.font = '12px Inter, sans-serif';
+      const tw = ctx.measureText(txt).width + 10;
+      const bx = Math.min(Math.max(mx - tw/2, padX), padX + w - tw);
+      const by = y - 20;
+
+      ctx.fillStyle = 'rgba(0,0,0,.35)';
+      ctx.fillRect(bx, by, tw, 18);
+      ctx.fillStyle = '#fff';
+      ctx.fillText(txt, bx + 5, by + 13);
+    });
+
+    // ---- wire up UI ---------------------------------------------------------
+    $$('.chip').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        $$('.chip').forEach(b=>b.classList.remove('active'));
+        btn.classList.add('active');
+        activeRange = btn.dataset.range || '1M';
+        const sym = symbolInput.value.trim().toUpperCase() || 'AAPL';
+        loadHistory(sym, activeRange);
+      });
+    });
+
+    getBtn.addEventListener('click', async ()=>{
+      const sym = symbolInput.value.trim().toUpperCase() || 'AAPL';
       await loadQuote(sym);
       await loadSummary(sym);
       await loadHistory(sym, activeRange);
     });
-
-    refreshBtn.addEventListener("click", () => {
-      getBtn.click();
+    refreshBtn.addEventListener('click', ()=>{
+      const sym = symbolInput.value.trim().toUpperCase() || 'AAPL';
+      loadHistory(sym, activeRange);
     });
 
-    $$(".chip").forEach(btn => {
-      btn.addEventListener("click", async () => {
-        $$(".chip").forEach(b => b.classList.remove("active"));
-        btn.classList.add("active");
-        activeRange = btn.dataset.range;
-        await loadHistory(lastSymbol, activeRange);
-      });
-    });
-
-    // initial
-    (async function init() {
+    // initial boot
+    (async function boot(){
+      const sym = symbolInput.value.trim().toUpperCase() || 'AAPL';
       await loadVersion();
-      lastSymbol = (symbolInput.value || "AAPL").trim().toUpperCase();
-      await loadQuote(lastSymbol);
-      await loadSummary(lastSymbol);
-      await loadHistory(lastSymbol, activeRange);
+      await loadQuote(sym);
+      await loadSummary(sym);
+      await loadHistory(sym, activeRange);
     })();
   </script>
 </body>
 </html>
+
 
 
 
