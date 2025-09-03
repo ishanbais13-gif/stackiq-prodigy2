@@ -1,506 +1,555 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>StackIQ — minimal market data UI</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <style>
-    :root {
-      --bg: #0b1320;
-      --panel: #111a2e;
-      --muted: #7f8ba6;
-      --text: #e6ecff;
-      --brand: #63a3ff;
-      --brand-2: #86cbff;
-      --success: #25d0a2;
-      --danger: #ff7a7a;
-      --shadow: 0 10px 40px rgba(0,0,0,.45);
-      --radius: 16px;
-      --chip-bg: rgba(255,255,255,.06);
-      --chip-border: rgba(255,255,255,.12);
-      --grid: rgba(255,255,255,.08);
-      --line: #4d8bff;
-      --line-2: #ffd166;
-      --line-3: #06d6a0;
-      --line-4: #ef476f;
-      --line-5: #b691ff;
-      --tooltip-bg: rgba(12,18,35,.92);
-    }
-    * { box-sizing: border-box }
-    body {
-      margin: 0;
-      font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial;
-      color: var(--text);
-      background:
-        radial-gradient(1200px 700px at 85% 20%, rgba(96,70,255,.20), transparent),
-        radial-gradient(900px 600px at 15% 10%, rgba(74,166,255,.18), transparent),
-        var(--bg);
-    }
-    .page { max-width: 1120px; margin: 48px auto 80px; padding: 0 20px; }
-    header { display:flex; align-items:center; gap:14px; margin-bottom:18px; }
-    .logo-dot { width: 10px; height: 10px; border-radius: 50%; background: linear-gradient(135deg, var(--brand), var(--brand-2)); box-shadow: 0 0 0 6px rgba(99,163,255,.16) }
-    .brand { font-weight: 700; font-size: 20px; letter-spacing: .2px }
-    .subtitle { font-size: 12px; color: var(--muted); margin-left: 4px }
-    .grid { display:grid; grid-template-columns: 1.15fr .85fr; gap: 26px; }
-    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>StackIQ — minimal market data UI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" />
 
-    .card {
-      background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.015));
-      border: 1px solid rgba(255,255,255,.06);
-      border-radius: var(--radius);
-      box-shadow: var(--shadow);
-    }
-    .pad { padding: 18px; }
-    .row { display:flex; align-items:center; gap:10px; }
-    .grow { flex: 1; }
-    .muted { color: var(--muted); }
+<style>
+  :root {
+    --bg: #0b1320;
+    --bg-2: #0f1930;
+    --panel: #111a2e;
+    --muted: #9fb0d3;
+    --text: #e6ecff;
+    --brand: #63a3ff;
+    --brand-2: #2b6cff;
+    --good: #4cd18d;
+    --bad: #ff6b6b;
+    --shadow: 0 10px 40px rgba(0,0,0,.45);
+    --radius: 16px;
+    --grid: rgba(255,255,255,.08);
+    --chart: #63a3ff;
+    --chip: rgba(255,255,255,.08);
+    --chip-active: rgba(99,163,255,.18);
+    --chip-border: rgba(255,255,255,.08);
+    --btn-bg: linear-gradient(135deg, var(--brand), var(--brand-2));
+    --btn-text: #081123;
+  }
+  :root.light {
+    --bg: #f2f6ff;
+    --bg-2: #e9f0ff;
+    --panel: #ffffff;
+    --muted: #6b7b9c;
+    --text: #0e1b32;
+    --brand: #2a60ff;
+    --brand-2: #7aa7ff;
+    --good: #0e885f;
+    --bad: #c0392b;
+    --grid: rgba(14,27,50,.08);
+    --chart: #2a60ff;
+    --chip: rgba(14,27,50,.06);
+    --chip-active: rgba(42,96,255,.12);
+    --chip-border: rgba(14,27,50,.08);
+    --btn-text: #ffffff;
+  }
 
-    .input {
-      width: 100%;
-      height: 42px;
-      border-radius: 10px;
-      background: rgba(255,255,255,.04);
-      border: 1px solid rgba(255,255,255,.08);
-      color: var(--text);
-      padding: 0 14px;
-      font-size: 14px;
-      outline: none;
-    }
-    .btn, .btn-ghost, .btn-chip {
-      height: 42px; padding: 0 14px; border-radius: 10px; border: 0; cursor: pointer;
-      font-weight: 600; color: #0b1320; background: linear-gradient(135deg, var(--brand), var(--brand-2));
-      box-shadow: 0 6px 22px rgba(106,163,255,.35);
-    }
-    .btn-ghost {
-      color: var(--text); background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.10); box-shadow: none;
-    }
-    .btn-chip {
-      height: 32px; padding: 0 10px; background: var(--chip-bg); color: var(--text);
-      border: 1px solid var(--chip-border); font-size: 12px; box-shadow: none;
-    }
-    .btn-chip.active { background: rgba(106,163,255,.16); border-color: rgba(106,163,255,.45) }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+    color: var(--text);
+    background:
+      radial-gradient(1200px 700px at 85% 20%, rgba(96,70,255,.20), transparent),
+      radial-gradient(900px 600px at 15% 10%, rgba(14,160,255,.18), transparent),
+      var(--bg);
+    transition: background .3s ease, color .3s ease;
+  }
+  .page { max-width: 1160px; margin: 0 auto; padding: 24px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
+  .logo-dot {
+    width: 18px; height: 18px; border-radius: 6px;
+    background: linear-gradient(135deg, var(--brand), var(--brand-2));
+    box-shadow: 0 6px 22px rgba(106,163,255,.35), inset 0 0 16px rgba(255,255,255,.18);
+  }
+  .brand { font-weight: 700; font-size: 20px; letter-spacing: .2px; }
+  .subtitle { font-size: 12px; color: var(--muted); margin-left: 6px; }
 
-    .stats { display:grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px }
-    @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
-    .stat { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.06); border-radius: 12px; padding: 10px 12px }
-    .stat .label { font-size: 12px; color: var(--muted); margin-bottom: 6px }
-    .stat .val { font-size: 16px; font-weight: 700; letter-spacing: .2px }
+  .topbar { margin-left: auto; }
+  .mode-btn {
+    appearance: none; border: 1px solid var(--chip-border); background: var(--chip);
+    padding: 8px 12px; border-radius: 999px; color: var(--text); cursor: pointer;
+    font-weight: 600; box-shadow: var(--shadow); transition: transform .08s ease, background .2s ease;
+  }
+  .mode-btn:hover { transform: translateY(-1px); }
 
-    .ranges { display:flex; gap: 8px; margin: 10px 2px 8px }
-    .legend { display:flex; gap: 10px; align-items:center; flex-wrap: wrap; margin: 6px 2px 2px }
-    .legend .item { display:flex; align-items:center; gap:8px; font-size:12px; color: var(--muted); }
-    .legend .swatch { width:12px; height:12px; border-radius: 999px; border: 1px solid rgba(255,255,255,.35) }
+  .grid {
+    display: grid;
+    grid-template-columns: 1.15fr .85fr;
+    gap: 26px;
+  }
+  @media (max-width: 980px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
+    border: 1px solid rgba(255,255,255,.06);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+  }
+  .pad { padding: 18px; }
+  .row { display: flex; align-items: center; gap: 10px; }
+  .grow { flex: 1; }
 
-    .chart-wrap { margin-top: 10px; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); background: rgba(12,18,30,.45); }
-    canvas { display:block; width: 100%; height: 320px }
-    .api-note { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; color: rgba(230,236,255,.6); margin: 10px 2px 0 }
+  .input {
+    width: 100%; height: 42px; border-radius: 10px;
+    background: rgba(255,255,255,.04);
+    border: 1px solid rgba(255,255,255,.10);
+    color: var(--text); padding: 0 14px; font-size: 14px; outline: none;
+  }
+  .btn {
+    height: 42px; padding: 0 14px; border-radius: 10px; border: 0; cursor: pointer;
+    font-weight: 700; color: var(--btn-text); background: var(--btn-bg);
+    box-shadow: 0 6px 22px rgba(106,163,255,.35);
+    transition: transform .06s ease, filter .2s ease;
+  }
+  .btn:hover { transform: translateY(-1px); filter: brightness(1.06); }
+  .btn-ghost {
+    height: 42px; padding: 0 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,.10);
+    color: var(--text); background: rgba(255,255,255,.04); cursor: pointer;
+  }
 
-    .tooltip {
-      position: absolute; pointer-events:none; padding: 8px 10px; border-radius: 10px;
-      background: var(--tooltip-bg); color: #e8eeff; font-size: 12px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
-      transform: translate(-50%, -120%); white-space: nowrap; display:none;
-      border: 1px solid rgba(255,255,255,.08)
-    }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
+  @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  .stat { background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.08); border-radius: 12px; padding: 12px; }
+  .stat .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .stat .val { font-size: 16px; font-weight: 700; }
 
-    /* Theme toggle (kept minimal; styles piggyback variables) */
-    .theme-toggle {
-      position: fixed; right: 24px; top: 24px; z-index: 10;
-      font-size: 12px; color: var(--text); background: rgba(255,255,255,.06);
-      border: 1px solid rgba(255,255,255,.12); border-radius: 999px; padding: 6px 10px; cursor: pointer;
-    }
+  .ranges { display: flex; gap: 8px; margin: 12px 2px 6px; flex-wrap: wrap; }
+  .chip {
+    padding: 6px 10px; border-radius: 999px; border: 1px solid var(--chip-border);
+    background: var(--chip); color: var(--text); font-weight: 600; font-size: 12px; cursor: pointer;
+    transition: background .15s ease, border-color .15s ease, transform .06s ease;
+  }
+  .chip:hover { transform: translateY(-1px); }
+  .chip.active { background: var(--chip-active); border-color: rgba(106,163,255,.45); }
 
-    /* Light theme overrides */
-    .light {
-      --bg: #eef3ff;
-      --panel: #ffffff;
-      --muted: #667085;
-      --text: #0f172a;
-      --grid: rgba(0,0,0,.08);
-      --chip-bg: rgba(0,0,0,.04);
-      --chip-border: rgba(0,0,0,.1);
-      --tooltip-bg: rgba(255,255,255,.98);
-    }
-    .light body {
-      background:
-        radial-gradient(1200px 700px at 85% 20%, rgba(170, 210, 255,.35), transparent),
-        radial-gradient(900px 600px at 15% 10%, rgba(186, 172, 255,.25), transparent),
-        var(--bg);
-      color: var(--text);
-    }
-    .light .card { background: #fff; border-color: rgba(0,0,0,.06) }
-    .light .btn-ghost { background: rgba(0,0,0,.03); border-color: rgba(0,0,0,.1); color: #0f172a }
-    .light .legend .item { color: #4b5563 }
-    .light .api-note { color: #475569 }
-  </style>
+  .legend { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin: 4px 0 8px; }
+  .lg-dot { width: 8px; height: 8px; border-radius: 999px; background: var(--chart); box-shadow: 0 0 0 2px rgba(99,163,255,.25); }
+
+  .chart-wrap { margin-top: 10px; border-radius: 14px; overflow: hidden; border: 1px solid rgba(255,255,255,.06); background: rgba(10,18,30,.45); position: relative; }
+  canvas { display: block; width: 100%; height: 340px; }
+  .tooltip {
+    position: absolute; pointer-events: none; padding: 8px 10px; border-radius: 10px;
+    font-size: 12px; background: rgba(17,26,46,.92); color: #dfe9ff; border: 1px solid rgba(255,255,255,.10);
+    box-shadow: 0 10px 30px rgba(0,0,0,.35); display: none; white-space: nowrap;
+  }
+
+  aside .title { font-weight: 700; }
+  .kv { font-size: 12px; color: var(--muted); }
+  .kv > span { font-weight: 700; color: var(--text); margin-left: 6px; }
+
+  details.api {
+    margin-top: 10px; border: 1px dashed rgba(255,255,255,.15);
+    background: rgba(255,255,255,.02); border-radius: 12px; padding: 10px 14px;
+  }
+  details.api > summary { cursor: pointer; user-select: none; color: var(--muted); font-weight: 600; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; color: rgba(230,236,255,.8); }
+
+  footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 16px; }
+</style>
 </head>
 <body>
-  <button id="themeBtn" class="theme-toggle">Dark</button>
-
   <div class="page">
     <header>
       <div class="logo-dot"></div>
       <div class="brand">StackIQ</div>
       <div class="subtitle">Minimal market data UI</div>
+      <div class="topbar">
+        <button id="modeBtn" class="mode-btn">Dark</button>
+      </div>
     </header>
 
     <div class="grid">
-      <!-- LEFT: inputs + chart -->
+      <!-- LEFT: quote + chart -->
       <section class="card pad">
         <div class="row" style="gap:10px;">
-          <input id="symbolInput" class="input grow" spellcheck="false"
-                 placeholder="AAPL or multiple symbols like: AAPL, TSLA, NVDA" value="AAPL" />
+          <input id="symbolInput" class="input grow" list="tickerList" value="AAPL" placeholder="Search ticker (AAPL, TSLA, NVDA…)" spellcheck="false" />
+          <datalist id="tickerList">
+            <option value="AAPL"><option value="MSFT"><option value="NVDA">
+            <option value="AMZN"><option value="TSLA"><option value="META">
+            <option value="GOOGL"><option value="SOFI"><option value="OPEN">
+          </datalist>
           <button id="getBtn" class="btn">Get Quote</button>
           <button id="refreshBtn" class="btn-ghost">Refresh</button>
         </div>
 
         <div class="stats">
-          <div class="stat"><div class="label">Session High</div><div id="statHigh" class="val">—</div></div>
-          <div class="stat"><div class="label">Session Low</div><div id="statLow" class="val">—</div></div>
-          <div class="stat"><div class="label">Open</div><div id="statOpen" class="val">—</div></div>
-          <div class="stat"><div class="label">Prev Close</div><div id="statClose" class="val">—</div></div>
+          <div class="stat"><div class="label">Session High</div><div id="statHigh" class="val">–</div></div>
+          <div class="stat"><div class="label">Session Low</div><div id="statLow" class="val">–</div></div>
+          <div class="stat"><div class="label">Open</div><div id="statOpen" class="val">–</div></div>
+          <div class="stat"><div class="label">Prev Close</div><div id="statClose" class="val">–</div></div>
         </div>
 
-        <div class="ranges" id="ranges">
-          <!-- buttons get .active via JS -->
-          <button class="btn-chip" data-range="1D">1D</button>
-          <button class="btn-chip active" data-range="1M">1M</button>
-          <button class="btn-chip" data-range="3M">3M</button>
-          <button class="btn-chip" data-range="6M">6M</button>
-          <button class="btn-chip" data-range="1Y">1Y</button>
-          <button class="btn-chip" data-range="5Y">5Y</button>
+        <div class="ranges">
+          <button class="chip" data-range="1D">1D</button>
+          <button class="chip active" data-range="1M">1M</button>
+          <button class="chip" data-range="3M">3M</button>
+          <button class="chip" data-range="6M">6M</button>
+          <button class="chip" data-range="1Y">1Y</button>
+          <button class="chip" data-range="5Y">5Y</button>
         </div>
 
-        <div class="legend" id="legend"></div>
+        <div class="legend"><span class="lg-dot"></span><span id="legendSym">AAPL</span></div>
 
-        <div class="chart-wrap" style="position:relative;">
-          <canvas id="chartCanvas"></canvas>
+        <div class="chart-wrap">
+          <canvas id="chartCanvas" width="1000" height="340"></canvas>
           <div id="tooltip" class="tooltip"></div>
         </div>
 
-        <div class="api-note">
-          Endpoints: <span>/quote/{symbol}</span>, <span>/summary/{symbol}</span>, <span>/history/{symbol}?range=1M|3M|6M|1Y|5Y|1D</span>
-        </div>
+        <details class="api">
+          <summary>API docs (endpoints)</summary>
+<pre class="mono">
+GET /quote/{symbol}
+GET /summary/{symbol}
+GET /history/{symbol}?range=1D|1M|3M|6M|1Y|5Y
+</pre>
+        </details>
       </section>
 
       <!-- RIGHT: status -->
       <aside class="card pad">
-        <div class="muted" style="font-weight:700; margin-bottom:8px;">Status</div>
-        <div class="row" style="gap:12px;">
-          <div class="muted">State:</div><span id="status" style="font-weight:600;">OK</span>
-        </div>
-        <div class="row" style="gap:12px; margin-top:6px;">
-          <div class="muted">Version:</div><span id="version" style="font-weight:600;">stackiq-web v1.0.0</span>
-        </div>
-        <div class="muted" style="font-weight:700; margin-top:16px;">Summary</div>
-        <div id="summary" style="font-size:13px; line-height:1.6; margin-top:6px; color:#cdd6f4;">—</div>
+        <div class="title">Status</div>
+        <div class="kv" style="margin-top:8px">State: <span id="status">Loading…</span></div>
+        <div class="kv" style="margin-top:6px">Version: <span id="version" class="mono">—</span></div>
+
+        <div class="title muted" style="margin-top:16px;">Summary</div>
+        <div id="summary" style="font-size:13px; line-height:1.5; margin-top:6px; color:#cdd6f4;">—</div>
       </aside>
     </div>
 
-    <footer class="muted" style="text-align:center; margin-top:16px;">© 2025 StackIQ</footer>
+    <footer>© 2025 StackIQ</footer>
   </div>
 
-  <script>
-    // ---------------- helpers ----------------
-    const $  = (s) => document.querySelector(s);
-    const $$ = (s) => Array.from(document.querySelectorAll(s));
+<script>
+  // ---------- Helpers ----------
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+  const fmt = (n) => (n === null || n === undefined || isNaN(n)) ? '–' : Number(n).toFixed(2);
+  const fmtDate = (ts) => {
+    const d = new Date(ts * 1000);
+    // e.g. "Aug 06, 25"
+    return d.toLocaleDateString(undefined, { month: 'short', day: '2-digit', year: '2-digit' });
+  };
+  const fmtShortDate = (ts) => {
+    const d = new Date(ts * 1000);
+    return d.toLocaleDateString(undefined, { month: 'short', day: '2-digit' });
+  };
+  // builds relative API URL (works on root or under /web/)
+  function api(path) {
+    const base = location.pathname.startsWith("/web") ? "/" : "/";
+    return base + path.replace(/^\//, "");
+  }
 
-    const statHigh = $('#statHigh');
-    const statLow  = $('#statLow');
-    const statOpen = $('#statOpen');
-    const statClose= $('#statClose');
+  // ---------- Elements ----------
+  const statHigh = $('#statHigh');
+  const statLow  = $('#statLow');
+  const statOpen = $('#statOpen');
+  const statClose= $('#statClose');
 
-    const statusEl = $('#status');
-    const versionEl= $('#version');
-    const summaryEl= $('#summary');
+  const statusEl = $('#status');
+  const versionEl= $('#version');
+  const summaryEl= $('#summary');
 
-    const symbolInput = $('#symbolInput');
-    const getBtn = $('#getBtn');
-    const refreshBtn = $('#refreshBtn');
+  const symbolInput = $('#symbolInput');
+  const getBtn      = $('#getBtn');
+  const refreshBtn  = $('#refreshBtn');
+  const legendSym   = $('#legendSym');
 
-    const canvas = $('#chartCanvas');
-    const ctx = canvas.getContext('2d');
-    const tooltip = $('#tooltip');
-    const legend = $('#legend');
-    const themeBtn = $('#themeBtn');
+  const modeBtn     = $('#modeBtn');
 
-    let activeRange = '1M';
-    let seriesCache = new Map(); // key: `${sym}|${activeRange}` -> points
-    let drawState = null;        // saved chart metrics for hover
-    let colors = ['var(--line)','var(--line-2)','var(--line-3)','var(--line-4)','var(--line-5)'];
+  const canvas = $('#chartCanvas');
+  const ctx     = canvas.getContext('2d', { alpha: true });
+  const tooltip = $('#tooltip');
 
-    function fmt(n) { return (n==null || isNaN(n)) ? '—' : Number(n).toFixed(2); }
-    function fmtDate(ts, withTime=false) {
-      const d = new Date(ts*1000);
-      return withTime
-        ? d.toLocaleString(undefined, {year:'2-digit', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit'})
-        : d.toLocaleDateString(undefined, {year:'2-digit', month:'short', day:'2-digit'});
+  let activeRange = '1M';
+  let chartCache  = null; // last computed geometry for hover
+  let theme       = localStorage.getItem('siq-theme') || 'dark';
+
+  // ---------- Theme ----------
+  function applyTheme(next) {
+    theme = next;
+    if (theme === 'light') {
+      document.documentElement.classList.add('light');
+      modeBtn.textContent = 'Light';
+    } else {
+      document.documentElement.classList.remove('light');
+      modeBtn.textContent = 'Dark';
     }
-    function api(path){ return path.replace(/^\//,'/'); } // works on root and /web/
+    localStorage.setItem('siq-theme', theme);
+    drawLineChart(chartDataPoints || []); // repaint with themed colors
+  }
+  modeBtn.addEventListener('click', () => applyTheme(theme === 'light' ? 'dark' : 'light'));
+  applyTheme(theme);
 
-    function setStatus(s){ statusEl.textContent = s; }
+  // ---------- State ----------
+  let chartDataPoints = []; // [{t: epochSec, p: price}, …]
+  let animReq = 0;
 
-    // ---------------- data loaders ----------------
-    async function loadVersion() {
-      try {
-        const r = await fetch(api('/version'));
-        const j = await r.json();
-        versionEl.textContent = `${j.app} v${j.version}`;
-        setStatus('OK');
-      } catch {
-        setStatus('Error getting version');
-      }
+  // ---------- API ----------
+  async function loadVersion() {
+    try {
+      const r = await fetch(api('/version'));
+      const j = await r.json();
+      versionEl.textContent = `${j.app} v${j.version}`;
+      setStatus('OK');
+    } catch (e) {
+      setStatus('Error loading version');
+    }
+  }
+  function setStatus(text) {
+    statusEl.textContent = text;
+    statusEl.style.color = (text.toLowerCase().includes('error')) ? 'var(--bad)' : 'var(--good)';
+  }
+  async function loadQuote(sym) {
+    try {
+      const r = await fetch(api(`/quote/${encodeURIComponent(sym)}`));
+      if (!r.ok) throw new Error('quote failed');
+      const j = await r.json();
+      statHigh.textContent = fmt(j.high);
+      statLow.textContent  = fmt(j.low);
+      statOpen.textContent = fmt(j.open);
+      statClose.textContent= fmt(j.prev_close);
+      return j;
+    } catch (e) {
+      statHigh.textContent = statLow.textContent = statOpen.textContent = statClose.textContent = '–';
+      return null;
+    }
+  }
+  async function loadSummary(sym) {
+    try {
+      const r = await fetch(api(`/summary/${encodeURIComponent(sym)}`));
+      if (!r.ok) throw new Error('summary failed');
+      const j = await r.json();
+      summaryEl.textContent = j.summary || '—';
+      return j;
+    } catch (e) {
+      summaryEl.textContent = '—';
+      return null;
+    }
+  }
+  async function loadHistory(sym, rangeKey) {
+    try {
+      const r = await fetch(api(`/history/${encodeURIComponent(sym)}?range=${rangeKey}`));
+      if (!r.ok) throw new Error('history failed');
+      const j = await r.json();
+      return j.points || [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // ---------- Chart ----------
+  function clearCanvas() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // panel bg
+    ctx.fillStyle = (theme === 'light') ? 'rgba(255,255,255,.65)' : 'rgba(2,12,30,.35)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function drawLineChart(pts, animate=true) {
+    clearCanvas();
+    chartCache = null;
+
+    // Handle empty or single-point data
+    if (!pts || !pts.length) {
+      drawEmpty();
+      return;
     }
 
-    async function loadQuote(primarySym) {
-      try {
-        const r = await fetch(api(`/quote/${encodeURIComponent(primarySym)}`));
-        if (!r.ok) throw new Error('quote failed');
-        const j = await r.json();
-        statHigh.textContent = fmt(j.high);
-        statLow.textContent  = fmt(j.low);
-        statOpen.textContent = fmt(j.open);
-        statClose.textContent= fmt(j.prev_close);
-        return j;
-      } catch {
-        statHigh.textContent = statLow.textContent = statOpen.textContent = statClose.textContent = '—';
-        return null;
-      }
+    const padX = 40, padY = 26;
+    const w = canvas.width  - padX * 2;
+    const h = canvas.height - padY * 2;
+
+    const prices = pts.map(p => p.p);
+    const min = Math.min(...prices);
+    const max = Math.max(...prices);
+    const span = (max - min) || 1;
+
+    // Grid
+    ctx.save();
+    ctx.translate(padX, padY);
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim();
+    ctx.lineWidth = 1;
+    // horizontal grid + labels
+    ctx.font = '11px Inter, system-ui';
+    ctx.fillStyle = (theme === 'light') ? '#475872' : '#93a1bd';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    const lines = 5;
+    for (let i = 0; i <= lines; i++) {
+      const y = Math.round(h - (h * i / lines)) + .5;
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+      const label = (min + (span * i / lines)).toFixed(2);
+      ctx.fillText(label, -6, y);
+    }
+    // vertical ticks (dates)
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    const vTicks = Math.min(6, Math.max(3, Math.floor(pts.length / 10)));
+    for (let i = 0; i <= vTicks; i++) {
+      const x = Math.round(w * i / vTicks) + .5;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      const idx = Math.round(pts.length * i / vTicks);
+      const t = pts[Math.min(idx, pts.length - 1)].t;
+      ctx.fillText(fmtShortDate(t), x, h + 6);
+    }
+    ctx.restore();
+
+    // Line animate
+    const color = getComputedStyle(document.documentElement).getPropertyValue('--chart').trim();
+    const lineWidth = 2.5;
+
+    // Precompute coords
+    const coords = pts.map((p, i) => {
+      const x = padX + (w * i / (pts.length - 1 || 1));
+      const y = padY + (h - ((p.p - min) / span) * h);
+      return { x, y, p: p.p, t: p.t };
+    });
+
+    // If only 1 point, draw a dot + baseline
+    if (coords.length === 1) {
+      const {x,y} = coords[0];
+      ctx.beginPath();
+      ctx.arc(x, y, 3.5, 0, Math.PI*2); ctx.fillStyle = color; ctx.fill();
+      ctx.strokeStyle = color; ctx.lineWidth = lineWidth;
+      ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(padX + w, y); ctx.stroke();
+      chartCache = { padX, padY, w, h, coords, min, max, span };
+      return;
     }
 
-    async function loadSummary(primarySym) {
-      try {
-        const r = await fetch(api(`/summary/${encodeURIComponent(primarySym)}`));
-        if (!r.ok) throw new Error('summary failed');
-        const j = await r.json();
-        summaryEl.textContent = j.summary || '—';
-      } catch {
-        summaryEl.textContent = '—';
-      }
-    }
+    // Animation
+    let t0;
+    cancelAnimationFrame(animReq);
+    function frame(ts) {
+      if (!t0) t0 = ts;
+      const prog = Math.max(0, Math.min(1, (ts - t0) / 500)); // 0.5s
 
-    // loads history for a single symbol+range (uses cache)
-    async function history(sym, rangeKey) {
-      const key = `${sym}|${rangeKey}`;
-      if (seriesCache.has(key)) return seriesCache.get(key);
-      try {
-        const r = await fetch(api(`/history/${encodeURIComponent(sym)}?range=${encodeURIComponent(rangeKey)}`));
-        if (!r.ok) throw new Error('history failed');
-        const j = await r.json(); // expect { points: [{t, c}] }
-        const pts = (j.points || []).map(p => ({ t: p.t, c: p.c }));
-        seriesCache.set(key, pts);
-        return pts;
-      } catch {
-        return [];
-      }
-    }
-
-    // ---------------- charting ----------------
-    function resizeCanvas() {
-      const dpr = window.devicePixelRatio || 1;
-      const rect = canvas.getBoundingClientRect();
-      canvas.width  = Math.floor(rect.width * dpr);
-      canvas.height = Math.floor(rect.height * dpr);
-      ctx.setTransform(dpr,0,0,dpr,0,0); // draw in CSS pixels
-    }
-
-    function clearCanvas() {
-      ctx.clearRect(0,0,canvas.width, canvas.height);
-      ctx.fillStyle = 'rgba(255,255,255,.02)';
-      ctx.fillRect(0,0,canvas.width, canvas.height);
-    }
-
-    // draw multiple series; each series = [{t, c}]
-    function drawSeries(seriesList, labels) {
-      resizeCanvas();
       clearCanvas();
-      const padX = 40, padY = 24;
-      const w = canvas.width; const h = canvas.height;
-      const plotW = w - padX*2; const plotH = h - padY*2;
-
-      // flatten to compute min/max
-      const allPts = seriesList.flat();
-      if (allPts.length === 0) { drawState = null; return; }
-
-      const minC = Math.min(...allPts.map(p=>p.c));
-      const maxC = Math.max(...allPts.map(p=>p.c));
-      const span = (maxC - minC) || 1;
-
-      // grid lines
+      // redraw grid (cheap)
+      ctx.save();
+      ctx.translate(padX, padY);
       ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim();
       ctx.lineWidth = 1;
-      for (let i=0;i<=4;i++){
-        const y = padY + (plotH/4)*i;
-        ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(padX+plotW, y); ctx.stroke();
+      const lines = 5;
+      for (let i = 0; i <= lines; i++) {
+        const y = Math.round(h - (h * i / lines)) + .5;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
       }
+      ctx.restore();
 
-      // x positions per series by index
-      // We normalize each series to its own length so overlays align visually for trend comparison
-      // (If your /history returns matching timestamps you can map by time instead.)
-      const animSteps = 22;
-      let step = 0;
-
-      function drawFrame() {
-        clearCanvas();
-        // redraw grid
-        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim();
-        ctx.lineWidth = 1;
-        for (let i=0;i<=4;i++){
-          const y = padY + (plotH/4)*i;
-          ctx.beginPath(); ctx.moveTo(padX, y); ctx.lineTo(padX+plotW, y); ctx.stroke();
-        }
-
-        seriesList.forEach((pts, idx) => {
-          if (!pts.length) return;
-          const color = getComputedStyle(document.documentElement).getPropertyValue(['--line','--line-2','--line-3','--line-4','--line-5'][idx]).trim();
-          ctx.beginPath();
-          pts.forEach((p,i) => {
-            const tx = padX + (plotW * (i/(pts.length-1||1)));
-            const ty = padY + (plotH - ((p.c - minC)/span) * plotH);
-            if (i===0) ctx.moveTo(tx, ty);
-            else {
-              // animate last fraction based on step
-              const upto = Math.floor((pts.length-1) * (step/animSteps));
-              if (i <= upto) ctx.lineTo(tx, ty);
-            }
-          });
-          ctx.lineWidth = 2.5;
-          ctx.strokeStyle = color;
-          ctx.stroke();
-        });
-
-        step++;
-        if (step <= animSteps) requestAnimationFrame(drawFrame);
-      }
-      requestAnimationFrame(drawFrame);
-
-      // save state for hover
-      drawState = { padX, padY, plotW, plotH, minC, maxC, span, seriesList, labels };
-    }
-
-    function handleHover(ev) {
-      if (!drawState) { tooltip.style.display='none'; return; }
-      const { padX, padY, plotW, plotH, minC, span, seriesList, labels } = drawState;
-      const rect = canvas.getBoundingClientRect();
-      const mx = ev.clientX - rect.left;
-      const my = ev.clientY - rect.top;
-
-      // inside?
-      if (mx < padX || mx > padX+plotW || my < padY || my > padY+plotH) {
-        tooltip.style.display='none'; return;
-      }
-
-      // nearest index per series by x distance
-      const rows = [];
-      seriesList.forEach((pts, idx) => {
-        if (!pts.length) return;
-        const ratio = (mx - padX) / plotW;
-        const i = Math.max(0, Math.min(pts.length-1, Math.round(ratio*(pts.length-1))));
-        const p = pts[i];
-        rows.push({ idx, p, label: labels[idx] });
+      // line
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lineWidth;
+      ctx.beginPath();
+      coords.forEach((c, i) => {
+        const toX = padX + (c.x - padX) * prog;
+        const toY = padY + (c.y - padY) * prog;
+        if (i === 0) ctx.moveTo(toX, toY);
+        else ctx.lineTo(toX, toY);
       });
+      ctx.stroke();
 
-      if (!rows.length) { tooltip.style.display='none'; return; }
-
-      // tooltip content
-      rows.sort((a,b)=> b.p.c - a.p.c); // high first
-      const withTime = (activeRange === '1D');
-      let html = `<div style="font-weight:700; margin-bottom:4px">${fmtDate(rows[0].p.t, withTime)}</div>`;
-      rows.forEach(r=>{
-        const color = getComputedStyle(document.documentElement).getPropertyValue(['--line','--line-2','--line-3','--line-4','--line-5'][r.idx]).trim();
-        html += `<div style="display:flex; align-items:center; gap:8px; margin:2px 0">
-          <span style="display:inline-block; width:10px; height:10px; border-radius:999px; background:${color}; border:1px solid rgba(255,255,255,.4)"></span>
-          <span style="min-width:56px">${r.label}</span>
-          <strong>${fmt(r.p.c)}</strong>
-        </div>`;
-      });
-      tooltip.innerHTML = html;
-      tooltip.style.display = 'block';
-      tooltip.style.left = `${mx}px`;
-      tooltip.style.top  = `${my}px`;
+      if (prog < 1 && animate) animReq = requestAnimationFrame(frame);
     }
+    animReq = requestAnimationFrame(frame);
 
-    // ---------------- legend ----------------
-    function renderLegend(symbols) {
-      legend.innerHTML = '';
-      symbols.forEach((sym,i)=>{
-        const sw = document.createElement('span');
-        sw.className='swatch';
-        sw.style.background = getComputedStyle(document.documentElement)
-          .getPropertyValue(['--line','--line-2','--line-3','--line-4','--line-5'][i]).trim();
-        const item = document.createElement('div');
-        item.className='item';
-        item.appendChild(sw);
-        const t = document.createElement('span');
-        t.textContent = sym;
-        item.appendChild(t);
-        legend.appendChild(item);
-      });
+    chartCache = { padX, padY, w, h, coords, min, max, span };
+  }
+
+  function drawEmpty() {
+    ctx.save();
+    ctx.globalAlpha = .9;
+    ctx.fillStyle = (theme === 'light') ? '#6b7b9c' : '#9fb0d3';
+    ctx.font = '600 13px Inter, system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText('No data', canvas.width/2, canvas.height/2);
+    ctx.restore();
+  }
+
+  // Hover tooltip
+  canvas.addEventListener('mousemove', (ev) => {
+    if (!chartCache) { tooltip.style.display = 'none'; return; }
+    const rect = canvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const my = ev.clientY - rect.top;
+    const { padX, padY, w, h, coords } = chartCache;
+
+    // bounds
+    if (mx < padX || mx > padX + w || my < padY || my > padY + h) {
+      tooltip.style.display = 'none';
+      return;
     }
+    // nearest index by x
+    const ratio = (mx - padX) / w;
+    const idx = Math.max(0, Math.min(coords.length - 1, Math.round(ratio * (coords.length - 1))));
+    const c = coords[idx];
 
-    // ---------------- orchestration ----------------
-    async function loadAll() {
-      const raw = symbolInput.value.trim();
-      const symbols = raw.split(',').map(s=>s.trim()).filter(Boolean).slice(0,5);
-      const primary = symbols[0] || 'AAPL';
+    tooltip.style.display = 'block';
+    tooltip.textContent = `${fmtDate(c.t)}   ${fmt(c.p)}`;
+    const tw = tooltip.offsetWidth, th = tooltip.offsetHeight;
+    let tx = c.x - tw/2, ty = c.y - th - 10;
+    if (tx < 8) tx = 8;
+    if (tx + tw > canvas.width - 8) tx = canvas.width - tw - 8;
+    if (ty < 8) ty = c.y + 12;
+    tooltip.style.left = tx + 'px';
+    tooltip.style.top  = ty + 'px';
+  });
+  canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
-      setStatus(`Loading ${activeRange}...`);
-      renderLegend(symbols.length ? symbols : [primary]);
-
-      // quote + summary for primary symbol only
-      await Promise.all([ loadVersion(), loadQuote(primary), loadSummary(primary) ]);
-
-      // histories for all symbols
-      const seriesList = [];
-      for (let i=0;i<(symbols.length || 1); i++) {
-        const sym = symbols[i] || primary;
-        const pts = await history(sym, activeRange);
-        seriesList.push(pts);
-      }
-      drawSeries(seriesList, symbols.length ? symbols : [primary]);
-      setStatus('OK');
-    }
-
-    // ---------------- events ----------------
-    $('#ranges').addEventListener('click', (e)=>{
-      const btn = e.target.closest('[data-range]');
-      if (!btn) return;
-      $$('#ranges .btn-chip').forEach(b=>b.classList.remove('active'));
-      btn.classList.add('active');
-      activeRange = btn.getAttribute('data-range');
-      loadAll();
+  // ---------- UI Events ----------
+  $$('.chip').forEach(ch => {
+    ch.addEventListener('click', async () => {
+      $$('.chip').forEach(c => c.classList.remove('active'));
+      ch.classList.add('active');
+      activeRange = ch.dataset.range;
+      statusEl.textContent = `Loading ${activeRange}…`; statusEl.style.color = 'var(--muted)';
+      await refreshAll();
     });
-    getBtn.addEventListener('click', loadAll);
-    refreshBtn.addEventListener('click', ()=>{ seriesCache.clear(); loadAll(); });
-    canvas.addEventListener('mousemove', handleHover);
-    canvas.addEventListener('mouseleave', ()=> tooltip.style.display='none');
-    window.addEventListener('resize', ()=> drawState && drawSeries(drawState.seriesList, drawState.labels));
+  });
 
-    // Theme toggle (persists)
-    function applyTheme(name){
-      if (name === 'light') {
-        document.documentElement.classList.add('light');
-        themeBtn.textContent = 'Light';
-      } else {
-        document.documentElement.classList.remove('light');
-        themeBtn.textContent = 'Dark';
-      }
-      localStorage.setItem('stackiq-theme', name);
-      // redraw if needed for color re-read
-      if (drawState) drawSeries(drawState.seriesList, drawState.labels);
-    }
-    themeBtn.addEventListener('click', ()=>{
-      const cur = localStorage.getItem('stackiq-theme') || 'dark';
-      applyTheme(cur === 'dark' ? 'light' : 'dark');
-    });
-    applyTheme(localStorage.getItem('stackiq-theme') || 'dark');
+  getBtn.addEventListener('click', async () => {
+    await refreshAll();
+  });
+  refreshBtn.addEventListener('click', async () => {
+    await refreshAll();
+  });
+  symbolInput.addEventListener('keydown', async (e) => {
+    if (e.key === 'Enter') await refreshAll();
+  });
 
-    // init
-    loadAll();
-  </script>
+  // ---------- Orchestrate ----------
+  async function refreshAll() {
+    const sym = (symbolInput.value || 'AAPL').trim().toUpperCase();
+    symbolInput.value = sym;
+    legendSym.textContent = sym;
+
+    setStatus(`Loading ${activeRange}…`);
+    const [_, __, points] = await Promise.all([
+      loadQuote(sym),
+      loadSummary(sym),
+      loadHistory(sym, activeRange)
+    ]);
+
+    chartDataPoints = points;
+    drawLineChart(points);
+
+    // If we got points, OK; else show warning
+    if (points && points.length) setStatus('OK'); else setStatus('No chart data');
+  }
+
+  // ---------- Init ----------
+  (async function init() {
+    await loadVersion();
+    await refreshAll();
+  })();
+</script>
 </body>
 </html>
+
 
 
 
