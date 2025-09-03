@@ -1,15 +1,18 @@
+# data_fetcher.py
 from __future__ import annotations
 import time
 import math
+from typing import Optional, Tuple, Dict, Any, List
 import yfinance as yf
 
 # -----------------------------
 # Tiny in-memory TTL cache
 # -----------------------------
 class TTLCache:
-    def __init__(self):
-        self.store = {}
-    def get(self, key):
+    def __init__(self) -> None:
+        self.store: Dict[str, Tuple[float, Any]] = {}
+
+    def get(self, key: str):
         v = self.store.get(key)
         if not v:
             return None
@@ -18,115 +21,210 @@ class TTLCache:
             self.store.pop(key, None)
             return None
         return data
-    def set(self, key, data, ttl):
+
+    def set(self, key: str, data: Any, ttl: int) -> None:
         self.store[key] = (time.time() + ttl, data)
 
 _cache = TTLCache()
 
-def _safe_round(v):
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def _to_float(v) -> Optional[float]:
+    """Convert to float, guard NaN/Inf/None."""
     try:
-        if v is None or (isinstance(v, float) and (math.isnan(v) or math.isinf(v))):
+        f = float(v)
+        if math.isnan(f) or math.isinf(f):
             return None
-        return round(float(v), 2)
+        return f
     except Exception:
         return None
 
-def _quote_raw(symbol: str):
-    t = yf.Ticker(symbol)
-    fi = getattr(t, "fast_info", {}) or {}
-    return {
-        "last_price": fi.get("last_price"),
-        "previous_close": fi.get("previous_close"),
-        "day_high": fi.get("day_high"),
-        "day_low": fi.get("day_low"),
-        "open": fi.get("open"),
-    }
+def _r2(v: Optional[float]) -> Optional[float]:
+    return None if v is None else round(v, 2)
 
-def get_quote(symbol: str):
+def _fast_info_dict(t: yf.Ticker) -> Dict[str, Any]:
+    """yfinance.fast_info can vary across versions; make it a plain dict."""
+    try:
+        fi = t.fast_info
+        # Many versions are Mapping-like; dict(fi) is safest.
+        d = dict(fi) if fi is not None else {}
+    except Exception:
+        d = {}
+    return d
+
+def _last_two_closes(t: yf.Ticker) -> Tuple[Optional[float], Optional[float]]:
+    """Fallback: get last & previous Close from recent daily history."""
+    try:
+        df = t.history(period="5d", interval="1d", auto_adjust=False, actions=False)
+        if df is None or df.empty:
+            return None, None
+        closes = df.get("Close")
+        if closes is None or closes.empty:
+            # Some environments prefer 'Adj Close'
+            closes = df.get("Adj Close")
+            if closes is None or closes.empty:
+                return None, None
+        vals = [ _to_float(x) for x in list(closes.dropna()) ]
+        vals = [x for x in vals if x is not None]
+        if not vals:
+            return None, None
+        last = vals[-1]
+        prev = vals[-2] if len(vals) > 1 else None
+        return last, prev
+    except Exception:
+        return None, None
+
+def _session_hilo_open(t: yf.Ticker) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """Fallback: today's High/Low/Open from daily bar."""
+    try:
+        df = t.history(period="1d", interval="1d", auto_adjust=False, actions=False)
+        if df is None or df.empty:
+            return None, None, None
+        row = df.iloc[-1]
+        hi = _to_float(row.get("High"))
+        lo = _to_float(row.get("Low"))
+        op = _to_float(row.get("Open"))
+        return hi, lo, op
+    except Exception:
+        return None, None, None
+
+
+# -----------------------------
+# Public API used by app.py
+# -----------------------------
+def get_quote(symbol: str) -> Dict[str, Any]:
     key = f"quote:{symbol.upper()}"
     cached = _cache.get(key)
     if cached:
         return cached
 
-    raw = _quote_raw(symbol)
-    lp = raw.get("last_price")
-    pc = raw.get("previous_close")
+    t = yf.Ticker(symbol)
+    fi = _fast_info_dict(t)
+
+    # Try fast_info first
+    last = _to_float(fi.get("last_price"))
+    prev = _to_float(fi.get("previous_close"))
+    hi   = _to_float(fi.get("day_high"))
+    lo   = _to_float(fi.get("day_low"))
+    op   = _to_float(fi.get("open"))
+
+    # Fallbacks from history if missing
+    if last is None or prev is None:
+        last2, prev2 = _last_two_closes(t)
+        if last is None: last = last2
+        if prev is None: prev = prev2
+
+    if hi is None or lo is None or op is None:
+        hi2, lo2, op2 = _session_hilo_open(t)
+        if hi is None: hi = hi2
+        if lo is None: lo = lo2
+        if op is None: op = op2
+
     pct = None
-    if lp is not None and pc not in (None, 0):
+    if last is not None and (prev is not None) and prev != 0:
         try:
-            pct = round(((lp - pc) / pc) * 100, 2)
+            pct = round(((last - prev) / prev) * 100, 2)
         except Exception:
             pct = None
 
     data = {
         "symbol": symbol.upper(),
-        "current": _safe_round(lp),
-        "prev_close": _safe_round(pc),
-        "high": _safe_round(raw.get("day_high")),
-        "low": _safe_round(raw.get("day_low")),
-        "open": _safe_round(raw.get("open")),
+        "current": _r2(last),
+        "prev_close": _r2(prev),
+        "high": _r2(hi),
+        "low": _r2(lo),
+        "open": _r2(op),
         "percent_change": pct,
     }
 
-    _cache.set(key, data, ttl=45)
+    _cache.set(key, data, ttl=45)  # 45 seconds
     return data
 
-def get_summary(symbol: str):
+
+def get_summary(symbol: str) -> Dict[str, Any]:
     key = f"summary:{symbol.upper()}"
     cached = _cache.get(key)
     if cached:
         return cached
 
     q = get_quote(symbol)
-    trend = (
-        "up" if (q["percent_change"] or 0) > 0
-        else "down" if (q["percent_change"] or 0) < 0
-        else "unchanged"
-    )
-    pct = abs(q["percent_change"]) if q["percent_change"] is not None else 0
+    pc = q.get("percent_change")
+    trend = "unchanged"
+    if isinstance(pc, (int, float)):
+        if pc > 0: trend = "up"
+        elif pc < 0: trend = "down"
+
+    pct_abs = abs(pc) if isinstance(pc, (int, float)) else 0
     summary = (
-        f"{symbol.upper()}: {q['current']} ({trend} {pct}% on the day). "
-        f"Session range: {q['low']}–{q['high']}. Prev close {q['prev_close']}."
+        f"{symbol.upper()}: {q.get('current')} ({trend} {pct_abs}% on the day). "
+        f"Session range: {q.get('low')}–{q.get('high')}. Prev close {q.get('prev_close')}."
     )
 
     data = {"symbol": symbol.upper(), "summary": summary, "quote": q}
-    _cache.set(key, data, ttl=45)
+    _cache.set(key, data, ttl=45)  # 45 seconds
     return data
 
-def get_history(symbol: str, range: str = "1M"):
-    key = f"history:{symbol.upper()}:{range}"
+
+def get_history(symbol: str, range: str = "1M") -> Dict[str, Any]:
+    key = f"history:{symbol.upper()}:{(range or '1M').upper()}"
     cached = _cache.get(key)
     if cached:
         return cached
 
     t = yf.Ticker(symbol)
-    range = (range or "1M").upper()
+    r = (range or "1M").upper()
 
-    if range == "1D":
-        df = t.history(period="1d", interval="15m")
+    # Choose interval + TTL
+    ttl = 300
+    if r == "1D":
+        df = t.history(period="1d", interval="15m", auto_adjust=False, actions=False)
         ttl = 60
-    elif range == "3M":
-        df, ttl = t.history(period="3mo", interval="1d"), 300
-    elif range == "6M":
-        df, ttl = t.history(period="6mo", interval="1d"), 300
-    elif range == "1Y":
-        df, ttl = t.history(period="1y", interval="1d"), 300
-    elif range == "5Y":
-        df, ttl = t.history(period="5y", interval="1wk"), 600
+    elif r == "1M":
+        df = t.history(period="1mo", interval="1d", auto_adjust=False, actions=False)
+        ttl = 300
+    elif r == "3M":
+        df = t.history(period="3mo", interval="1d", auto_adjust=False, actions=False)
+        ttl = 300
+    elif r == "6M":
+        df = t.history(period="6mo", interval="1d", auto_adjust=False, actions=False)
+        ttl = 300
+    elif r == "1Y":
+        df = t.history(period="1y", interval="1d", auto_adjust=False, actions=False)
+        ttl = 300
+    elif r == "5Y":
+        df = t.history(period="5y", interval="1wk", auto_adjust=False, actions=False)
+        ttl = 600
     else:
-        df, ttl = t.history(period="1mo", interval="1d"), 300
+        # default
+        df = t.history(period="1mo", interval="1d", auto_adjust=False, actions=False)
+        ttl = 300
 
-    points = []
-    if df is not None and len(df):
-        for ts, row in df.iterrows():
-            close = row.get("Close")
-            if close is None or (isinstance(close, float) and (math.isnan(close) or math.isinf(close))):
-                continue
-            points.append({"t": int(ts.timestamp()), "c": round(float(close), 2)})
+    points: List[Dict[str, Any]] = []
+    try:
+        if df is not None and not df.empty:
+            series = df.get("Close") if "Close" in df.columns else df.get("Adj Close")
+            if series is not None:
+                series = series.dropna()
+                for ts, close in series.items():
+                    c = _to_float(close)
+                    if c is None:
+                        continue
+                    # handle tz-aware index
+                    try:
+                        epoch = int(getattr(ts, "timestamp", lambda: ts.to_pydatetime().timestamp())())
+                    except Exception:
+                        epoch = int(time.mktime(ts.timetuple()))
+                    points.append({"t": epoch, "c": round(c, 2)})
+    except Exception:
+        # leave points empty on failure
+        points = []
 
-    data = {"symbol": symbol.upper(), "range": range, "points": points}
+    data = {"symbol": symbol.upper(), "range": r, "points": points}
     _cache.set(key, data, ttl=ttl)
     return data
+
 
 
 
