@@ -6,7 +6,10 @@ from datetime import datetime, timedelta, timezone
 load_dotenv()
 
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
-BASE_URL = "https://finnhub.io/api/v1"
+
+# Toggle sandbox via env: FINNHUB_SANDBOX=true
+USE_SANDBOX = (os.getenv("FINNHUB_SANDBOX", "false").lower() == "true")
+BASE_URL = "https://sandbox.finnhub.io/api/v1" if USE_SANDBOX else "https://finnhub.io/api/v1"
 
 def get_quote(symbol: str):
     url = f"{BASE_URL}/quote"
@@ -16,12 +19,10 @@ def get_quote(symbol: str):
     return r.json()
 
 def get_candles(symbol: str, resolution="D", count=30):
-    # Map resolution to a time window; give buffer for weekends/holidays
     now = datetime.now(timezone.utc)
     if resolution == "D":
         delta = timedelta(days=count * 2)
     else:
-        # if numeric minutes like "60", "15", etc.
         try:
             minutes = int(resolution)
             delta = timedelta(minutes=minutes * count * 2)
@@ -40,8 +41,11 @@ def get_candles(symbol: str, resolution="D", count=30):
         "token": FINNHUB_API_KEY
     }
     r = requests.get(url, params=params, timeout=20)
-    r.raise_for_status()
+    if r.status_code >= 400:
+        # Bubble up the API’s message so we can see the reason in the response
+        raise requests.HTTPError(f"{r.status_code} from Finnhub: {r.text}")
     return r.json()
+
 
 
 
