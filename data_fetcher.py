@@ -1,186 +1,122 @@
-# data_fetcher.py
-# StackIQ — Finnhub client (quotes + candles) with sandbox toggle, retries, and clear errors.
-
 import os
 import time
-import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
-
 import requests
-from dotenv import load_dotenv
+from typing import Dict, Any, List, Optional
 
-# --- Env & logging -----------------------------------------------------------
-load_dotenv()
-logger = logging.getLogger("stackiq.data")
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO)
-
-FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "").strip()
-USE_SANDBOX: bool = os.getenv("FINNHUB_SANDBOX", "false").lower() == "true"
-# Optional manual override, else we pick sandbox vs prod automatically
-BASE_URL: str = os.getenv(
-    "FINNHUB_BASE_URL",
-    "https://sandbox.finnhub.io/api/v1" if USE_SANDBOX else "https://finnhub.io/api/v1",
-)
-
-# Tunables (safe defaults)
-REQ_TIMEOUT: int = int(os.getenv("FINNHUB_TIMEOUT", "15"))     # seconds
-MAX_RETRIES: int = int(os.getenv("FINNHUB_RETRIES", "2"))      # 0 = no retry
-RETRY_BACKOFF: float = float(os.getenv("FINNHUB_BACKOFF", "0.75"))  # seconds base
-
-# --- Basic validation ---------------------------------------------------------
-if not FINNHUB_API_KEY:
-    # We raise now so failures are obvious in Log Stream on boot.
-    raise RuntimeError(
-        "FINNHUB_API_KEY is not set. Add it in Azure → App Service → Configuration → Application settings."
-    )
-
-logger.info(f"Finnhub BASE_URL={BASE_URL}  SANDBOX={USE_SANDBOX}  TIMEOUT={REQ_TIMEOUT}s  RETRIES={MAX_RETRIES}")
+FINNHUB_BASE = "https://finnhub.io/api/v1"
+API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 
 
-# --- Internals ----------------------------------------------------------------
-_session = requests.Session()
-
-def _normalize_symbol(symbol: str) -> str:
-    """Uppercase & strip spaces."""
-    return (symbol or "").strip().upper()
-
-def _should_retry(status_code: int) -> bool:
-    """Retry on rate-limit/temporary errors."""
-    return status_code in (429, 500, 502, 503, 504)
-
-def _request(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    """GET wrapper with retries and clear error messages."""
-    if "token" not in params:
-        params = {**params, "token": FINNHUB_API_KEY}
-
-    url = f"{BASE_URL}{path}"
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            resp = _session.get(url, params=params, timeout=REQ_TIMEOUT)
-        except requests.RequestException as e:
-            # network-level (DNS, socket timeout, etc.)
-            if attempt <= MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt)
-                continue
-            raise requests.HTTPError(f"Network error reaching Finnhub: {e}") from e
-
-        if resp.status_code >= 400:
-            # Include Finnhub's body to make it obvious (403 "no access", 429 "rate limit", etc.)
-            body = (resp.text or "").strip()
-            if _should_retry(resp.status_code) and attempt <= MAX_RETRIES:
-                time.sleep(RETRY_BACKOFF * attempt)
-                continue
-            raise requests.HTTPError(f"{resp.status_code} from Finnhub: {body}")
-
-        # Successful HTTP — return JSON (Finnhub always returns JSON here)
-        return resp.json()
+class FinnhubError(Exception):
+    pass
 
 
-def _build_time_window(
-    resolution: str = "D",
-    count: int = 60,
-    to_ts: Optional[int] = None,
-    from_ts: Optional[int] = None,
-) -> (int, int):
-    """
-    Build sane from/to UNIX timestamps.
-    - For daily ('D'), widen by 2x to cover weekends/holidays.
-    - For minute resolutions ('1','5','15','60','240'), widen by 2x.
-    - Accepts 'D', 'W', 'M' too.
-    """
-    now = datetime.now(timezone.utc)
-
-    if to_ts is None:
-        to_ts = int(now.timestamp())
-
-    if from_ts is None:
-        # Choose a window big enough that Finnhub returns data even with market closures.
-        res = (resolution or "D").strip().upper()
-        if res == "D":
-            delta = timedelta(days=count * 2)
-        elif res == "W":
-            delta = timedelta(weeks=count * 2)
-        elif res == "M":
-            # crude month estimate is fine for windowing
-            delta = timedelta(days=30 * count * 2)
-        else:
-            # try numeric minutes
-            try:
-                minutes = int(resolution)
-                delta = timedelta(minutes=minutes * count * 2)
-            except (TypeError, ValueError):
-                # default fallback
-                delta = timedelta(days=count * 2)
-        from_ts = int((now - delta).timestamp())
-
-    return int(from_ts), int(to_ts)
+def _require_api_key():
+    if not API_KEY:
+        raise FinnhubError("Missing FINNHUB_API_KEY in environment.")
 
 
-# --- Public API ---------------------------------------------------------------
-def get_quote(symbol: str) -> Dict[str, Any]:
-    """
-    Get last price/quote (c/h/l/o/pc/t).
-    Works on free, sandbox, and paid Finnhub plans.
-    """
-    sym = _normalize_symbol(symbol)
-    return _request("/quote", {"symbol": sym})
-
-
-def get_candles(
-    symbol: str,
-    resolution: str = "D",
-    count: int = 60,
-    *,
-    from_ts: Optional[int] = None,
-    to_ts: Optional[int] = None,
-) -> Dict[str, Any]:
-    """
-    Get OHLCV candles.
-    - resolution: 'D','W','M' or minute string like '1','5','15','60','240'
-    - count: number of bars to *aim* for (we widen the time window to avoid 'no_data')
-    - returns Finnhub's JSON (keys: s,c,h,l,o,t,v). If plan forbids this, Finnhub returns 403.
-    """
-    sym = _normalize_symbol(symbol)
-    f_ts, t_ts = _build_time_window(resolution=resolution, count=count, to_ts=to_ts, from_ts=from_ts)
-
-    data = _request("/stock/candle", {
-        "symbol": sym,
-        "resolution": resolution,
-        "from": f_ts,
-        "to": t_ts,
-    })
-
-    # Finnhub returns { "s": "no_data" } with 200 OK sometimes. Keep that shape.
-    # Caller can check data.get("s") == "ok"
+def _get(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    _require_api_key()
+    params = dict(params or {})
+    params["token"] = API_KEY
+    r = requests.get(url, params=params, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    # Finnhub sometimes returns {'error': '...'} or s='no_data' for candles
+    if isinstance(data, dict) and data.get("error"):
+        raise FinnhubError(data["error"])
     return data
 
 
-def get_company_profile(symbol: str) -> Dict[str, Any]:
+def get_quote(symbol: str) -> Dict[str, Any]:
     """
-    Company profile (lightweight). Helpful for sanity checks in UI.
+    Returns:
+      {
+        "symbol": "AAPL",
+        "current": 227.15,
+        "change": -0.45,
+        "percent": -0.20,
+        "high": 230.0,
+        "low": 226.5,
+        "open": 228.0,
+        "prev_close": 227.6,
+        "timestamp": 1728422400
+      }
     """
-    sym = _normalize_symbol(symbol)
-    return _request("/stock/profile2", {"symbol": sym})
+    url = f"{FINNHUB_BASE}/quote"
+    data = _get(url, {"symbol": symbol.upper()})
+    # Finnhub quote fields: c, d, dp, h, l, o, pc, t
+    if not isinstance(data, dict) or "c" not in data:
+        raise FinnhubError("Unexpected response for quote.")
+    return {
+        "symbol": symbol.upper(),
+        "current": data.get("c"),
+        "change": data.get("d"),
+        "percent": data.get("dp"),
+        "high": data.get("h"),
+        "low": data.get("l"),
+        "open": data.get("o"),
+        "prev_close": data.get("pc"),
+        "timestamp": data.get("t"),
+    }
 
 
-# Optional: simple helper that guarantees "ok" candles or raises a friendly error.
-def get_candles_or_explain(symbol: str, resolution: str = "D", count: int = 60) -> Dict[str, Any]:
+def get_candles(symbol: str, days: int = 30, resolution: str = "D") -> Dict[str, Any]:
     """
-    Fetch candles and either return them (status 'ok') or raise a clear exception
-    explaining likely cause (e.g., plan limitation).
+    Returns Finnhub candles normalized to:
+      {
+        "symbol": "AAPL",
+        "resolution": "D",
+        "candles": [
+          {"t": 1726780800, "o": 220.1, "h": 221.2, "l": 219.8, "c": 220.9, "v": 32123456},
+          ...
+        ]
+      }
     """
-    data = get_candles(symbol, resolution, count)
-    status = data.get("s")
-    if status == "ok":
-        return data
-    if status == "no_data":
-        raise ValueError(f"No data for {symbol} at resolution={resolution}. Try a wider window or another symbol.")
-    # Unexpected shape — return raw for debugging
-    raise ValueError(f"Unexpected candles response for {symbol}: {data}")
+    now = int(time.time())
+    frm = now - days * 86400
+
+    url = f"{FINNHUB_BASE}/stock/candle"
+    data = _get(url, {
+        "symbol": symbol.upper(),
+        "resolution": resolution,
+        "from": frm,
+        "to": now
+    })
+
+    if not isinstance(data, dict) or data.get("s") != "ok":
+        # s can be 'no_data'
+        status = data.get("s") if isinstance(data, dict) else "unknown"
+        if status == "no_data":
+            return {"symbol": symbol.upper(), "resolution": resolution, "candles": []}
+        raise FinnhubError(f"Candle response status: {status}")
+
+    # Finnhub returns arrays: t, o, h, l, c, v
+    t = data.get("t", [])
+    o = data.get("o", [])
+    h = data.get("h", [])
+    l = data.get("l", [])
+    c = data.get("c", [])
+    v = data.get("v", [])
+
+    candles: List[Dict[str, Any]] = []
+    for i in range(min(len(t), len(o), len(h), len(l), len(c), len(v))):
+        candles.append({
+            "t": t[i],
+            "o": o[i],
+            "h": h[i],
+            "l": l[i],
+            "c": c[i],
+            "v": v[i],
+        })
+
+    return {
+        "symbol": symbol.upper(),
+        "resolution": resolution,
+        "candles": candles
+    }
+
 
 
 
