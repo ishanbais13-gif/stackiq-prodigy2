@@ -1,129 +1,215 @@
-import os, time, math, logging, requests
-from typing import Dict, Any, List
+import os
+import time
+import math
+import logging
+from typing import Any, Dict, List, Optional
+
+import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 
+# -------------------------
+# App & logging
+# -------------------------
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("stackiq")
 
+app = FastAPI(title="StackIQ API", version="0.2.2")
+
+# -------------------------
+# Constants & Keys
+# -------------------------
 FINNHUB_BASE = "https://finnhub.io/api/v1"
-API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
+ALPHA_BASE   = "https://www.alphavantage.co/query"
 
-app = FastAPI(title="StackIQ API", version="0.2.0")
+FINNHUB_API_KEY     = os.getenv("FINNHUB_API_KEY", "").strip()
+ALPHAVANTAGE_KEY    = os.getenv("ALPHAVANTAGE_KEY", "").strip()
 
-class FinnhubError(Exception): pass
+# -------------------------
+# Utilities
+# -------------------------
+def _require_key(value: str, name: str) -> None:
+    if not value:
+        raise HTTPException(status_code=502, detail=f"Missing {name} in environment")
 
-def _require_api_key():
-    if not API_KEY:
-        raise FinnhubError("Missing FINNHUB_API_KEY in environment.")
+def _get(url: str, params: Dict[str, Any], timeout: int = 15) -> Dict[str, Any]:
+    """HTTP GET with basic error handling; raises HTTPException on problems."""
+    try:
+        r = requests.get(url, params=params, timeout=timeout)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Upstream request error: {e}")
+    # Bubble specific upstream status
+    if r.status_code == 403:
+        # Helpful, clean error if a plan limitation hits
+        raise HTTPException(status_code=403, detail="Upstream 403 (forbidden). Your plan may not allow this endpoint or time range.")
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        raise HTTPException(status_code=r.status_code, detail=f"Upstream HTTP {r.status_code}: {e}")
+    try:
+        return r.json()
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Upstream returned non-JSON")
 
-def _get(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    _require_api_key()
-    p = dict(params or {})
-    p["token"] = API_KEY
-    r = requests.get(url, params=p, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    if isinstance(data, dict) and data.get("error"):
-        raise FinnhubError(data["error"])
-    return data
+# -------------------------
+# Alpha Vantage candles (Daily Adjusted)
+# -------------------------
+def av_daily_candles(symbol: str, outputsize: str = "compact") -> Dict[str, Any]:
+    """
+    Returns daily candles from Alpha Vantage (free-friendly).
+    Output format matches typical OHLCV arrays:
+      { symbol, t[], o[], h[], l[], c[], v[], source }
+    """
+    _require_key(ALPHAVANTAGE_KEY, "ALPHAVANTAGE_KEY")
+    params = {
+        "function": "TIME_SERIES_DAILY_ADJUSTED",
+        "symbol": symbol.upper(),
+        "outputsize": outputsize,  # "compact" ~100 bars | "full" full history
+        "apikey": ALPHAVANTAGE_KEY,
+    }
+    data = _get(ALPHA_BASE, params)
+    series = data.get("Time Series (Daily)")
+    if not series:
+        # Alpha Vantage often returns a "Note" when rate-limited
+        note = data.get("Note") or data.get("Information") or data.get("Error Message")
+        raise HTTPException(status_code=502, detail=f"Alpha Vantage response missing series: {note or 'unknown'}")
 
-def get_quote(symbol: str) -> Dict[str, Any]:
-    data = _get(f"{FINNHUB_BASE}/quote", {"symbol": symbol.upper()})
-    if not isinstance(data, dict) or "c" not in data:
-        raise FinnhubError("Unexpected response for quote.")
+    # Sort by ascending date to build arrays
+    rows = sorted(series.items())  # [(date_str, dict_fields), ...] oldest->newest
+    t, o, h, l, c, v = [], [], [], [], [], []
+    for date_str, fields in rows:
+        # Convert date (YYYY-MM-DD) to UNIX timestamp at 00:00 UTC (approx)
+        try:
+            ts = int(time.mktime(time.strptime(date_str, "%Y-%m-%d")))
+        except Exception:
+            # If parsing fails, skip
+            continue
+        t.append(ts)
+        o.append(float(fields["1. open"]))
+        h.append(float(fields["2. high"]))
+        l.append(float(fields["3. low"]))
+        c.append(float(fields["4. close"]))
+        v.append(float(fields["6. volume"]))
+
+    return {"symbol": symbol.upper(), "t": t, "o": o, "h": h, "l": l, "c": c, "v": v, "source": "alpha_vantage"}
+
+# -------------------------
+# Finnhub quote
+# -------------------------
+def finnhub_quote(symbol: str) -> Dict[str, Any]:
+    """
+    Returns latest quote from Finnhub (works fine on free tier).
+    Maps to a clean schema for the client.
+    """
+    _require_key(FINNHUB_API_KEY, "FINNHUB_API_KEY")
+    params = {"symbol": symbol.upper(), "token": FINNHUB_API_KEY}
+    data = _get(f"{FINNHUB_BASE}/quote", params)
+
+    # Finnhub returns keys: c (current), d (change), dp (percent), h,l,o,pc,t
+    if not all(k in data for k in ("c", "h", "l", "o", "pc")):
+        raise HTTPException(status_code=502, detail="Unexpected quote payload")
+
     return {
         "symbol": symbol.upper(),
-        "current": float(data.get("c") or 0),
-        "change": data.get("d"),
-        "percent": data.get("dp"),
-        "high": data.get("h"),
-        "low": data.get("l"),
-        "open": data.get("o"),
-        "prev_close": data.get("pc"),
-        "timestamp": data.get("t"),
+        "current": float(data.get("c", 0.0)),
+        "change": float(data.get("d", 0.0)),
+        "percent": float(data.get("dp", 0.0)),
+        "high": float(data.get("h", 0.0)),
+        "low": float(data.get("l", 0.0)),
+        "open": float(data.get("o", 0.0)),
+        "prev_close": float(data.get("pc", 0.0)),
+        "timestamp": int(data.get("t", 0)) if data.get("t") else None,
+        "source": "finnhub",
     }
 
-def get_candles(symbol: str, days: int = 30, resolution: str = "D") -> Dict[str, Any]:
-    now = int(time.time())
-    frm = now - days * 86400
-    data = _get(f"{FINNHUB_BASE}/stock/candle", {
-        "symbol": symbol.upper(),
-        "resolution": resolution,
-        "from": frm,
-        "to": now
-    })
-    if not isinstance(data, dict):
-        raise FinnhubError("Candle response not a dict")
-    if data.get("s") == "no_data":
-        return {"symbol": symbol.upper(), "resolution": resolution, "candles": []}
-    if data.get("s") != "ok":
-        raise FinnhubError(f"Candle response status: {data.get('s')}")
-    t,o,h,l,c,v = (data.get(k, []) for k in ("t","o","h","l","c","v"))
-    candles: List[Dict[str, Any]] = []
-    for i in range(min(len(t), len(o), len(h), len(l), len(c), len(v))):
-        candles.append({"t": t[i], "o": o[i], "h": h[i], "l": l[i], "c": c[i], "v": v[i]})
-    return {"symbol": symbol.upper(), "resolution": resolution, "candles": candles}
+# -------------------------
+# Simple prediction (educational)
+# -------------------------
+def simple_momentum_pct(closes: List[float], lookback: int = 20) -> float:
+    """
+    A tiny educational momentum metric: percent difference of the
+    latest close vs the simple moving average of the last N closes.
+    """
+    if not closes or len(closes) < max(2, lookback):
+        return 0.0
+    recent = closes[-lookback:]
+    sma = sum(recent) / float(len(recent))
+    last = closes[-1]
+    if sma == 0:
+        return 0.0
+    return ((last - sma) / sma) * 100.0
 
-def simple_predict(symbol: str, budget: float) -> Dict[str, Any]:
-    quote = get_quote(symbol)
-    price = quote["current"]
-    if not price or price <= 0:
-        raise FinnhubError("No valid current price for prediction.")
-    candles = get_candles(symbol, days=15, resolution="D")["candles"]
-    last_closes = [bar["c"] for bar in candles[-10:]] if candles else []
-    momentum = None
-    if len(last_closes) >= 2:
-        momentum = (last_closes[-1] - last_closes[0]) / last_closes[0] * 100.0
-    shares = math.floor(budget / price) if budget and budget > 0 else 0
-    cost = round(shares * price, 2)
-    stop = round(price * 0.97, 2)
-    target = round(price * 1.05, 2)
-    est_profit = round(shares * (target - price), 2)
-    max_loss = round(shares * (price - stop), 2)
-    signal = "hold"
-    if momentum is not None:
-        if momentum > 1.0: signal = "buy"
-        elif momentum < -1.0: signal = "avoid"
-    return {
-        "symbol": symbol.upper(),
-        "now_price": price,
-        "momentum_10d_pct": round(momentum, 2) if momentum is not None else None,
-        "signal": signal,
-        "sizing": {"budget": budget, "shares": shares, "estimated_cost": cost},
-        "risk": {"stop_loss": stop, "max_drawdown_if_stopped": max_loss},
-        "target": {"take_profit": target, "est_profit_at_target": est_profit},
-        "note": "Educational sample strategy; not financial advice."
-    }
-
+# -------------------------
+# Routes
+# -------------------------
 @app.get("/")
-def root(): return {"service": "StackIQ", "status": "ok"}
+def root() -> Dict[str, Any]:
+    return {"service": "StackIQ", "status": "ok"}
 
 @app.get("/health")
-def health():
-    return {"status": "ok", "has_token": bool(API_KEY), "service": "StackIQ", "version": "0.2.0"}
+def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "has_token": bool(FINNHUB_API_KEY or ALPHAVANTAGE_KEY),
+        "service": "StackIQ",
+        "version": app.version,
+    }
 
 @app.get("/quote/{symbol}")
-def quote(symbol: str):
-    try: return JSONResponse(content=get_quote(symbol))
-    except FinnhubError as e: raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e: raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+def quote(symbol: str) -> Dict[str, Any]:
+    return finnhub_quote(symbol)
 
 @app.get("/candles/{symbol}")
-def candles(
-    symbol: str,
-    days: int = Query(30, ge=1, le=365),
-    resolution: str = Query("D", pattern="^(1|5|15|30|60|D|W|M)$")
-):
-    try: return JSONResponse(content=get_candles(symbol, days=days, resolution=resolution))
-    except FinnhubError as e: raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e: raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+def candles(symbol: str, outputsize: str = Query("compact", regex="^(compact|full)$")) -> Dict[str, Any]:
+    """
+    Always uses Alpha Vantage for daily candles to avoid Finnhub 403s on free plans.
+    """
+    return av_daily_candles(symbol, outputsize=outputsize)
 
 @app.get("/predict/{symbol}")
-def predict(symbol: str, budget: float = Query(..., gt=0)):
-    try: return JSONResponse(content=simple_predict(symbol, budget))
-    except FinnhubError as e: raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e: raise HTTPException(status_code=500, detail=f"Unexpected error: {e}")
+def predict(symbol: str, budget: float = Query(1000.0, gt=0.0)) -> Dict[str, Any]:
+    """
+    Educational sample "plan":
+      - Get live price from Finnhub
+      - Get daily candles from Alpha Vantage (compact)
+      - Compute simple momentum vs 20-day SMA
+      - Suggest whole-share quantity within budget
+    """
+    # Live price
+    q = finnhub_quote(symbol)
+    price_now = q["current"] or q["prev_close"]
+    if not price_now:
+        raise HTTPException(status_code=502, detail="No price available for prediction")
+
+    # Candles (for momentum)
+    cd = av_daily_candles(symbol, outputsize="compact")
+    closes = cd["c"]
+    momentum_pct = simple_momentum_pct(closes, lookback=20)
+
+    # Simple whole-share sizing
+    shares = math.floor(budget / price_now)
+    est_cost = round(shares * price_now, 2)
+
+    return {
+        "symbol": symbol.upper(),
+        "price_now": round(price_now, 2),
+        "momentum_pct": round(momentum_pct, 4),
+        "using": {"quote": q["source"], "candles": cd["source"]},
+        "buy_plan": {
+            "budget": float(budget),
+            "shares": int(shares),
+            "estimated_cost": float(est_cost),
+        },
+        "note": "Educational sample strategy; not financial advice.",
+    }
+
+# -------------------------
+# Local debug (optional)
+# -------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=False)
+
 
 
 
