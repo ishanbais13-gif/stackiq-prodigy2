@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>StackIQ – Quotes & Plan</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; max-width: 840px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
+    input, button { font-size:16px; padding:8px 10px; }
+    button { cursor:pointer; }
+    pre { background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; overflow:auto; }
+    label > span { display:inline-block; min-width:72px; }
+  </style>
+</head>
+<body>
+  <h1>StackIQ</h1>
+  <p>Quick demo UI (cached 90s to protect your free API quota).</p>
+
+  <section style="border:1px solid #e5e7eb; border-radius:8px; padding:16px; margin:16px 0;">
+    <h3>Quote</h3>
+    <div class="row">
+      <label><span>Symbol</span> <input id="qSym" value="AAPL" /></label>
+      <button id="qBtn">Get Quote</button>
+    </div>
+    <pre id="qOut">…</pre>
+  </section>
+
+  <section style="border:1px solid #e5e7eb; border-radius:8px; padding:16px; margin:16px 0;">
+    <h3>Plan</h3>
+    <div class="row">
+      <label><span>Symbol</span> <input id="pSym" value="NVDA" /></label>
+      <label><span>Budget $</span> <input id="pBud" value="5000" /></label>
+      <button id="pBtn">Get Plan</button>
+    </div>
+    <pre id="pOut">…</pre>
+  </section>
+
+  <script type="module">
+    import { getQuote, getPlan } from "./api.js";
+    const qSym = document.getElementById("qSym");
+    const qOut = document.getElementById("qOut");
+    const pSym = document.getElementById("pSym");
+    const pBud = document.getElementById("pBud");
+    const pOut = document.getElementById("pOut");
+
+    document.getElementById("qBtn").onclick = async () => {
+      qOut.textContent = "Loading…";
+      try { qOut.textContent = JSON.stringify(await getQuote(qSym.value.trim()), null, 2); }
+      catch (e) { qOut.textContent = String(e); }
+    };
+
+    document.getElementById("pBtn").onclick = async () => {
+      pOut.textContent = "Loading…";
+      try { pOut.textContent = JSON.stringify(await getPlan(pSym.value.trim(), Number(pBud.value)), null, 2); }
+      catch (e) { pOut.textContent = String(e); }
+    };
+  </script>
+</body>
+</html>
