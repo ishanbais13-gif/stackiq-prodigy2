@@ -1,191 +1,187 @@
 # app.py
 import os
 import time
-import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Optional
 
 import requests
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, HTMLResponse, FileResponse
+from fastapi.responses import JSONResponse
 
-# -----------------------------------------------------------------------------
-# Config & logging
-# -----------------------------------------------------------------------------
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("stackiq")
+# ----------------------------
+# Config & helpers
+# ----------------------------
+SERVICE_NAME = "StackIQ"
+SERVICE_VERSION = "0.2.2"
 
-VERSION = "0.2.2"
-
-FINNHUB_BASE = "https://finnhub.io/api/v1"
-AV_BASE = "https://www.alphavantage.co/query"
-
-FINNHUB_API_KEY = (os.getenv("FINNHUB_API_KEY") or "").strip()
-ALPHAVANTAGE_KEY = (os.getenv("ALPHAVANTAGE_KEY") or "").strip()
-
-# -----------------------------------------------------------------------------
-# Small in-memory cache (to protect free-tier limits)
-# -----------------------------------------------------------------------------
-# key -> (expires_at_epoch_ms, data)
-_cache: Dict[str, Tuple[int, Any]] = {}
-
-def cache_get(key: str) -> Any | None:
-    now = int(time.time() * 1000)
-    hit = _cache.get(key)
-    if not hit:
-        return None
-    if hit[0] > now:
-        return hit[1]
-    # expired
-    _cache.pop(key, None)
-    return None
-
-def cache_set(key: str, data: Any, ttl_seconds: int = 90) -> None:
-    _cache[key] = (int(time.time() * 1000) + ttl_seconds * 1000, data)
-
-def _req_key(url: str, params: Dict[str, Any]) -> str:
-    items = "&".join(f"{k}={params[k]}" for k in sorted(params))
-    return f"{url}?{items}"
-
-# -----------------------------------------------------------------------------
-# FastAPI app
-# -----------------------------------------------------------------------------
-app = FastAPI(title="StackIQ API", version=VERSION)
-
-# CORS (safe default; tighten allow_origins to your UI origin later)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# Env keys (accept common variants so we don't get tripped up)
+ALPHAVANTAGE_KEY = (
+    os.getenv("ALPHAVANTAGE_KEY")
+    or os.getenv("ALPHAVANTAGE_API_KEY")
+    or ""
+)
+FINNHUB_KEY = (
+    os.getenv("FINNHUB_API_KEY")
+    or os.getenv("FINNHUB_APIKEY")
+    or ""
 )
 
-# -----------------------------------------------------------------------------
-# Helper: HTTP fetch with caching and friendly errors
-# -----------------------------------------------------------------------------
-def _alpha_raise_if_note(data: Dict[str, Any]) -> None:
-    note = data.get("Note") or data.get("Information") or data.get("Error Message")
-    if note:
-        # 429 is used so callers can detect quota/premium quickly
-        raise HTTPException(status_code=429, detail=f"Alpha Vantage: {note}")
+ALPHA_TIMEOUT = 2.5  # seconds (keep it snappy to avoid 504s)
 
-def get_json(url: str, params: Dict[str, Any], timeout: int = 15, ttl: int = 90) -> Dict[str, Any]:
-    key = _req_key(url, params)
-    cached = cache_get(key)
-    if cached is not None:
-        return cached  # cached dict
+app = FastAPI(title=SERVICE_NAME)
 
+# Serve the demo UI (your index.html lives in ./static)
+if os.path.isdir("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+def _pretty_json(data: Dict[str, Any], pretty: bool) -> JSONResponse:
+    """
+    Return consistent JSON; when pretty=1, indent for readability
+    (handy for your in-browser testing and the demo UI).
+    """
+    if pretty:
+        return JSONResponse(content=data, media_type="application/json", indent=2)
+    return JSONResponse(content=data, media_type="application/json")
+
+
+def _safe_float(x: Any) -> float:
     try:
-        r = requests.get(url, params=params, timeout=timeout)
-        # Special-case friendly message for common Finnhub 403 while testing
-        if r.status_code == 403 and "finnhub" in url:
-            raise HTTPException(
-                status_code=403,
-                detail="Finnhub 403 (forbidden). Your key/plan may not allow this endpoint or range.",
-            )
-        r.raise_for_status()
-        data = r.json()
-        cache_set(key, data, ttl_seconds=ttl)
-        return data
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.exception("HTTP error")
-        raise HTTPException(status_code=502, detail=f"Upstream error: {e}")
+        return float(x)
+    except Exception:
+        return 0.0
 
-# -----------------------------------------------------------------------------
-# Data sources
-# -----------------------------------------------------------------------------
-def alpha_daily(symbol: str) -> Dict[str, Any]:
-    if not ALPHAVANTAGE_KEY:
-        raise HTTPException(status_code=502, detail="Missing ALPHAVANTAGE_KEY")
-    data = get_json(
-        AV_BASE,
-        {
-            "function": "TIME_SERIES_DAILY",
-            "symbol": symbol.upper(),
-            "apikey": ALPHAVANTAGE_KEY,
-            "outputsize": "compact",  # ~last 100 bars
-        },
-        ttl=90,
-    )
-    _alpha_raise_if_note(data)
-    return data
 
+# ----------------------------
+# External data sources
+# ----------------------------
 def finnhub_quote(symbol: str) -> Dict[str, Any]:
-    if not FINNHUB_API_KEY:
-        # fall back to zero quote (friendly)
-        return {
-            "symbol": symbol.upper(),
-            "current": 0,
-            "change": None,
-            "percent": None,
-            "high": 0,
-            "low": 0,
-            "open": 0,
-            "prev_close": 0,
-            "timestamp": 0,
-        }
-    data = get_json(
-        f"{FINNHUB_BASE}/quote",
-        {"symbol": symbol.upper(), "token": FINNHUB_API_KEY},
-        ttl=60,
-    )
-    # Finnhub quote response shape: c (current), d (change), dp (%), h, l, o, pc, t
+    """Fetch real-time-ish quote from Finnhub and normalize the shape."""
+    symbol = symbol.upper()
+    url = "https://finnhub.io/api/v1/quote"
+    params = {"symbol": symbol, "token": FINNHUB_KEY}
+    r = requests.get(url, params=params, timeout=4.0)
+    r.raise_for_status()
+    j = r.json() or {}
+
+    current = _safe_float(j.get("c"))
+    prev_close = _safe_float(j.get("pc"))
+    change = current - prev_close if (current and prev_close) else 0.0
+    percent = (change / prev_close * 100.0) if prev_close else 0.0
+
     return {
-        "symbol": symbol.upper(),
-        "current": data.get("c") or 0,
-        "change": data.get("d"),
-        "percent": data.get("dp"),
-        "high": data.get("h") or 0,
-        "low": data.get("l") or 0,
-        "open": data.get("o") or 0,
-        "prev_close": data.get("pc") or 0,
-        "timestamp": data.get("t") or 0,
+        "symbol": symbol,
+        "current": round(current, 2),
+        "change": round(change, 2) if prev_close else None,
+        "percent": round(percent, 4) if prev_close else None,
+        "high": _safe_float(j.get("h")),
+        "low": _safe_float(j.get("l")),
+        "open": _safe_float(j.get("o")),
+        "prev_close": round(prev_close, 2) if prev_close else 0.0,
+        "timestamp": int(time.time()),
     }
 
-# -----------------------------------------------------------------------------
-# Routes
-# -----------------------------------------------------------------------------
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "has_token": bool(FINNHUB_API_KEY or ALPHAVANTAGE_KEY),
-        "service": "StackIQ",
-        "version": VERSION,
+
+def _alpha_daily_closes(symbol: str) -> list[float]:
+    """
+    Get latest daily closes (newest first) from Alpha Vantage.
+    Fast timeout so we never hang the request.
+    """
+    url = "https://www.alphavantage.co/query"
+    params = {
+        "function": "TIME_SERIES_DAILY_ADJUSTED",
+        "symbol": symbol,
+        "outputsize": "compact",
+        "apikey": ALPHAVANTAGE_KEY,
     }
+    r = requests.get(url, params=params, timeout=ALPHA_TIMEOUT)
+    r.raise_for_status()
+    data = r.json() or {}
+    series = data.get("Time Series (Daily)") or {}
+    if not series:
+        raise RuntimeError("alpha: empty series")
+
+    # newest first (Alpha keys are ISO dates)
+    closes = [float(v["4. close"]) for k, v in sorted(series.items(), reverse=True)[:10]]
+    if len(closes) < 2:
+        raise RuntimeError("alpha: not enough data")
+    return closes
+
+
+# ----------------------------
+# Routes
+# ----------------------------
+@app.get("/")
+def root(pretty: int = Query(0, description="Set to 1 for pretty JSON")):
+    data = {"service": SERVICE_NAME, "status": "ok"}
+    return _pretty_json(data, pretty == 1)
+
+
+@app.get("/health")
+def health(pretty: int = Query(0, description="Set to 1 for pretty JSON")):
+    data = {
+        "status": "ok",
+        "has_token": bool(ALPHAVANTAGE_KEY or FINNHUB_KEY),
+        "service": SERVICE_NAME,
+        "version": SERVICE_VERSION,
+    }
+    return _pretty_json(data, pretty == 1)
+
 
 @app.get("/quote/{symbol}")
-def quote(symbol: str):
-    return finnhub_quote(symbol)
-
-@app.get("/predict/{symbol}")
-def predict(symbol: str, budget: float = Query(..., gt=0, description="USD budget to allocate")):
+def quote(symbol: str, pretty: int = Query(0, description="Set to 1 for pretty JSON")):
     """
-    Simple demo strategy:
-    - Try daily candles from Alpha Vantage for momentum calc.
-    - If AV throttles/blocks (429), degrade gracefully to quote-only plan.
+    Normalize quote response:
+      {
+        "symbol": "AAPL",
+        "current": 247.66,
+        "change": 2.39,
+        "percent": 0.9744,
+        "high": 249.69,
+        "low": 245.56,
+        "open": 249.38,
+        "prev_close": 245.27,
+        "timestamp": 1706385600
+      }
     """
     try:
-        av = alpha_daily(symbol)
-        c = av.get("Time Series (Daily)") or {}
-        # last N closes (newest first after sorting)
-        bars: List[Dict[str, str]] = [
-            {"close": float(v["4. close"])} for k, v in sorted(c.items(), reverse=True)
-        ]
-        closes = [bar["close"] for bar in bars[:10]]
-        if len(closes) < 2:
-            raise ValueError("not enough data")
+        data = finnhub_quote(symbol)
+    except Exception:
+        # Keep shape stable, but indicate failure with zeros/nulls
+        sym = symbol.upper()
+        data = {
+            "symbol": sym,
+            "current": 0.0,
+            "change": None,
+            "percent": None,
+            "high": 0.0,
+            "low": 0.0,
+            "open": 0.0,
+            "prev_close": 0.0,
+            "timestamp": 0,
+        }
+    return _pretty_json(data, pretty == 1)
 
-        momentum = (closes[0] - closes[-1]) / closes[-1] * 100.0
+
+@app.get("/predict/{symbol}")
+def predict(
+    symbol: str,
+    budget: float = Query(1000.0, ge=0.0),
+    pretty: int = Query(0, description="Set to 1 for pretty JSON"),
+):
+    """
+    Build a simple 'buy plan':
+      - Try Alpha Vantage daily closes to compute momentum and use the latest close as price.
+      - If Alpha is slow/throttled/errored, fallback to Finnhub quote and skip momentum.
+    """
+    symbol = symbol.upper()
+    try:
+        closes = _alpha_daily_closes(symbol)
         price_now = closes[0]
-        shares = int(budget // price_now)
-
-        return {
-            "symbol": symbol.upper(),
+        momentum = (closes[0] - closes[-1]) / closes[-1] * 100.0
+        shares = int(budget // price_now) if price_now else 0
+        data = {
+            "symbol": symbol,
             "price_now": round(price_now, 2),
             "momentum_pct": round(momentum, 4),
             "using": "alpha_candles",
@@ -196,51 +192,32 @@ def predict(symbol: str, budget: float = Query(..., gt=0, description="USD budge
             },
             "note": "Educational sample strategy; not financial advice.",
         }
+        return _pretty_json(data, pretty == 1)
 
-    except HTTPException as e:
-        # If Alpha Vantage rate-limits, degrade gracefully to quote-only
-        if e.status_code == 429:
+    except Exception as e:
+        # Any error/timeout → fast, graceful fallback to Finnhub to avoid 504s
+        try:
             q = finnhub_quote(symbol)
             price_now = q.get("current") or 0.0
-            shares = int(budget // price_now) if price_now else 0
-            return {
-                "symbol": symbol.upper(),
-                "price_now": round(price_now or 0.0, 2),
-                "momentum_pct": None,
-                "using": "quote_only_fallback",
-                "plan_hint": str(e.detail),
-                "buy_plan": {
-                    "budget": budget,
-                    "shares": shares,
-                    "estimated_cost": round(shares * (price_now or 0.0), 2),
-                },
-                "note": "Educational sample strategy; not financial advice.",
-            }
-        raise
-    except Exception as e:
-        log.exception("predict failed")
-        raise HTTPException(status_code=500, detail=f"predict failed: {e}")
+        except Exception:
+            price_now = 0.0
 
-# -----------------------------------------------------------------------------
-# Static files + root UI
-# -----------------------------------------------------------------------------
-# Serve /static/* from the ./static folder (cache handled by the browser)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+        shares = int(budget // price_now) if price_now else 0
+        data = {
+            "symbol": symbol,
+            "price_now": round(price_now, 2) if price_now else 0.0,
+            "momentum_pct": None,
+            "using": "quote_only_fallback",
+            "plan_hint": str(e),
+            "buy_plan": {
+                "budget": budget,
+                "shares": shares,
+                "estimated_cost": round(shares * (price_now or 0.0), 2),
+            },
+            "note": "Educational sample strategy; not financial advice.",
+        }
+        return _pretty_json(data, pretty == 1)
 
-# Serve the demo UI at site root
-@app.get("/", response_class=HTMLResponse)
-def root():
-    # NOTE: This expects ./static/index.html to exist (we created it in repo)
-    return FileResponse("static/index.html")
-
-# -----------------------------------------------------------------------------
-# Uvicorn entry (not used by Azure if you set a Startup Command, but harmless)
-# -----------------------------------------------------------------------------
-if __name__ == "__main__":
-    import uvicorn
-    # Bind to all interfaces; PORT env is honored if present (Azure sets it)
-    port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("app:app", host="0.0.0.0", port=port)
 
 
 
