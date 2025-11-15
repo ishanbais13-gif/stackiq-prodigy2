@@ -1,121 +1,194 @@
+# data_fetcher.py
+from __future__ import annotations
+
 import os
 import time
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
 import requests
-from typing import Dict, Any, List, Optional
+
 
 FINNHUB_BASE = "https://finnhub.io/api/v1"
-API_KEY = os.getenv("FINNHUB_API_KEY", "").strip()
 
 
 class FinnhubError(Exception):
+    """Simple custom error so the rest of the app can catch API issues."""
     pass
 
 
-def _require_api_key():
-    if not API_KEY:
-        raise FinnhubError("Missing FINNHUB_API_KEY in environment.")
+def _require_api_key() -> str:
+    key = os.getenv("FINNHUB_API_KEY")
+    if not key:
+        raise FinnhubError("FINNHUB_API_KEY is not set in environment variables.")
+    return key
 
 
-def _get(url: str, params: Dict[str, Any]) -> Dict[str, Any]:
-    _require_api_key()
+def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    """
+    Low-level helper for calling Finnhub.
+    Always attaches the token and does basic error checking.
+    """
+    token = _require_api_key()
+    url = f"{FINNHUB_BASE}{path}"
+
     params = dict(params or {})
-    params["token"] = API_KEY
-    r = requests.get(url, params=params, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    # Finnhub sometimes returns {'error': '...'} or s='no_data' for candles
-    if isinstance(data, dict) and data.get("error"):
-        raise FinnhubError(data["error"])
-    return data
+    params.setdefault("token", token)
+
+    try:
+        resp = requests.get(url, params=params, timeout=8)
+    except Exception as e:
+        raise FinnhubError(f"Network error calling Finnhub: {e}") from e
+
+    if resp.status_code != 200:
+        raise FinnhubError(f"Finnhub HTTP {resp.status_code}: {resp.text[:200]}")
+
+    try:
+        return resp.json()
+    except Exception as e:
+        raise FinnhubError(f"Failed to decode Finnhub JSON: {e}") from e
 
 
-def get_quote(symbol: str) -> Dict[str, Any]:
+# ---------------------------------------------------------------------
+# Public helpers used by the rest of the app
+# ---------------------------------------------------------------------
+
+def quote(symbol: str) -> Dict[str, Any]:
     """
-    Returns:
-      {
-        "symbol": "AAPL",
-        "current": 227.15,
-        "change": -0.45,
-        "percent": -0.20,
-        "high": 230.0,
-        "low": 226.5,
-        "open": 228.0,
-        "prev_close": 227.6,
-        "timestamp": 1728422400
-      }
+    Get latest quote for a symbol.
+    Normalized dictionary used by the rest of the app.
     """
-    url = f"{FINNHUB_BASE}/quote"
-    data = _get(url, {"symbol": symbol.upper()})
-    # Finnhub quote fields: c, d, dp, h, l, o, pc, t
-    if not isinstance(data, dict) or "c" not in data:
-        raise FinnhubError("Unexpected response for quote.")
+    data = _get("/quote", {"symbol": symbol})
+
+    # Finnhub fields: c=current, o=open, h=high, l=low, pc=prev close, t=timestamp
     return {
         "symbol": symbol.upper(),
-        "current": data.get("c"),
-        "change": data.get("d"),
-        "percent": data.get("dp"),
+        "price": data.get("c"),
+        "open": data.get("o"),
         "high": data.get("h"),
         "low": data.get("l"),
-        "open": data.get("o"),
         "prev_close": data.get("pc"),
         "timestamp": data.get("t"),
+        "raw": data,
     }
 
 
-def get_candles(symbol: str, days: int = 30, resolution: str = "D") -> Dict[str, Any]:
+def candles(
+    symbol: str,
+    days: int = 260,
+    resolution: str = "D",
+) -> Dict[str, Any]:
     """
-    Returns Finnhub candles normalized to:
-      {
-        "symbol": "AAPL",
-        "resolution": "D",
-        "candles": [
-          {"t": 1726780800, "o": 220.1, "h": 221.2, "l": 219.8, "c": 220.9, "v": 32123456},
-          ...
-        ]
-      }
+    Get OHLCV candles for the past `days` days.
+    Returns a normalized dict with time + o/h/l/c/v lists.
     """
     now = int(time.time())
-    frm = now - days * 86400
+    start = now - days * 24 * 60 * 60
 
-    url = f"{FINNHUB_BASE}/stock/candle"
-    data = _get(url, {
-        "symbol": symbol.upper(),
-        "resolution": resolution,
-        "from": frm,
-        "to": now
-    })
+    data = _get(
+        "/stock/candle",
+        {
+            "symbol": symbol,
+            "resolution": resolution,
+            "from": start,
+            "to": now,
+        },
+    )
 
-    if not isinstance(data, dict) or data.get("s") != "ok":
-        # s can be 'no_data'
-        status = data.get("s") if isinstance(data, dict) else "unknown"
-        if status == "no_data":
-            return {"symbol": symbol.upper(), "resolution": resolution, "candles": []}
-        raise FinnhubError(f"Candle response status: {status}")
-
-    # Finnhub returns arrays: t, o, h, l, c, v
-    t = data.get("t", [])
-    o = data.get("o", [])
-    h = data.get("h", [])
-    l = data.get("l", [])
-    c = data.get("c", [])
-    v = data.get("v", [])
-
-    candles: List[Dict[str, Any]] = []
-    for i in range(min(len(t), len(o), len(h), len(l), len(c), len(v))):
-        candles.append({
-            "t": t[i],
-            "o": o[i],
-            "h": h[i],
-            "l": l[i],
-            "c": c[i],
-            "v": v[i],
-        })
+    if data.get("s") != "ok":
+        # Finnhub sometimes returns {"s": "no_data", ...}
+        raise FinnhubError(f"Finnhub candle error for {symbol}: {data!r}")
 
     return {
         "symbol": symbol.upper(),
-        "resolution": resolution,
-        "candles": candles
+        "t": data.get("t") or [],
+        "o": data.get("o") or [],
+        "h": data.get("h") or [],
+        "l": data.get("l") or [],
+        "c": data.get("c") or [],
+        "v": data.get("v") or [],
+        "raw": data,
     }
+
+
+# Backwards-compat aliases so older code still works:
+def get_quote(symbol: str) -> Dict[str, Any]:
+    return quote(symbol)
+
+
+def get_candles(
+    symbol: str,
+    days: int = 260,
+    resolution: str = "D",
+) -> Dict[str, Any]:
+    return candles(symbol, days=days, resolution=resolution)
+
+
+# ---------------------------------------------------------------------
+# Extra endpoints used by engine.py + backtest.py
+# ---------------------------------------------------------------------
+
+def recommendation_trends(symbol: str) -> Dict[str, Any]:
+    """
+    Wraps /stock/recommendation.
+
+    Returns the most recent recommendation row, or {} if none.
+    The engine only needs counts of buy/sell/hold-ish.
+    """
+    try:
+        data = _get("/stock/recommendation", {"symbol": symbol})
+    except FinnhubError:
+        return {}
+
+    if isinstance(data, list) and data:
+        return data[0]  # latest entry
+    return {}
+
+
+def news_sentiment(symbol: str) -> Dict[str, Any]:
+    """
+    Wraps /news-sentiment.
+
+    Returns the whole JSON blob (engine picks out bullishPercent, etc).
+    """
+    try:
+        data = _get("/news-sentiment", {"symbol": symbol})
+    except FinnhubError:
+        return {}
+
+    return data or {}
+
+
+def earnings_calendar(symbol: str) -> Dict[str, Any]:
+    """
+    Wraps /calendar/earnings.
+
+    Returns the next upcoming earnings item in a small dict, or {}.
+    """
+    today = datetime.utcnow().date()
+    # Range: 1 week back, 4 weeks forward
+    start = today - timedelta(days=7)
+    end = today + timedelta(days=28)
+
+    try:
+        data = _get(
+            "/calendar/earnings",
+            {
+                "symbol": symbol,
+                "from": start.isoformat(),
+                "to": end.isoformat(),
+            },
+        )
+    except FinnhubError:
+        return {}
+
+    items = data.get("earningsCalendar") or []
+    if not items:
+        return {}
+
+    # Just return the first upcoming item
+    return items[0]
+
 
 
 
