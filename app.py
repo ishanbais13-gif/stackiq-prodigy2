@@ -1,15 +1,37 @@
-import os
 from typing import List, Literal, Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from data_fetcher import fetch_quote, fetch_candles
+
+
+# -----------------------------
+# FastAPI app setup
+# -----------------------------
 
 app = FastAPI(
     title="StackIQ API",
     version="1.0.0",
-    description="Backend for StackIQ / Prodigynt stock analysis engine."
+    description=(
+        "Backend for StackIQ / Prodigynt.\n\n"
+        "Features:\n"
+        "- Live quotes via Finnhub\n"
+        "- Historical candles\n"
+        "- Single-symbol prediction & sizing\n"
+        "- Multi-symbol batch prediction with best pick\n\n"
+        "All outputs are for informational and educational purposes only and "
+        "are **not** financial advice."
+    ),
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # you can tighten this later for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -17,161 +39,303 @@ app = FastAPI(
 # Models
 # -----------------------------
 
-RiskProfile = Literal["low", "medium", "high"]
+RiskProfileLiteral = Literal["low", "medium", "high"]
+
+
+class AllocationInfo(BaseModel):
+    allocation_factor: float
+    position_size_label: str
+    max_allocation: float
+    shares_integer: int
+    shares_fractional: float
+    estimated_cost_integer: float
+    fractional_mode: bool
+
+
+class RiskManagementInfo(BaseModel):
+    stop_loss_pct: float
+    take_profit_pct: float
+    stop_loss_price: float
+    take_profit_price: float
+
+
+class SignalInfo(BaseModel):
+    label: str
+    score: float
+    reason: str
+
+
+class IndicatorInfo(BaseModel):
+    rsi: Optional[float] = None
+    ema_fast: Optional[float] = None
+    ema_slow: Optional[float] = None
+    macd_hist: Optional[float] = None
+    volatility_score_numeric: Optional[float] = None
+    volatility_label: str = "unknown"
+    volume_spike: bool = False
+    indicator_score: float = 0.0
+    indicator_trend_label: str = "unknown"
+    day_range_pct: Optional[float] = None
+    base_change_pct: Optional[float] = None
+    prev_close: Optional[float] = None
+
+
+class FinalDecision(BaseModel):
+    label: str
+    score: float
+
+
+class RawQuote(BaseModel):
+    c: float  # current
+    d: float  # change
+    dp: float  # change %
+    h: float  # high
+    l: float  # low
+    o: float  # open
+    pc: float  # previous close
+    t: int  # timestamp
+
+
+class PredictResponse(BaseModel):
+    symbol: str
+    price: float
+    change_pct_today: float
+    budget: float
+    risk_profile: RiskProfileLiteral
+    allocation: AllocationInfo
+    risk_management: RiskManagementInfo
+    signal: SignalInfo
+    indicators: IndicatorInfo
+    final_decision: FinalDecision
+    raw_quote: RawQuote
+    summary: str
+    disclaimer: str
 
 
 class BatchPredictRequest(BaseModel):
-    symbols: List[str]
-    budget: float
-    risk: RiskProfile
-    fractional: bool = True
+    symbols: List[str] = Field(..., description="Ticker symbols, e.g. ['NVDA', 'SOFI']")
+    budget: float = Field(..., gt=0, description="Total portfolio budget across all symbols")
+    risk: RiskProfileLiteral = Field("medium", description="Risk profile: low, medium, high")
+    fractional: bool = Field(True, description="Allow fractional shares?")
 
 
-# -----------------------------
-# Helper: core prediction logic
-# -----------------------------
-
-def build_single_prediction(
-    symbol: str,
-    budget: float,
-    risk_profile: RiskProfile,
+class BatchMeta(BaseModel):
+    total_budget: float
+    per_symbol_budget: float
+    risk_profile: RiskProfileLiteral
     fractional: bool
-) -> Dict[str, Any]:
+
+
+class BatchResult(BaseModel):
+    symbols: List[str]
+    meta: BatchMeta
+    results: Dict[str, PredictResponse]
+    best_pick: Dict[str, Any]
+
+
+# -----------------------------
+# Utility functions
+# -----------------------------
+
+RISK_CONFIG = {
+    "low": {
+        "allocation_factor": 0.3,
+        "stop_loss_pct": -5.0,
+        "take_profit_pct": 8.0,
+    },
+    "medium": {
+        "allocation_factor": 0.5,
+        "stop_loss_pct": -10.0,
+        "take_profit_pct": 20.0,
+    },
+    "high": {
+        "allocation_factor": 0.75,
+        "stop_loss_pct": -15.0,
+        "take_profit_pct": 30.0,
+    },
+}
+
+
+def _safe_change_pct(quote: Dict[str, Any]) -> float:
+    """Use dp if available, otherwise compute (c - pc) / pc * 100."""
+    dp = quote.get("dp")
+    if dp is not None:
+        return float(dp)
+    c = quote.get("c")
+    pc = quote.get("pc")
+    if c is None or pc in (None, 0):
+        return 0.0
+    return float((c - pc) / pc * 100.0)
+
+
+def _build_signal(change_pct: float) -> SignalInfo:
     """
-    Core logic used by /predict/{symbol} and /predict/batch.
-    Fetches quote, computes allocation, simple risk management,
-    a signal, indicators placeholder, and a final decision score.
+    Very simple day-trade style signal:
+    - Strong up move => momentum_buy
+    - Small up move => steady_buy
+    - Flat / choppy => hold
+    - Mild down => cautious_buy (possible discount)
+    - Big down => speculative_dip_buy
     """
-
-    quote = fetch_quote(symbol)
-    if not quote or "c" not in quote or quote["c"] == 0:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch quote for {symbol}")
-
-    price = quote["c"]
-    prev_close = quote.get("pc", price)
-    try:
-        change_pct_today = round(((price - prev_close) / prev_close) * 100, 3)
-    except ZeroDivisionError:
-        change_pct_today = 0.0
-
-    # ----- Allocation -----
-    allocation_factor_map = {"low": 0.3, "medium": 0.5, "high": 0.75}
-    allocation_factor = allocation_factor_map.get(risk_profile, 0.5)
-
-    position_label = risk_profile
-    max_allocation = budget
-
-    shares_integer = int(budget // price) if price > 0 else 0
-    shares_fractional = (budget / price) if price > 0 else 0.0
-
-    # ----- Risk management -----
-    stop_loss_pct_map = {"low": -5, "medium": -10, "high": -15}
-    take_profit_pct_map = {"low": 5, "medium": 10, "high": 15}
-
-    stop_loss_pct = stop_loss_pct_map.get(risk_profile, -10)
-    take_profit_pct = take_profit_pct_map.get(risk_profile, 10)
-
-    stop_loss_price = round(price * (1 + stop_loss_pct / 100), 3)
-    take_profit_price = round(price * (1 + take_profit_pct / 100), 3)
-
-    # ----- Signal + scoring -----
-    # Very simple logic for now – we can make this smarter later.
-    if change_pct_today > 3:
-        signal_label = "bullish_breakout"
-        signal_score = 80
-        reason = "Strong upside momentum today; potential breakout."
-    elif 0 < change_pct_today <= 3:
-        signal_label = "steady_buy"
-        signal_score = 65
-        reason = "Small positive move; reasonable time to scale in."
-    elif -2 <= change_pct_today <= 0:
-        signal_label = "cautious_buy"
-        signal_score = 60
-        reason = "Slightly down or flat; could be a mild discount."
-    elif -5 <= change_pct_today < -2:
-        signal_label = "speculative_dip_buy" if risk_profile != "low" else "hold"
-        signal_score = 55 if risk_profile != "low" else 45
-        reason = "Price dropped noticeably; may be a dip but carries higher risk."
-    else:
-        signal_label = "hold"
-        signal_score = 40
-        reason = "Weak / uncertain price action; better to be patient."
-
-    # final_decision roughly matches signal but could be tweaked later
-    final_label = signal_label
-    final_score = signal_score
-
-    # ----- Indicators placeholder -----
-    # (Later we can wire candles + RSI/EMA/etc here.)
-    indicators = {
-        "rsi": None,
-        "ema_fast": None,
-        "ema_slow": None,
-        "macd_hist": None,
-        "volatility_score_numeric": None,
-        "volatility_label": "unknown",
-        "volume_spike": False,
-        "indicator_score": 0,
-        "indicator_trend_label": "unknown",
-        "day_range_pct": None,
-        "base_change_pct": change_pct_today,
-        "prev_close": prev_close,
-    }
-
-    # ----- Summary text -----
-    summary = (
-        f"{symbol} is trading around ${price:.2f} today. "
-        f"Daily move is {change_pct_today:.2f}%. "
-        f"Given your {risk_profile} risk profile, this engine would allocate roughly "
-        f"${budget:.2f} into this trade."
+    if change_pct >= 3:
+        return SignalInfo(
+            label="momentum_buy",
+            score=80,
+            reason="Strong positive move today (>= +3%). Momentum could continue but risk is higher.",
+        )
+    if 0.5 <= change_pct < 3:
+        return SignalInfo(
+            label="steady_buy",
+            score=65,
+            reason="Small positive move (0.5–3%). Stable day; reasonable time to scale in.",
+        )
+    if -0.5 < change_pct < 0.5:
+        return SignalInfo(
+            label="hold",
+            score=50,
+            reason="Flat or slightly choppy day. No strong edge either way.",
+        )
+    if -3 <= change_pct <= -0.5:
+        return SignalInfo(
+            label="cautious_buy",
+            score=60,
+            reason="Slightly down today; could be a mild discount if fundamentals are strong.",
+        )
+    # change_pct < -3
+    return SignalInfo(
+        label="speculative_dip_buy",
+        score=55,
+        reason="Price dropped sharply today (<= -3%). Could be a dip but carries higher risk.",
     )
 
-    # ----- Assemble prediction object -----
-    prediction = {
-        "symbol": symbol,
-        "price": price,
-        "change_pct_today": change_pct_today,
-        "budget": budget,
-        "risk_profile": risk_profile,
-        "allocation": {
-            "allocation_factor": allocation_factor,
-            "position_size_label": position_label,
-            "max_allocation": max_allocation,
-            "shares_integer": shares_integer,
-            "shares_fractional": round(shares_fractional, 6),
-            "estimated_cost_integer": round(shares_integer * price, 2),
-            "fractional_mode": fractional,
-        },
-        "risk_management": {
-            "stop_loss_pct": stop_loss_pct,
-            "take_profit_pct": take_profit_pct,
-            "stop_loss_price": stop_loss_price,
-            "take_profit_price": take_profit_price,
-        },
-        "signal": {
-            "label": signal_label,
-            "score": signal_score,
-            "reason": reason,
-        },
-        "indicators": indicators,
-        "raw_quote": quote,
-        "final_decision": {
-            "label": final_label,
-            "score": final_score,
-        },
-        "summary": summary,
-        "disclaimer": "This output is for informational and educational purposes only and is not financial advice.",
-    }
 
-    return prediction
+def _position_size_label(allocation_factor: float) -> str:
+    if allocation_factor <= 0.35:
+        return "small"
+    if allocation_factor <= 0.6:
+        return "medium"
+    return "aggressive"
+
+
+def _compute_predict_payload(
+    symbol: str,
+    quote: Dict[str, Any],
+    budget: float,
+    risk: RiskProfileLiteral,
+    fractional: bool,
+) -> PredictResponse:
+    price = float(quote.get("c") or 0.0)
+    if price <= 0:
+        raise HTTPException(status_code=502, detail="Received invalid price from data provider.")
+
+    change_pct_today = _safe_change_pct(quote)
+    risk_conf = RISK_CONFIG[risk]
+
+    allocation_factor = risk_conf["allocation_factor"]
+    stop_loss_pct = risk_conf["stop_loss_pct"]
+    take_profit_pct = risk_conf["take_profit_pct"]
+
+    max_allocation = budget * allocation_factor
+    if max_allocation <= 0:
+        shares_fractional = 0.0
+    else:
+        shares_fractional = max_allocation / price
+
+    shares_integer = int(shares_fractional) if fractional else int(max_allocation // price)
+    if shares_integer < 0:
+        shares_integer = 0
+
+    estimated_cost_integer = round(shares_integer * price, 2)
+
+    allocation = AllocationInfo(
+        allocation_factor=allocation_factor,
+        position_size_label=_position_size_label(allocation_factor),
+        max_allocation=round(max_allocation, 2),
+        shares_integer=shares_integer,
+        shares_fractional=round(shares_fractional, 4),
+        estimated_cost_integer=estimated_cost_integer,
+        fractional_mode=fractional,
+    )
+
+    stop_loss_price = round(price * (1 + stop_loss_pct / 100.0), 3)
+    take_profit_price = round(price * (1 + take_profit_pct / 100.0), 3)
+
+    risk_mgmt = RiskManagementInfo(
+        stop_loss_pct=stop_loss_pct,
+        take_profit_pct=take_profit_pct,
+        stop_loss_price=stop_loss_price,
+        take_profit_price=take_profit_price,
+    )
+
+    signal = _build_signal(change_pct_today)
+
+    # For now, keep indicators simple / mostly placeholder but structured
+    indicators = IndicatorInfo(
+        volatility_label="unknown",
+        indicator_trend_label="unknown",
+        base_change_pct=change_pct_today,
+        prev_close=float(quote.get("pc") or 0.0),
+    )
+
+    # Combine signal & indicators into a final decision
+    # Slightly boost score if risk is high & move is up, or low & move is down (defensive)
+    final_score = signal.score
+    if risk == "high" and change_pct_today > 0:
+        final_score += 5
+    if risk == "low" and change_pct_today < 0:
+        final_score += 5
+    final_label = signal.label if final_score >= 50 else "avoid"
+
+    final_decision = FinalDecision(label=final_label, score=final_score)
+
+    raw_quote = RawQuote(
+        c=float(quote.get("c") or 0.0),
+        d=float(quote.get("d") or 0.0),
+        dp=float(quote.get("dp") or 0.0),
+        h=float(quote.get("h") or 0.0),
+        l=float(quote.get("l") or 0.0),
+        o=float(quote.get("o") or 0.0),
+        pc=float(quote.get("pc") or 0.0),
+        t=int(quote.get("t") or 0),
+    )
+
+    summary = (
+        f"{symbol.upper()} is trading around ${price:.2f} today. "
+        f"Change on the session is {change_pct_today:+.2f}%. "
+        f"Given your {risk} risk profile, this engine would allocate roughly "
+        f"${max_allocation:.2f} into this trade, which corresponds to about "
+        f"{shares_fractional:.2f} shares. The current decision is '{final_label}'."
+    )
+
+    disclaimer = (
+        "This output is for informational and educational purposes only and "
+        "is not financial advice."
+    )
+
+    return PredictResponse(
+        symbol=symbol.upper(),
+        price=price,
+        change_pct_today=change_pct_today,
+        budget=budget,
+        risk_profile=risk,
+        allocation=allocation,
+        risk_management=risk_mgmt,
+        signal=signal,
+        indicators=indicators,
+        final_decision=final_decision,
+        raw_quote=raw_quote,
+        summary=summary,
+        disclaimer=disclaimer,
+    )
 
 
 # -----------------------------
-# Basic endpoints
+# Routes
 # -----------------------------
+
 
 @app.get("/")
-def root():
+async def root() -> Dict[str, Any]:
     return {
         "message": "StackIQ backend is live.",
         "endpoints": [
@@ -185,35 +349,40 @@ def root():
 
 
 @app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "message": "StackIQ backend is running"
-    }
+async def health() -> Dict[str, str]:
+    return {"status": "ok", "message": "StackIQ backend is running"}
 
-
-# -----------------------------
-# Market data endpoints
-# -----------------------------
 
 @app.get("/quote/{symbol}")
-def get_quote(symbol: str):
-    data = fetch_quote(symbol)
-    if not data:
-        raise HTTPException(status_code=502, detail="Failed to fetch quote from Finnhub.")
-    return {"symbol": symbol.upper(), "quote": data}
+async def get_quote(symbol: str) -> Dict[str, Any]:
+    try:
+        quote = fetch_quote(symbol)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch quote: {e}")
+    if not quote or "c" not in quote:
+        raise HTTPException(status_code=502, detail="Invalid quote received from Finnhub.")
+    return {"symbol": symbol.upper(), "quote": quote}
 
 
 @app.get("/candles/{symbol}")
-def get_candles(
+async def get_candles(
     symbol: str,
-    resolution: str = Query("D", description="Resolution, e.g. 1, 5, 15, 30, 60, D, W, M"),
-    days: int = Query(30, ge=1, le=365, description="Number of days of history")
-):
-    data = fetch_candles(symbol, resolution=resolution, days=days)
-    if not data:
-        raise HTTPException(status_code=502, detail="Failed to fetch candles from Finnhub.")
-    # We return raw data; frontend can handle error payload if Finnhub says 403, etc.
+    resolution: str = "D",
+    days: int = 30,
+) -> Dict[str, Any]:
+    try:
+        data = fetch_candles(symbol, resolution=resolution, days=days)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch candles from Finnhub: {e}")
+
+    # Finnhub returns { s: "ok"|"no_data"|"error", t: [...], c: [...], ... }
+    status = data.get("s")
+    if status != "ok":
+        raise HTTPException(
+            status_code=502,
+            detail=f"Finnhub returned status '{status}' for candles.",
+        )
+
     return {
         "symbol": symbol.upper(),
         "resolution": resolution,
@@ -222,108 +391,115 @@ def get_candles(
     }
 
 
-# -----------------------------
-# Prediction endpoints
-# -----------------------------
-
-@app.get("/predict/{symbol}")
-def predict_symbol(
+@app.get("/predict/{symbol}", response_model=PredictResponse)
+async def predict_single(
     symbol: str,
-    budget: float = Query(..., gt=0),
-    risk: RiskProfile = Query("medium"),
-    fractional: bool = Query(True),
-):
-    """
-    Single-symbol prediction. Uses core build_single_prediction logic.
-    """
-    prediction = build_single_prediction(
-        symbol=symbol.upper(),
-        budget=budget,
-        risk_profile=risk,
-        fractional=fractional,
-    )
-    return prediction
+    budget: float,
+    risk: RiskProfileLiteral = "medium",
+    fractional: bool = True,
+) -> PredictResponse:
+    if budget <= 0:
+        raise HTTPException(status_code=400, detail="Budget must be positive.")
 
-
-@app.post("/predict/batch")
-def predict_batch(request: BatchPredictRequest):
-    """
-    Multi-symbol prediction.
-    - Splits total budget evenly per symbol
-    - Runs same logic as /predict/{symbol} per ticker
-    - Adds ranking + best_pick based on final_decision score
-    """
     try:
-        symbols = [s.upper() for s in request.symbols if s.strip()]
-        if not symbols:
-            raise HTTPException(status_code=400, detail="No symbols provided.")
+        quote = fetch_quote(symbol)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch quote: {e}")
 
-        total_budget = request.budget
-        risk_profile = request.risk
-        fractional = request.fractional
+    if not quote or "c" not in quote:
+        raise HTTPException(status_code=502, detail="Invalid quote received from Finnhub.")
 
-        per_symbol_budget = total_budget / len(symbols)
+    return _compute_predict_payload(symbol, quote, budget, risk, fractional)
 
-        results: Dict[str, Any] = {}
-        ranking_rows: List[Dict[str, Any]] = []
 
-        for sym in symbols:
-            try:
-                pred = build_single_prediction(
-                    symbol=sym,
-                    budget=per_symbol_budget,
-                    risk_profile=risk_profile,
-                    fractional=fractional,
-                )
-            except HTTPException:
-                # Skip symbols that fail data fetch
-                continue
+@app.post("/predict/batch", response_model=BatchResult)
+async def predict_batch(request: BatchPredictRequest) -> BatchResult:
+    if not request.symbols:
+        raise HTTPException(status_code=400, detail="At least one symbol is required.")
 
-            results[sym] = pred
+    per_symbol_budget = request.budget / len(request.symbols)
 
-            score = pred.get("final_decision", {}).get("score", 0)
-            change_pct = pred.get("change_pct_today", 0.0)
-            allocation_factor = pred.get("allocation", {}).get("allocation_factor", 0.5)
+    results: Dict[str, PredictResponse] = {}
+    ranking: List[Dict[str, Any]] = []
 
-            ranking_rows.append(
+    for raw_symbol in request.symbols:
+        symbol = raw_symbol.upper()
+        try:
+            quote = fetch_quote(symbol)
+            if not quote or "c" not in quote:
+                raise ValueError("Invalid quote payload")
+            prediction = _compute_predict_payload(
+                symbol=symbol,
+                quote=quote,
+                budget=per_symbol_budget,
+                risk=request.risk,
+                fractional=request.fractional,
+            )
+            results[symbol] = prediction
+            ranking.append(
                 {
-                    "symbol": sym,
-                    "score": score,
-                    "change_pct_today": change_pct,
-                    "allocation_factor": allocation_factor,
-                    "signal": pred.get("signal", {}).get("label", "unknown"),
+                    "symbol": symbol,
+                    "score": prediction.final_decision.score,
+                    "label": prediction.final_decision.label,
+                    "change_pct_today": prediction.change_pct_today,
                 }
             )
+        except Exception as e:
+            # On failure, capture a minimal error entry instead of killing the whole request
+            results[symbol] = PredictResponse(
+                symbol=symbol,
+                price=0.0,
+                change_pct_today=0.0,
+                budget=per_symbol_budget,
+                risk_profile=request.risk,
+                allocation=AllocationInfo(
+                    allocation_factor=RISK_CONFIG[request.risk]["allocation_factor"],
+                    position_size_label="error",
+                    max_allocation=0.0,
+                    shares_integer=0,
+                    shares_fractional=0.0,
+                    estimated_cost_integer=0.0,
+                    fractional_mode=request.fractional,
+                ),
+                risk_management=RiskManagementInfo(
+                    stop_loss_pct=0.0,
+                    take_profit_pct=0.0,
+                    stop_loss_price=0.0,
+                    take_profit_price=0.0,
+                ),
+                signal=SignalInfo(
+                    label="error",
+                    score=0.0,
+                    reason=f"Failed to compute prediction: {e}",
+                ),
+                indicators=IndicatorInfo(),
+                final_decision=FinalDecision(label="error", score=0.0),
+                raw_quote=RawQuote(c=0.0, d=0.0, dp=0.0, h=0.0, l=0.0, o=0.0, pc=0.0, t=0),
+                summary=f"Could not compute prediction for {symbol} due to an error.",
+                disclaimer=(
+                    "This output is for informational and educational purposes only "
+                    "and is not financial advice."
+                ),
+            )
 
-        # Sort and rank
-        ranking_rows.sort(key=lambda r: r["score"], reverse=True)
+    # Rank by final decision score descending
+    ranking_sorted = sorted(ranking, key=lambda x: x["score"], reverse=True)
+    best_pick = ranking_sorted[0] if ranking_sorted else {"symbol": None, "score": 0.0}
 
-        best_pick: Optional[Dict[str, Any]] = ranking_rows[0] if ranking_rows else None
+    meta = BatchMeta(
+        total_budget=request.budget,
+        per_symbol_budget=round(per_symbol_budget, 2),
+        risk_profile=request.risk,
+        fractional=request.fractional,
+    )
 
-        for idx, row in enumerate(ranking_rows):
-            row["rank"] = idx + 1
+    return BatchResult(
+        symbols=[s.upper() for s in request.symbols],
+        meta=meta,
+        results=results,
+        best_pick=best_pick,
+    )
 
-        response = {
-            "symbols": symbols,
-            "meta": {
-                "total_budget": total_budget,
-                "per_symbol_budget": per_symbol_budget,
-                "risk_profile": risk_profile,
-                "fractional": fractional,
-            },
-            "results": results,
-            "rankings": ranking_rows,
-            "best_pick": best_pick,
-            "disclaimer": "This output is for informational and educational purposes only and is not financial advice.",
-        }
-
-        return response
-
-    except HTTPException:
-        # Re-raise HTTP exceptions as-is
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 
