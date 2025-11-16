@@ -498,7 +498,175 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
         meta=meta,
         results=results,
         best_pick=best_pick,
-    )
+    )# ============================================================
+# DAY 7 – BACKTEST + OPTIMIZATION ENGINE (FULL BLOCK)
+# PASTE THIS DIRECTLY AFTER THE BatchResult RETURN
+# ============================================================
+
+from typing import Dict, Any, List
+import statistics
+import math
+
+
+# ------------------------------------------------------------
+# Helper: Simple backtest using daily candles
+# ------------------------------------------------------------
+def _run_simple_backtest(
+    symbol: str,
+    candles: Dict[str, Any],
+    initial_budget: float,
+) -> Dict[str, Any]:
+
+    # Need at least 10 candles minimum
+    if not candles or "c" not in candles or len(candles["c"]) < 10:
+        return {
+            "symbol": symbol,
+            "error": "Not enough candle data",
+            "profit_pct": 0.0,
+            "final_value": initial_budget,
+            "trades": 0,
+            "notes": "Insufficient price history"
+        }
+
+    close = candles["c"]
+    trades = 0
+    cash = initial_budget
+    position = 0  # shares
+    last_price = close[0]
+
+    for price in close[1:]:
+        # If price jumps 1%+ above last day → buy
+        if price > last_price * 1.01 and cash > price:
+            position = cash / price
+            cash = 0
+            trades += 1
+
+        # If price drops 1%+ → sell
+        if position > 0 and price < last_price * 0.99:
+            cash = position * price
+            position = 0
+            trades += 1
+
+        last_price = price
+
+    # Close any open position at end
+    if position > 0:
+        cash = position * close[-1]
+        position = 0
+
+    profit_pct = ((cash - initial_budget) / initial_budget) * 100.0
+
+    return {
+        "symbol": symbol,
+        "profit_pct": round(profit_pct, 2),
+        "final_value": round(cash, 2),
+        "trades": trades,
+        "notes": "Backtest complete"
+    }
+
+
+# ------------------------------------------------------------
+# API: /backtest/{symbol}
+# ------------------------------------------------------------
+@app.get("/backtest/{symbol}")
+async def backtest_symbol(symbol: str, budget: float = 1000.0):
+    """
+    Run a simple backtest using candle data from Finnhub
+    """
+    try:
+        candles = fetch_candles(symbol.upper())
+    except Exception as e:
+        return {
+            "symbol": symbol.upper(),
+            "error": f"Failed to fetch candles: {e}"
+        }
+
+    result = _run_simple_backtest(symbol.upper(), candles, budget)
+    return result
+
+
+# ------------------------------------------------------------
+# Optimization logic: Try multiple parameter combos
+# ------------------------------------------------------------
+def _run_optimization(
+    symbol: str,
+    candles: Dict[str, Any],
+    budget: float
+) -> Dict[str, Any]:
+
+    if not candles or "c" not in candles or len(candles["c"]) < 10:
+        return {
+            "symbol": symbol,
+            "error": "Not enough data for optimization"
+        }
+
+    best = None
+
+    # Try multiple thresholds for buy/sell
+    buy_thresholds = [0.005, 0.01, 0.02]
+    sell_thresholds = [0.005, 0.01, 0.02]
+
+    for buy_t in buy_thresholds:
+        for sell_t in sell_thresholds:
+            # Custom backtest simulation
+            close = candles["c"]
+            cash = budget
+            position = 0
+            last_price = close[0]
+
+            for price in close[1:]:
+                # BUY RULE
+                if price > last_price * (1 + buy_t) and cash > price:
+                    position = cash / price
+                    cash = 0
+
+                # SELL RULE
+                if position > 0 and price < last_price * (1 - sell_t):
+                    cash = position * price
+                    position = 0
+
+                last_price = price
+
+            if position > 0:
+                cash = position * close[-1]
+
+            profit_pct = ((cash - budget) / budget) * 100
+
+            config = {
+                "buy_threshold": buy_t,
+                "sell_threshold": sell_t,
+                "profit_pct": round(profit_pct, 2)
+            }
+
+            if best is None or config["profit_pct"] > best["profit_pct"]:
+                best = config
+
+    return {
+        "symbol": symbol.upper(),
+        "best_strategy": best,
+        "notes": "Optimization complete"
+    }
+
+
+# ------------------------------------------------------------
+# API: /optimize/{symbol}
+# ------------------------------------------------------------
+@app.get("/optimize/{symbol}")
+async def optimize_symbol(symbol: str, budget: float = 1000.0):
+    """
+    Try multiple backtest strategies & return the best result
+    """
+    try:
+        candles = fetch_candles(symbol.upper())
+    except Exception as e:
+        return {
+            "symbol": symbol.upper(),
+            "error": f"Failed to fetch candles: {e}"
+        }
+
+    result = _run_optimization(symbol.upper(), candles, budget)
+    return result
+
 
 
 
