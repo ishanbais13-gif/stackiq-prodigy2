@@ -5,11 +5,12 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from data_fetcher import get_quote, get_candles
+from indicators import compute_indicators
 
 app = FastAPI(
     title="StackIQ API",
-    version="0.4.0",
-    description="Backend for AI-powered stock analysis (Day 4: enhanced prediction).",
+    version="0.5.0",
+    description="Backend for AI-powered stock analysis (Day 5: indicators + combined decision).",
 )
 
 # CORS – open for now, tighten later when you have a frontend domain
@@ -43,7 +44,7 @@ def health():
     return {
         "status": "ok",
         "message": "StackIQ backend is running",
-        "engine_version": "v1.1-predict-quote-only-enhanced",
+        "engine_version": "v1.2-predict-quote-only-with-indicators",
     }
 
 
@@ -68,8 +69,9 @@ def quote(symbol: str):
 def candles(symbol: str, resolution: str = "D", days: int = 30):
     """
     Pass-through candles endpoint.
+
     NOTE: On your current Finnhub plan, this will likely return an error payload
-    in data.error / data.http_status for /stock/candle.
+    in data.error / data.http_status for /stock/candle. We keep it for future upgrade.
     """
     try:
         candles_data = get_candles(symbol, resolution=resolution, days=days)
@@ -210,7 +212,7 @@ def _build_summary(
     shares_int: int,
     shares_frac: Optional[float],
     fractional: bool,
-    signal_label: str,
+    decision_label: str,
 ):
     symbol = symbol.upper()
     direction_text = "flat"
@@ -229,8 +231,23 @@ def _build_summary(
         f"{symbol} is trading around ${price:.2f} today and is {direction_text} on the session. "
         f"Given your {risk_profile} risk profile, this engine would allocate roughly "
         f"${allocation_dollars:.2f} into this trade, which corresponds to {size_text}. "
-        f"The current signal is '{signal_label}'."
+        f"The current decision is '{decision_label}'."
     )
+
+
+def _final_decision_label(score: float) -> str:
+    """
+    Map a 0–100 score to a user-facing decision label.
+    """
+    if score >= 85:
+        return "strong_buy"
+    if score >= 70:
+        return "steady_buy"
+    if score >= 55:
+        return "cautious_buy"
+    if score >= 40:
+        return "hold"
+    return "avoid_or_reduce"
 
 
 @app.get("/predict/{symbol}")
@@ -244,18 +261,19 @@ def predict(
     ),
 ):
     """
-    v1.1 prediction endpoint using ONLY real-time quote data.
+    v1.2 prediction endpoint using ONLY real-time quote data.
 
     It:
     - pulls the latest quote
     - computes today's percent change
+    - computes pseudo-technical indicators
+    - combines indicator score + price-action signal into a final decision
     - decides how much of the budget to risk based on risk profile
     - computes how many shares that buys (integer and optional fractional)
     - suggests basic stop-loss and take-profit levels
-    - returns a simple rule-based signal + explanation + summary
+    - returns signal, indicators, and summary
 
-    NOTE: This is NOT financial advice. It's a demo logic engine
-    you can tweak and improve over time.
+    NOTE: This is NOT financial advice. It's demo logic you can tweak and improve.
     """
     quote_data = get_quote(symbol)
     if quote_data is None:
@@ -298,15 +316,36 @@ def predict(
     # Cost if using integer shares only
     estimated_cost_int = shares_int * current_price
 
+    # Base signal from price action
     signal = _build_signal(change_pct)
 
+    # Indicators based on quote
+    indicators = compute_indicators(
+        price=current_price,
+        change_pct=change_pct,
+        quote=quote_data,
+    )
+
+    # Combine scores
+    base_score = signal.get("score", 50)
+    indicator_score = indicators.get("indicator_score", 50)
+
+    combined_score = (base_score + indicator_score) / 2.0
+
     # Edge case: budget too small to buy even 1 share and fractional not allowed
+    insufficient_budget = False
     if shares_int == 0 and not fractional:
+        insufficient_budget = True
         signal = {
             "label": "budget_too_small",
             "score": 100,
             "reason": "Budget and risk level are too low to buy even 1 share at the current price.",
         }
+        combined_score = signal["score"]
+
+    final_label = "insufficient_budget" if insufficient_budget else _final_decision_label(
+        combined_score
+    )
 
     # Stop-loss / take-profit levels based on risk
     sl_pct, tp_pct = _risk_sl_tp(norm_risk)
@@ -322,7 +361,7 @@ def predict(
         shares_int=shares_int,
         shares_frac=shares_frac,
         fractional=fractional,
-        signal_label=signal["label"],
+        decision_label=final_label,
     )
 
     return {
@@ -347,10 +386,16 @@ def predict(
             "take_profit_price": take_profit_price,
         },
         "signal": signal,
+        "indicators": indicators,
+        "final_decision": {
+            "label": final_label,
+            "score": combined_score,
+        },
         "raw_quote": quote_data,
         "summary": summary,
         "disclaimer": "This output is for informational and educational purposes only and is not financial advice.",
     }
+
 
 
 
