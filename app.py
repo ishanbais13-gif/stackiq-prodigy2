@@ -8,11 +8,11 @@ from data_fetcher import get_quote, get_candles
 
 app = FastAPI(
     title="StackIQ API",
-    version="0.3.0",
-    description="Backend for AI-powered stock analysis (Day 3: prediction v1).",
+    version="0.4.0",
+    description="Backend for AI-powered stock analysis (Day 4: enhanced prediction).",
 )
 
-# Allow everything for now (you can tighten later)
+# CORS – open for now, tighten later when you have a frontend domain
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,7 +30,7 @@ def root():
             "/health",
             "/quote/{symbol}",
             "/candles/{symbol}?resolution=D&days=30",
-            "/predict/{symbol}?budget=...&risk=...",
+            "/predict/{symbol}?budget=...&risk=...&fractional=...",
         ],
     }
 
@@ -43,7 +43,7 @@ def health():
     return {
         "status": "ok",
         "message": "StackIQ backend is running",
-        "engine_version": "v1-predict-quote-only",
+        "engine_version": "v1.1-predict-quote-only-enhanced",
     }
 
 
@@ -111,6 +111,32 @@ def _risk_allocation_factor(risk: str) -> float:
     return 0.5  # medium = 50%
 
 
+def _risk_sl_tp(risk: str) -> tuple[float, float]:
+    """
+    Stop-loss and take-profit percents based on risk profile.
+
+    Returns (stop_loss_pct, take_profit_pct) as negative / positive percentages.
+    Example: (-5.0, 10.0) means -5% stop, +10% target.
+    """
+    if risk == "low":
+        return -5.0, 10.0
+    if risk == "high":
+        return -15.0, 30.0
+    # medium
+    return -10.0, 20.0
+
+
+def _position_size_label(allocation_ratio: float) -> str:
+    """
+    Describe how aggressive the position size is relative to total budget.
+    """
+    if allocation_ratio <= 0.3:
+        return "small"
+    if allocation_ratio <= 0.6:
+        return "medium"
+    return "aggressive"
+
+
 def _build_signal(change_pct: Optional[float]) -> dict:
     """
     Very simple rule-based signal using today's percent change.
@@ -121,18 +147,17 @@ def _build_signal(change_pct: Optional[float]) -> dict:
     if change_pct is None:
         return {
             "label": "neutral",
-            "confidence": 50,
+            "score": 50,
             "reason": "No change percentage available; treating as neutral.",
         }
 
-    # Example rules (you can tweak these later):
     cp = change_pct
 
     # Big downward move -> possible dip, but also risky
     if cp <= -4:
         return {
             "label": "speculative_dip_buy",
-            "confidence": 55,
+            "score": 55,
             "reason": "Price dropped sharply today (<= -4%). Could be a dip but carries higher risk.",
         }
 
@@ -140,7 +165,7 @@ def _build_signal(change_pct: Optional[float]) -> dict:
     if -4 < cp < 0:
         return {
             "label": "cautious_buy",
-            "confidence": 60,
+            "score": 60,
             "reason": "Slightly down today; could be a mild discount if fundamentals are strong.",
         }
 
@@ -148,7 +173,7 @@ def _build_signal(change_pct: Optional[float]) -> dict:
     if 0 <= cp <= 2:
         return {
             "label": "steady_buy",
-            "confidence": 65,
+            "score": 65,
             "reason": "Small positive move (0–2%). Stable day; reasonable time to scale in.",
         }
 
@@ -156,7 +181,7 @@ def _build_signal(change_pct: Optional[float]) -> dict:
     if 2 < cp <= 5:
         return {
             "label": "light_buy_or_wait",
-            "confidence": 55,
+            "score": 55,
             "reason": "Strong green day (2–5%). Momentum is up; consider smaller size or wait for a pullback.",
         }
 
@@ -164,16 +189,48 @@ def _build_signal(change_pct: Optional[float]) -> dict:
     if cp > 5:
         return {
             "label": "wait_for_pullback",
-            "confidence": 60,
+            "score": 60,
             "reason": "Very strong move (>5%). Often better to wait for a pullback instead of chasing.",
         }
 
     # Fallback
     return {
         "label": "neutral",
-        "confidence": 50,
+        "score": 50,
         "reason": "No strong edge detected based on today's move alone.",
     }
+
+
+def _build_summary(
+    symbol: str,
+    price: float,
+    change_pct: Optional[float],
+    risk_profile: str,
+    allocation_dollars: float,
+    shares_int: int,
+    shares_frac: Optional[float],
+    fractional: bool,
+    signal_label: str,
+):
+    symbol = symbol.upper()
+    direction_text = "flat"
+    if change_pct is not None:
+        if change_pct > 1:
+            direction_text = "up"
+        elif change_pct < -1:
+            direction_text = "down"
+
+    if fractional and shares_frac and shares_frac > 0:
+        size_text = f"about {shares_frac:.2f} shares"
+    else:
+        size_text = f"{shares_int} shares" if shares_int > 0 else "no shares"
+
+    return (
+        f"{symbol} is trading around ${price:.2f} today and is {direction_text} on the session. "
+        f"Given your {risk_profile} risk profile, this engine would allocate roughly "
+        f"${allocation_dollars:.2f} into this trade, which corresponds to {size_text}. "
+        f"The current signal is '{signal_label}'."
+    )
 
 
 @app.get("/predict/{symbol}")
@@ -181,16 +238,21 @@ def predict(
     symbol: str,
     budget: float = Query(..., gt=0, description="Total amount of money to allocate (in dollars)."),
     risk: Optional[str] = Query("medium", description="Risk level: low, medium, or high."),
+    fractional: bool = Query(
+        False,
+        description="If true, allow fractional shares in the position size calculation.",
+    ),
 ):
     """
-    v1 prediction endpoint using ONLY real-time quote data.
+    v1.1 prediction endpoint using ONLY real-time quote data.
 
     It:
     - pulls the latest quote
     - computes today's percent change
     - decides how much of the budget to risk based on risk profile
-    - computes how many shares that buys
-    - returns a simple rule-based signal + explanation
+    - computes how many shares that buys (integer and optional fractional)
+    - suggests basic stop-loss and take-profit levels
+    - returns a simple rule-based signal + explanation + summary
 
     NOTE: This is NOT financial advice. It's a demo logic engine
     you can tweak and improve over time.
@@ -222,18 +284,46 @@ def predict(
     alloc_factor = _risk_allocation_factor(norm_risk)
 
     max_allocation = budget * alloc_factor
-    shares = floor(max_allocation / current_price) if current_price > 0 else 0
-    estimated_cost = shares * current_price
+    allocation_ratio = max_allocation / budget if budget > 0 else 0.0
+    size_label = _position_size_label(allocation_ratio)
+
+    # Integer shares (for non-fractional mode)
+    shares_int = floor(max_allocation / current_price) if current_price > 0 else 0
+
+    # Fractional shares (optional)
+    shares_frac = None
+    if fractional and current_price > 0:
+        shares_frac = max_allocation / current_price
+
+    # Cost if using integer shares only
+    estimated_cost_int = shares_int * current_price
 
     signal = _build_signal(change_pct)
 
-    # Edge case: budget too small to buy even 1 share
-    if shares == 0:
+    # Edge case: budget too small to buy even 1 share and fractional not allowed
+    if shares_int == 0 and not fractional:
         signal = {
             "label": "budget_too_small",
-            "confidence": 100,
+            "score": 100,
             "reason": "Budget and risk level are too low to buy even 1 share at the current price.",
         }
+
+    # Stop-loss / take-profit levels based on risk
+    sl_pct, tp_pct = _risk_sl_tp(norm_risk)
+    stop_loss_price = current_price * (1 + sl_pct / 100.0)
+    take_profit_price = current_price * (1 + tp_pct / 100.0)
+
+    summary = _build_summary(
+        symbol=symbol,
+        price=current_price,
+        change_pct=change_pct,
+        risk_profile=norm_risk,
+        allocation_dollars=max_allocation,
+        shares_int=shares_int,
+        shares_frac=shares_frac,
+        fractional=fractional,
+        signal_label=signal["label"],
+    )
 
     return {
         "symbol": symbol.upper(),
@@ -242,14 +332,26 @@ def predict(
         "budget": budget,
         "risk_profile": norm_risk,
         "allocation": {
+            "allocation_factor": alloc_factor,
+            "position_size_label": size_label,
             "max_allocation": max_allocation,
-            "shares": shares,
-            "estimated_cost": estimated_cost,
+            "shares_integer": shares_int,
+            "shares_fractional": shares_frac,
+            "estimated_cost_integer": estimated_cost_int,
+            "fractional_mode": fractional,
+        },
+        "risk_management": {
+            "stop_loss_pct": sl_pct,
+            "take_profit_pct": tp_pct,
+            "stop_loss_price": stop_loss_price,
+            "take_profit_price": take_profit_price,
         },
         "signal": signal,
         "raw_quote": quote_data,
+        "summary": summary,
         "disclaimer": "This output is for informational and educational purposes only and is not financial advice.",
     }
+
 
 
 
