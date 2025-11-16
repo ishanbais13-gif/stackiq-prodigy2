@@ -1,400 +1,525 @@
-from math import floor
-from typing import Optional
+import os
+from enum import Enum
+from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-from data_fetcher import get_quote, get_candles
-from indicators import compute_indicators
+from data_fetcher import get_quote, get_candles  # uses Finnhub only
 
-app = FastAPI(
-    title="StackIQ API",
-    version="0.5.0",
-    description="Backend for AI-powered stock analysis (Day 5: indicators + combined decision).",
-)
+app = FastAPI(title="StackIQ API", version="1.0.0")
 
-# CORS – open for now, tighten later when you have a frontend domain
+# --- CORS (so your frontend / test tools can hit this cleanly) ---
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # you can lock this down later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+DISCLAIMER_TEXT = (
+    "This output is for informational and educational purposes only and is not financial advice."
+)
+
+
+# --- Risk profile enum & models ---
+
+class RiskProfile(str, Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+
+
+class BatchPredictRequest(BaseModel):
+    symbols: List[str]
+    budget: float
+    risk: RiskProfile = RiskProfile.medium
+    fractional: bool = True
+
+
+# --- Utility: indicators + signals ------------------------------------------------
+
+
+def compute_indicators(candles: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compute some basic indicators from Finnhub candles.
+    candles is expected to be a dict with keys:
+    - c: list of close prices
+    - h: list of highs
+    - l: list of lows
+    - o: list of opens
+    - v: list of volume (optional)
+    - t: list of timestamps
+    """
+    closes = candles.get("c") or []
+    highs = candles.get("h") or []
+    lows = candles.get("l") or []
+    volumes = candles.get("v") or []
+    timestamps = candles.get("t") or []
+
+    if not closes or len(closes) < 5:
+        return {
+            "rsi": None,
+            "ema_fast": None,
+            "ema_slow": None,
+            "macd_hist": None,
+            "volatility_score_numeric": None,
+            "volatility_label": "unknown",
+            "volume_spike": False,
+            "indicator_score": 0,
+            "indicator_trend_label": "unknown",
+            "day_range_pct": None,
+            "base_change_pct": None,
+            "prev_close": None,
+        }
+
+    # basic stats
+    last_close = closes[-1]
+    prev_close = closes[-2] if len(closes) >= 2 else last_close
+
+    day_range = (max(highs[-1], last_close) - min(lows[-1], last_close)) if highs and lows else 0
+    day_range_pct = (day_range / last_close * 100) if last_close else 0
+    base_change_pct = (last_close - prev_close) / prev_close * 100 if prev_close else 0
+
+    # simple EMA
+    def ema(values: List[float], period: int) -> Optional[float]:
+        if len(values) < period:
+            return None
+        k = 2 / (period + 1)
+        ema_val = values[0]
+        for price in values[1:]:
+            ema_val = price * k + ema_val * (1 - k)
+        return ema_val
+
+    ema_fast = ema(closes, 10)  # short EMA
+    ema_slow = ema(closes, 21)  # long EMA
+
+    macd_hist = None
+    if ema_fast is not None and ema_slow is not None:
+        macd = ema_fast - ema_slow
+        macd_signal = macd * 0.8  # fake simple signal
+        macd_hist = macd - macd_signal
+
+    # simple volatility: std dev of last N closes
+    import math
+
+    window = closes[-20:] if len(closes) >= 20 else closes
+    mean_price = sum(window) / len(window)
+    variance = sum((p - mean_price) ** 2 for p in window) / len(window)
+    std_dev = math.sqrt(variance) if len(window) > 1 else 0
+    vol_pct = (std_dev / last_close * 100) if last_close else 0
+
+    if vol_pct < 1.5:
+        vol_label = "low"
+        vol_score = 20
+    elif vol_pct < 3:
+        vol_label = "medium"
+        vol_score = 40
+    else:
+        vol_label = "high"
+        vol_score = 60
+
+    # volume spike (if we have volume)
+    volume_spike = False
+    if volumes and len(volumes) >= 5:
+        recent_vol = volumes[-1]
+        avg_vol = sum(volumes[-5:]) / 5
+        if avg_vol > 0 and recent_vol > 1.5 * avg_vol:
+            volume_spike = True
+
+    # indicator score: blend volatility and trend
+    indicator_score = 0
+    trend_label = "neutral_or_choppy"
+
+    if ema_fast is not None and ema_slow is not None:
+        if ema_fast > ema_slow and base_change_pct > 0:
+            indicator_score += 25
+            trend_label = "bullish"
+        elif ema_fast < ema_slow and base_change_pct < 0:
+            indicator_score += 10
+            trend_label = "bearish"
+
+    indicator_score += vol_score
+    if volume_spike:
+        indicator_score += 5
+
+    # naive RSI (using price changes)
+    gains = []
+    losses = []
+    for i in range(1, len(window)):
+        diff = window[i] - window[i - 1]
+        if diff >= 0:
+            gains.append(diff)
+        else:
+            losses.append(-diff)
+    avg_gain = sum(gains) / len(gains) if gains else 0.0001
+    avg_loss = sum(losses) / len(losses) if losses else 0.0001
+    rs = avg_gain / avg_loss if avg_loss != 0 else 100
+    rsi = 100 - (100 / (1 + rs))
+
+    return {
+        "rsi": round(rsi, 2),
+        "ema_fast": round(ema_fast, 4) if ema_fast is not None else None,
+        "ema_slow": round(ema_slow, 4) if ema_slow is not None else None,
+        "macd_hist": round(macd_hist, 6) if macd_hist is not None else None,
+        "volatility_score_numeric": round(vol_pct, 4),
+        "volatility_label": vol_label,
+        "volume_spike": volume_spike,
+        "indicator_score": round(indicator_score, 2),
+        "indicator_trend_label": trend_label,
+        "day_range_pct": round(day_range_pct, 4),
+        "base_change_pct": round(base_change_pct, 4),
+        "prev_close": round(prev_close, 2),
+    }
+
+
+def get_allocation_factor(risk: RiskProfile) -> float:
+    if risk == RiskProfile.low:
+        return 0.3
+    if risk == RiskProfile.medium:
+        return 0.5
+    return 0.75  # high risk
+
+
+def get_risk_mgmt_levels(price: float, risk: RiskProfile) -> Dict[str, Any]:
+    # base settings
+    if risk == RiskProfile.low:
+        sl_pct, tp_pct = -5, 10
+    elif risk == RiskProfile.medium:
+        sl_pct, tp_pct = -10, 20
+    else:  # high
+        sl_pct, tp_pct = -15, 30
+
+    stop_loss_price = price * (1 + sl_pct / 100.0)
+    take_profit_price = price * (1 + tp_pct / 100.0)
+
+    return {
+        "stop_loss_pct": sl_pct,
+        "take_profit_pct": tp_pct,
+        "stop_loss_price": round(stop_loss_price, 3),
+        "take_profit_price": round(take_profit_price, 3),
+    }
+
+
+def build_signal(
+    change_pct_today: float,
+    indicators: Dict[str, Any],
+    risk: RiskProfile,
+) -> Dict[str, Any]:
+    """
+    Combine basic daily change + indicators into a signal label & score.
+    """
+    base_change = indicators.get("base_change_pct") or change_pct_today
+    indicator_score = indicators.get("indicator_score") or 0
+    vol_label = indicators.get("volatility_label") or "unknown"
+    rsi = indicators.get("rsi")
+
+    score = 50  # start in the middle
+    reason_bits = []
+
+    # Price action contribution
+    if base_change > 2:
+        score += 10
+        reason_bits.append("price is having a strong up day")
+    elif base_change < -2:
+        score -= 10
+        reason_bits.append("price is having a weak/down day")
+
+    # Trend / indicator score
+    if indicator_score >= 60:
+        score += 10
+        reason_bits.append("technicals look strong")
+    elif indicator_score <= 30:
+        score -= 10
+        reason_bits.append("technicals look soft or mixed")
+
+    # RSI contribution
+    if rsi is not None:
+        if 40 <= rsi <= 60:
+            score += 5
+            reason_bits.append("RSI is in a healthy neutral zone")
+        elif rsi < 30:
+            score += 5
+            reason_bits.append("RSI suggests the stock may be oversold")
+        elif rsi > 70:
+            score -= 5
+            reason_bits.append("RSI suggests the stock may be overbought")
+
+    # Volatility risk adjustment
+    if vol_label == "high":
+        score -= 5
+        reason_bits.append("volatility is high, so risk is elevated")
+    elif vol_label == "low":
+        score += 5
+        reason_bits.append("volatility is low/controlled")
+
+    # Risk profile adjustment (more aggressive for high risk, more conservative for low)
+    if risk == RiskProfile.low:
+        score -= 5
+        reason_bits.append("using a conservative tilt for low risk profile")
+    elif risk == RiskProfile.high:
+        score += 5
+        reason_bits.append("using an aggressive tilt for high risk profile")
+
+    # clamp score
+    score = max(0, min(100, score))
+
+    # label mapping
+    if score >= 80:
+        label = "strong_buy"
+    elif score >= 60:
+        label = "steady_buy"
+    elif score >= 50:
+        label = "cautious_buy"
+    elif score >= 40:
+        label = "speculative_dip_buy"
+    else:
+        label = "hold"
+
+    reason = " ".join(reason_bits) if reason_bits else "Mixed signals; no strong edge either way."
+
+    return {
+        "label": label,
+        "score": round(score, 1),
+        "reason": reason,
+    }
+
+
+# --- Core prediction engine (single symbol) --------------------------------------
+
+
+def run_prediction(
+    symbol: str,
+    budget: float,
+    risk: RiskProfile,
+    fractional: bool,
+) -> Dict[str, Any]:
+    symbol = symbol.upper().strip()
+    if budget <= 0:
+        raise HTTPException(status_code=400, detail="Budget must be positive.")
+
+    # 1) Fetch live quote & candles
+    quote = get_quote(symbol)
+    if not quote or not isinstance(quote, dict) or quote.get("c") in (None, 0):
+        raise HTTPException(status_code=502, detail=f"Failed to fetch quote for {symbol} from Finnhub.")
+
+    price = float(quote.get("c", 0))
+    prev_close = float(quote.get("pc", 0) or 0)
+    change_pct_today = 0.0
+    if prev_close:
+        change_pct_today = (price - prev_close) / prev_close * 100.0
+
+    candles = get_candles(symbol, resolution="D", days=30)
+
+    # 2) Compute indicators
+    indicators = compute_indicators(candles)
+
+    # 3) Position sizing / allocation
+    alloc_factor = get_allocation_factor(risk)
+    max_allocation = budget * alloc_factor
+
+    if price <= 0:
+        raise HTTPException(status_code=400, detail="Price is invalid (<= 0).")
+
+    if fractional:
+        shares_fractional = max_allocation / price
+        shares_integer = int(max_allocation // price)
+        estimated_cost = shares_fractional * price
+    else:
+        shares_integer = int(max_allocation // price)
+        shares_fractional = float(shares_integer)
+        estimated_cost = shares_integer * price
+
+    allocation = {
+        "allocation_factor": alloc_factor,
+        "position_size_label": "conservative" if risk == RiskProfile.low else ("medium" if risk == RiskProfile.medium else "aggressive"),
+        "max_allocation": round(max_allocation, 2),
+        "shares_integer": shares_integer,
+        "shares_fractional": round(shares_fractional, 6),
+        "estimated_cost_integer": round(estimated_cost, 2),
+        "fractional_mode": fractional,
+    }
+
+    # 4) Risk management levels
+    risk_mgmt = get_risk_mgmt_levels(price, risk)
+
+    # 5) Build signal + final decision
+    signal = build_signal(change_pct_today, indicators, risk)
+
+    # final decision is basically the same but we keep a separate key in case we extend it later
+    final_decision = {
+        "label": signal["label"],
+        "score": signal["score"],
+    }
+
+    # 6) Summary text
+    risk_label = {
+        RiskProfile.low: "low",
+        RiskProfile.medium: "medium",
+        RiskProfile.high: "high",
+    }[risk]
+
+    if allocation["shares_integer"] == 0 and not fractional:
+        summary = (
+            f"{symbol} is trading around ${price:.2f} today. With your {risk_label} risk profile and "
+            f"a budget of ${budget:.2f}, this engine cannot buy even 1 full share. "
+            f"You may want to enable fractional mode or increase the budget."
+        )
+    else:
+        summary = (
+            f"{symbol} is trading around ${price:.2f} today and is "
+            f"{'up' if change_pct_today >= 0 else 'down'} on the session. "
+            f"Given your {risk_label} risk profile, this engine would allocate roughly "
+            f"${allocation['max_allocation']:.2f} into this trade, which corresponds to about "
+            f"{allocation['shares_fractional']:.2f} shares. "
+            f"The current decision is '{final_decision['label']}'."
+        )
+
+    return {
+        "symbol": symbol,
+        "price": round(price, 2),
+        "change_pct_today": round(change_pct_today, 4),
+        "budget": round(budget, 2),
+        "risk_profile": risk_label,
+        "allocation": allocation,
+        "risk_management": risk_mgmt,
+        "signal": signal,
+        "indicators": indicators,
+        "final_decision": final_decision,
+        "raw_quote": {
+            "c": quote.get("c"),
+            "d": quote.get("d"),
+            "dp": quote.get("dp"),
+            "h": quote.get("h"),
+            "l": quote.get("l"),
+            "o": quote.get("o"),
+            "pc": quote.get("pc"),
+            "t": quote.get("t"),
+        },
+        "summary": summary,
+        "disclaimer": DISCLAIMER_TEXT,
+    }
+
+
+# --- ROUTES ----------------------------------------------------------------------
+
 
 @app.get("/")
-def root():
+async def root():
     return {
         "message": "StackIQ backend is live.",
         "endpoints": [
             "/health",
             "/quote/{symbol}",
             "/candles/{symbol}?resolution=D&days=30",
-            "/predict/{symbol}?budget=...&risk=...&fractional=...",
+            "/predict/{symbol}?budget=...&risk=...",
+            "/predict/batch",
         ],
     }
 
 
 @app.get("/health")
-def health():
-    """
-    Simple health check so you know the API is alive.
-    """
-    return {
-        "status": "ok",
-        "message": "StackIQ backend is running",
-        "engine_version": "v1.2-predict-quote-only-with-indicators",
-    }
+async def health():
+    return {"status": "ok", "mode": "base", "engine_ready": True, "message": "App is running"}
 
 
 @app.get("/quote/{symbol}")
-def quote(symbol: str):
-    """
-    Return real-time quote data from Finnhub.
-    """
-    data = get_quote(symbol)
-    if data is None:
-        raise HTTPException(
-            status_code=502,
-            detail="Failed to fetch quote from Finnhub. Check API key and symbol.",
-        )
-    return {
-        "symbol": symbol.upper(),
-        "quote": data,
-    }
+async def quote(symbol: str):
+    data = get_quote(symbol.upper().strip())
+    if not data:
+        raise HTTPException(status_code=502, detail="Failed to fetch quote from Finnhub.")
+    return {"symbol": symbol.upper().strip(), "quote": data}
 
 
 @app.get("/candles/{symbol}")
-def candles(symbol: str, resolution: str = "D", days: int = 30):
-    """
-    Pass-through candles endpoint.
-
-    NOTE: On your current Finnhub plan, this will likely return an error payload
-    in data.error / data.http_status for /stock/candle. We keep it for future upgrade.
-    """
-    try:
-        candles_data = get_candles(symbol, resolution=resolution, days=days)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    if candles_data is None:
-        raise HTTPException(
-            status_code=502,
-            detail="Failed to fetch candles from Finnhub. Check API key and symbol.",
-        )
-
+async def candles(
+    symbol: str,
+    resolution: str = Query("D", description="Finnhub resolution (e.g., 1, 5, 15, 30, 60, D, W, M)"),
+    days: int = Query(30, ge=1, le=365),
+):
+    data = get_candles(symbol.upper().strip(), resolution=resolution, days=days)
+    if not data:
+        raise HTTPException(status_code=502, detail="Failed to fetch candles from Finnhub.")
     return {
-        "symbol": symbol.upper(),
+        "symbol": symbol.upper().strip(),
         "resolution": resolution,
         "days": days,
-        "data": candles_data,
+        "data": data,
     }
-
-
-def _normalize_risk(risk: Optional[str]) -> str:
-    if not risk:
-        return "medium"
-    risk = risk.lower().strip()
-    if risk not in ("low", "medium", "high"):
-        return "medium"
-    return risk
-
-
-def _risk_allocation_factor(risk: str) -> float:
-    """
-    How much of the budget to put into a single position.
-    You can tweak these numbers later.
-    """
-    if risk == "low":
-        return 0.25  # 25% of budget
-    if risk == "high":
-        return 0.75  # 75% of budget
-    return 0.5  # medium = 50%
-
-
-def _risk_sl_tp(risk: str) -> tuple[float, float]:
-    """
-    Stop-loss and take-profit percents based on risk profile.
-
-    Returns (stop_loss_pct, take_profit_pct) as negative / positive percentages.
-    Example: (-5.0, 10.0) means -5% stop, +10% target.
-    """
-    if risk == "low":
-        return -5.0, 10.0
-    if risk == "high":
-        return -15.0, 30.0
-    # medium
-    return -10.0, 20.0
-
-
-def _position_size_label(allocation_ratio: float) -> str:
-    """
-    Describe how aggressive the position size is relative to total budget.
-    """
-    if allocation_ratio <= 0.3:
-        return "small"
-    if allocation_ratio <= 0.6:
-        return "medium"
-    return "aggressive"
-
-
-def _build_signal(change_pct: Optional[float]) -> dict:
-    """
-    Very simple rule-based signal using today's percent change.
-
-    This is v1. Later we’ll replace / extend this with
-    indicators, history, and ML models.
-    """
-    if change_pct is None:
-        return {
-            "label": "neutral",
-            "score": 50,
-            "reason": "No change percentage available; treating as neutral.",
-        }
-
-    cp = change_pct
-
-    # Big downward move -> possible dip, but also risky
-    if cp <= -4:
-        return {
-            "label": "speculative_dip_buy",
-            "score": 55,
-            "reason": "Price dropped sharply today (<= -4%). Could be a dip but carries higher risk.",
-        }
-
-    # Mild red day
-    if -4 < cp < 0:
-        return {
-            "label": "cautious_buy",
-            "score": 60,
-            "reason": "Slightly down today; could be a mild discount if fundamentals are strong.",
-        }
-
-    # Flat-ish
-    if 0 <= cp <= 2:
-        return {
-            "label": "steady_buy",
-            "score": 65,
-            "reason": "Small positive move (0–2%). Stable day; reasonable time to scale in.",
-        }
-
-    # Strong green day – might be chasing
-    if 2 < cp <= 5:
-        return {
-            "label": "light_buy_or_wait",
-            "score": 55,
-            "reason": "Strong green day (2–5%). Momentum is up; consider smaller size or wait for a pullback.",
-        }
-
-    # Huge spike – usually better to wait
-    if cp > 5:
-        return {
-            "label": "wait_for_pullback",
-            "score": 60,
-            "reason": "Very strong move (>5%). Often better to wait for a pullback instead of chasing.",
-        }
-
-    # Fallback
-    return {
-        "label": "neutral",
-        "score": 50,
-        "reason": "No strong edge detected based on today's move alone.",
-    }
-
-
-def _build_summary(
-    symbol: str,
-    price: float,
-    change_pct: Optional[float],
-    risk_profile: str,
-    allocation_dollars: float,
-    shares_int: int,
-    shares_frac: Optional[float],
-    fractional: bool,
-    decision_label: str,
-):
-    symbol = symbol.upper()
-    direction_text = "flat"
-    if change_pct is not None:
-        if change_pct > 1:
-            direction_text = "up"
-        elif change_pct < -1:
-            direction_text = "down"
-
-    if fractional and shares_frac and shares_frac > 0:
-        size_text = f"about {shares_frac:.2f} shares"
-    else:
-        size_text = f"{shares_int} shares" if shares_int > 0 else "no shares"
-
-    return (
-        f"{symbol} is trading around ${price:.2f} today and is {direction_text} on the session. "
-        f"Given your {risk_profile} risk profile, this engine would allocate roughly "
-        f"${allocation_dollars:.2f} into this trade, which corresponds to {size_text}. "
-        f"The current decision is '{decision_label}'."
-    )
-
-
-def _final_decision_label(score: float) -> str:
-    """
-    Map a 0–100 score to a user-facing decision label.
-    """
-    if score >= 85:
-        return "strong_buy"
-    if score >= 70:
-        return "steady_buy"
-    if score >= 55:
-        return "cautious_buy"
-    if score >= 40:
-        return "hold"
-    return "avoid_or_reduce"
 
 
 @app.get("/predict/{symbol}")
-def predict(
+async def predict(
     symbol: str,
-    budget: float = Query(..., gt=0, description="Total amount of money to allocate (in dollars)."),
-    risk: Optional[str] = Query("medium", description="Risk level: low, medium, or high."),
-    fractional: bool = Query(
-        False,
-        description="If true, allow fractional shares in the position size calculation.",
-    ),
+    budget: float = Query(..., gt=0),
+    risk: RiskProfile = RiskProfile.medium,
+    fractional: bool = False,
 ):
     """
-    v1.2 prediction endpoint using ONLY real-time quote data.
-
-    It:
-    - pulls the latest quote
-    - computes today's percent change
-    - computes pseudo-technical indicators
-    - combines indicator score + price-action signal into a final decision
-    - decides how much of the budget to risk based on risk profile
-    - computes how many shares that buys (integer and optional fractional)
-    - suggests basic stop-loss and take-profit levels
-    - returns signal, indicators, and summary
-
-    NOTE: This is NOT financial advice. It's demo logic you can tweak and improve.
+    Single-symbol prediction using live Finnhub data.
     """
-    quote_data = get_quote(symbol)
-    if quote_data is None:
-        raise HTTPException(
-            status_code=502,
-            detail="Failed to fetch quote from Finnhub. Check API key and symbol.",
-        )
+    return run_prediction(symbol, budget, risk, fractional)
 
-    current_price = quote_data.get("c") or quote_data.get("pc")
-    if not current_price or current_price <= 0:
-        raise HTTPException(
-            status_code=502,
-            detail="Quote data does not contain a usable current price.",
-        )
 
-    # Finnhub often includes dp (percent change), but we can also compute it
-    change_pct = quote_data.get("dp")
-    if change_pct is None:
-        prev_close = quote_data.get("pc")
-        if prev_close and prev_close > 0:
-            change_pct = ((current_price - prev_close) / prev_close) * 100
-        else:
-            change_pct = None
+@app.post("/predict/batch")
+async def predict_batch(payload: BatchPredictRequest):
+    """
+    Multi-symbol prediction. Example body:
 
-    norm_risk = _normalize_risk(risk)
-    alloc_factor = _risk_allocation_factor(norm_risk)
+    {
+      "symbols": ["NVDA", "SOFI", "OPEN"],
+      "budget": 500,
+      "risk": "medium",
+      "fractional": true
+    }
+    """
+    if not payload.symbols:
+        raise HTTPException(status_code=400, detail="symbols list cannot be empty.")
 
-    max_allocation = budget * alloc_factor
-    allocation_ratio = max_allocation / budget if budget > 0 else 0.0
-    size_label = _position_size_label(allocation_ratio)
+    results: Dict[str, Any] = {}
 
-    # Integer shares (for non-fractional mode)
-    shares_int = floor(max_allocation / current_price) if current_price > 0 else 0
+    for raw_symbol in payload.symbols:
+        sym = raw_symbol.upper().strip()
+        if not sym:
+            continue
 
-    # Fractional shares (optional)
-    shares_frac = None
-    if fractional and current_price > 0:
-        shares_frac = max_allocation / current_price
+        try:
+            result = run_prediction(sym, payload.budget, payload.risk, payload.fractional)
+            results[sym] = result
+        except HTTPException as e:
+            # keep the error in the payload instead of failing the whole batch
+            results[sym] = {"error": e.detail}
 
-    # Cost if using integer shares only
-    estimated_cost_int = shares_int * current_price
+    # Rank symbols that have valid final_decision scores
+    scored: List[Dict[str, Any]] = []
+    for sym, data in results.items():
+        if isinstance(data, dict) and "final_decision" in data:
+            score = data["final_decision"].get("score", 0)
+            scored.append({"symbol": sym, "score": score, "data": data})
 
-    # Base signal from price action
-    signal = _build_signal(change_pct)
+    scored.sort(key=lambda x: x["score"], reverse=True)
 
-    # Indicators based on quote
-    indicators = compute_indicators(
-        price=current_price,
-        change_pct=change_pct,
-        quote=quote_data,
-    )
-
-    # Combine scores
-    base_score = signal.get("score", 50)
-    indicator_score = indicators.get("indicator_score", 50)
-
-    combined_score = (base_score + indicator_score) / 2.0
-
-    # Edge case: budget too small to buy even 1 share and fractional not allowed
-    insufficient_budget = False
-    if shares_int == 0 and not fractional:
-        insufficient_budget = True
-        signal = {
-            "label": "budget_too_small",
-            "score": 100,
-            "reason": "Budget and risk level are too low to buy even 1 share at the current price.",
+    top_pick = None
+    if scored:
+        best = scored[0]
+        top_data = best["data"]
+        top_pick = {
+            "symbol": best["symbol"],
+            "score": best["score"],
+            "label": top_data["final_decision"].get("label"),
+            "summary": top_data.get("summary"),
         }
-        combined_score = signal["score"]
-
-    final_label = "insufficient_budget" if insufficient_budget else _final_decision_label(
-        combined_score
-    )
-
-    # Stop-loss / take-profit levels based on risk
-    sl_pct, tp_pct = _risk_sl_tp(norm_risk)
-    stop_loss_price = current_price * (1 + sl_pct / 100.0)
-    take_profit_price = current_price * (1 + tp_pct / 100.0)
-
-    summary = _build_summary(
-        symbol=symbol,
-        price=current_price,
-        change_pct=change_pct,
-        risk_profile=norm_risk,
-        allocation_dollars=max_allocation,
-        shares_int=shares_int,
-        shares_frac=shares_frac,
-        fractional=fractional,
-        decision_label=final_label,
-    )
 
     return {
-        "symbol": symbol.upper(),
-        "price": current_price,
-        "change_pct_today": change_pct,
-        "budget": budget,
-        "risk_profile": norm_risk,
-        "allocation": {
-            "allocation_factor": alloc_factor,
-            "position_size_label": size_label,
-            "max_allocation": max_allocation,
-            "shares_integer": shares_int,
-            "shares_fractional": shares_frac,
-            "estimated_cost_integer": estimated_cost_int,
-            "fractional_mode": fractional,
-        },
-        "risk_management": {
-            "stop_loss_pct": sl_pct,
-            "take_profit_pct": tp_pct,
-            "stop_loss_price": stop_loss_price,
-            "take_profit_price": take_profit_price,
-        },
-        "signal": signal,
-        "indicators": indicators,
-        "final_decision": {
-            "label": final_label,
-            "score": combined_score,
-        },
-        "raw_quote": quote_data,
-        "summary": summary,
-        "disclaimer": "This output is for informational and educational purposes only and is not financial advice.",
+        "symbols": payload.symbols,
+        "results": results,
+        "top_pick": top_pick,
+        "disclaimer": DISCLAIMER_TEXT,
     }
+
 
 
 
