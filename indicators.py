@@ -1,299 +1,155 @@
-# indicators.py
-from typing import List, Optional, Tuple
+"""
+Lightweight technical indicator engine for StackIQ.
 
-Number = float
+IMPORTANT:
+Because of Finnhub plan limits (403 on /stock/candle), this module is designed
+to work ONLY with the real-time quote data you already have:
 
+    c  = current price
+    pc = previous close
+    dp = percent change today
+    d  = dollar change today
+    h  = intraday high
+    l  = intraday low
+    o  = intraday open
 
-def sma(values: List[Number], period: int) -> List[Optional[Number]]:
-    """Simple moving average."""
-    result: List[Optional[Number]] = []
-    window_sum = 0.0
-    window: List[Number] = []
+These are NOT "true" multi-day RSI/EMA/MACD values. They are pseudo-indicators
+built from single-day behavior that are:
 
-    for v in values:
-        window.append(v)
-        window_sum += v
-        if len(window) > period:
-            window_sum -= window.pop(0)
+- deterministic
+- cheap
+- always available on your plan
+- good enough to rank stocks relative to each other
 
-        if len(window) < period:
-            result.append(None)
-        else:
-            result.append(window_sum / period)
-    return result
+You can replace this module with real multi-day indicators later when you have
+historical data access.
+"""
 
-
-def _ema(values: List[Number], period: int) -> List[Optional[Number]]:
-    """Exponential moving average helper."""
-    result: List[Optional[Number]] = []
-    if not values:
-        return [None] * 0
-
-    k = 2.0 / (period + 1.0)
-    ema_val: Optional[Number] = None
-    for v in values:
-        if ema_val is None:
-            ema_val = v
-        else:
-            ema_val = v * k + ema_val * (1.0 - k)
-        result.append(ema_val)
-    return result
+from typing import Any, Dict, Optional
 
 
-def rsi(values: List[Number], period: int = 14) -> List[Optional[Number]]:
-    """Relative Strength Index (simplified Wilder-style)."""
-    if len(values) < period + 1:
-        return [None] * len(values)
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
 
-    gains: List[Number] = [0.0]
-    losses: List[Number] = [0.0]
-    for i in range(1, len(values)):
-        diff = values[i] - values[i - 1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0.0)
-        else:
-            gains.append(0.0)
-            losses.append(-diff)
 
-    rsis: List[Optional[Number]] = [None] * len(values)
+def compute_indicators(
+    price: float,
+    change_pct: Optional[float],
+    quote: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Compute pseudo-technical indicators based on the current quote.
 
-    # First average
-    avg_gain = sum(gains[1 : period + 1]) / period
-    avg_loss = sum(losses[1 : period + 1]) / period
+    Returns a dict with:
+      - rsi
+      - ema_fast
+      - ema_slow
+      - macd_hist
+      - volatility_score_numeric
+      - volatility_label
+      - volume_spike (bool)
+      - indicator_score (0–100)
+      - indicator_trend_label
+    """
+    # ---------- Base inputs ----------
+    cp = change_pct if change_pct is not None else 0.0
 
-    if avg_loss == 0:
-        rsis[period] = 100.0
+    high = quote.get("h") or price
+    low = quote.get("l") or price
+    prev_close = quote.get("pc") or price
+
+    # Day range in %
+    day_range_pct = 0.0
+    if price > 0 and high is not None and low is not None:
+        day_range_pct = abs(high - low) / price * 100.0
+
+    # ---------- Pseudo RSI ----------
+    # Map today's percent change into a 0–100 scale.
+    # +10% -> ~100, -10% -> ~0, small moves -> around 50.
+    rsi = 50.0 + cp * 5.0
+    rsi = _clamp(rsi, 0.0, 100.0)
+
+    # ---------- Pseudo EMAs ----------
+    # These are NOT real EMAs. They are "tilted" prices that respond
+    # more or less strongly to today's move.
+    # This is enough to create a trend-like signal for ranking.
+    ema_fast = price * (1.0 + cp / 200.0)  # more sensitive
+    ema_slow = price * (1.0 + cp / 400.0)  # slower
+    macd_hist = ema_fast - ema_slow
+
+    # ---------- Volatility score ----------
+    # Combine absolute percent change and intraday range.
+    raw_vol = abs(cp) * 3.0 + day_range_pct  # simple linear combo
+    raw_vol = _clamp(raw_vol, 0.0, 100.0)
+
+    if raw_vol < 5:
+        vol_label = "low"
+    elif raw_vol < 15:
+        vol_label = "medium"
     else:
-        rs = avg_gain / avg_loss
-        rsis[period] = 100.0 - (100.0 / (1.0 + rs))
+        vol_label = "high"
 
-    # Wilder smoothing
-    for i in range(period + 1, len(values)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    # ---------- Volume spike (approximate) ----------
+    # We don't have real volume on the quote endpoint, so we approximate:
+    # big move or wide intraday range => likely high activity.
+    volume_spike = abs(cp) > 4.0 or day_range_pct > 8.0
 
-        if avg_loss == 0:
-            rsis[i] = 100.0
-        else:
-            rs = avg_gain / avg_loss
-            rsis[i] = 100.0 - (100.0 / (1.0 + rs))
+    # ---------- Indicator score ----------
+    # Start neutral and adjust based on RSI + direction + volatility
+    score = 50.0
 
-    return rsis
+    # RSI contribution
+    if 45 <= rsi <= 55:
+        score += 5  # healthy, balanced
+    elif 55 < rsi <= 70:
+        score += 10  # bullish momentum
+    elif rsi > 70:
+        score -= 5  # overbought zone
+    elif 30 <= rsi < 45:
+        score -= 5  # mild weakness
+    else:  # rsi < 30
+        score -= 10  # oversold / weak
 
+    # Direction contribution
+    if cp > 1.0:
+        score += 5
+    elif cp < -1.0:
+        score -= 5
 
-def atr(high: List[Number], low: List[Number], close: List[Number],
-        period: int = 14) -> List[Optional[Number]]:
-    """Average True Range."""
-    n = min(len(high), len(low), len(close))
-    if n == 0:
-        return []
+    # Volatility contribution: very high vol is risky
+    if vol_label == "high":
+        score -= 5
+    elif vol_label == "low":
+        score += 2
 
-    trs: List[Number] = []
-    for i in range(n):
-        if i == 0:
-            tr = high[i] - low[i]
-        else:
-            hl = high[i] - low[i]
-            hc = abs(high[i] - close[i - 1])
-            lc = abs(low[i] - close[i - 1])
-            tr = max(hl, hc, lc)
-        trs.append(tr)
+    score = _clamp(score, 0.0, 100.0)
 
-    # Simple moving average of TR as ATR
-    result: List[Optional[Number]] = []
-    window: List[Number] = []
-    window_sum = 0.0
-    for v in trs:
-        window.append(v)
-        window_sum += v
-        if len(window) > period:
-            window_sum -= window.pop(0)
-        if len(window) < period:
-            result.append(None)
-        else:
-            result.append(window_sum / period)
-    return result
+    # ---------- Trend label ----------
+    if score >= 80:
+        trend_label = "strong_bullish"
+    elif score >= 65:
+        trend_label = "bullish"
+    elif score >= 50:
+        trend_label = "slightly_bullish"
+    elif score >= 35:
+        trend_label = "neutral_or_choppy"
+    elif score >= 20:
+        trend_label = "bearish"
+    else:
+        trend_label = "strong_bearish"
 
+    return {
+        "rsi": rsi,
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "macd_hist": macd_hist,
+        "volatility_score_numeric": raw_vol,
+        "volatility_label": vol_label,
+        "volume_spike": volume_spike,
+        "indicator_score": score,
+        "indicator_trend_label": trend_label,
+        "day_range_pct": day_range_pct,
+        "base_change_pct": cp,
+        "prev_close": prev_close,
+    }
 
-def macd(values: List[Number],
-         fast: int = 12,
-         slow: int = 26,
-         signal: int = 9) -> Tuple[List[Optional[Number]],
-                                   List[Optional[Number]],
-                                   List[Optional[Number]]]:
-    """
-    MACD line, signal line, and histogram.
-    Uses EMA-based MACD implementation.
-    """
-    if not values:
-        return [], [], []
-
-    ema_fast = _ema(values, fast)
-    ema_slow = _ema(values, slow)
-
-    macd_line: List[Optional[Number]] = []
-    for f, s in zip(ema_fast, ema_slow):
-        if f is None or s is None:
-            macd_line.append(None)
-        else:
-            macd_line.append(f - s)
-
-    # Signal line is EMA of MACD line (ignoring initial None values)
-    clean_macd: List[Number] = []
-    for v in macd_line:
-        if v is not None:
-            clean_macd.append(v)
-
-    signal_line_partial = _ema(clean_macd, signal)
-    signal_line: List[Optional[Number]] = []
-    idx = 0
-    for v in macd_line:
-        if v is None:
-            signal_line.append(None)
-        else:
-            signal_line.append(signal_line_partial[idx])
-            idx += 1
-
-    hist: List[Optional[Number]] = []
-    for m, s in zip(macd_line, signal_line):
-        if m is None or s is None:
-            hist.append(None)
-        else:
-            hist.append(m - s)
-
-    return macd_line, signal_line, hist
-
-
-def bollinger_percent(values: List[Number],
-                      period: int = 20,
-                      num_std_up: float = 2.0,
-                      num_std_down: float = 2.0) -> List[Optional[Number]]:
-    """
-    Bollinger %B: (price - lower_band) / (upper_band - lower_band)
-    Returns values in [0, 1] when within the bands.
-    """
-    import math
-
-    result: List[Optional[Number]] = []
-    window: List[Number] = []
-
-    for v in values:
-        window.append(v)
-        if len(window) > period:
-            window.pop(0)
-
-        if len(window) < period:
-            result.append(None)
-            continue
-
-        mean = sum(window) / period
-        var = sum((x - mean) ** 2 for x in window) / period
-        std = math.sqrt(var)
-
-        upper = mean + num_std_up * std
-        lower = mean - num_std_down * std
-        rng = upper - lower
-        if rng == 0:
-            result.append(None)
-        else:
-            result.append((v - lower) / rng)
-    return result
-
-
-def dmi_adx(high: List[Number], low: List[Number], close: List[Number],
-            period: int = 14) -> Tuple[List[Optional[Number]],
-                                       List[Optional[Number]],
-                                       List[Optional[Number]]]:
-    """
-    Very simplified DMI / ADX implementation.
-    Returns +DI, -DI, ADX.
-    """
-    import math
-
-    n = min(len(high), len(low), len(close))
-    if n == 0:
-        return [], [], []
-
-    plus_dm: List[Number] = [0.0]
-    minus_dm: List[Number] = [0.0]
-    tr: List[Number] = [0.0]
-
-    for i in range(1, n):
-        up_move = high[i] - high[i - 1]
-        down_move = low[i - 1] - low[i]
-
-        if up_move > down_move and up_move > 0:
-            plus_dm.append(up_move)
-        else:
-            plus_dm.append(0.0)
-
-        if down_move > up_move and down_move > 0:
-            minus_dm.append(down_move)
-        else:
-            minus_dm.append(0.0)
-
-        tr_i = max(
-            high[i] - low[i],
-            abs(high[i] - close[i - 1]),
-            abs(low[i] - close[i - 1]),
-        )
-        tr.append(tr_i)
-
-    def smooth(series: List[Number]) -> List[Optional[Number]]:
-        out: List[Optional[Number]] = []
-        window_sum = 0.0
-        window: List[Number] = []
-        for v in series:
-            window.append(v)
-            window_sum += v
-            if len(window) > period:
-                window_sum -= window.pop(0)
-            if len(window) < period:
-                out.append(None)
-            else:
-                out.append(window_sum)
-        return out
-
-    tr_s = smooth(tr)
-    pdm_s = smooth(plus_dm)
-    mdm_s = smooth(minus_dm)
-
-    plus_di: List[Optional[Number]] = []
-    minus_di: List[Optional[Number]] = []
-    dx: List[Optional[Number]] = []
-
-    for t, p, m in zip(tr_s, pdm_s, mdm_s):
-        if t is None or t == 0:
-            plus_di.append(None)
-            minus_di.append(None)
-            dx.append(None)
-            continue
-
-        pdi = 100.0 * (p / t) if p is not None else None
-        mdi = 100.0 * (m / t) if m is not None else None
-
-        plus_di.append(pdi)
-        minus_di.append(mdi)
-
-        if pdi is None or mdi is None or (pdi + mdi) == 0:
-            dx.append(None)
-        else:
-            dx.append(100.0 * abs(pdi - mdi) / (pdi + mdi))
-
-    # ADX is SMA of DX
-    adx: List[Optional[Number]] = []
-    window: List[Number] = []
-    for v in dx:
-        if v is None:
-            adx.append(None)
-            continue
-        window.append(v)
-        if len(window) > period:
-            window.pop(0)
-        if len(window) < period:
-            adx.append(None)
-        else:
-            adx.append(sum(window) / len(window))
-
-    return plus_di, minus_di, adx
