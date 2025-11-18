@@ -678,90 +678,22 @@ async def full_strategy(
     fractional: bool = True,
 ):
     """
-    One-shot endpoint that returns:
-    - prediction from your core /predict engine
-    - simple backtest results
-    - optimization best strategy
+    Temporary safe version of the strategy endpoint.
+
+    It just echoes back the inputs so the app can start
+    without any complex logic. We'll plug in the real
+    prediction + backtest + optimization combo after
+    we confirm everything is stable.
     """
-    sym = symbol.upper()
-
-    # 1) Fetch candles once (used by backtest + optimization)
-    try:
-        candles = fetch_candles(sym)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to fetch candles for {sym}: {e}",
-        )
-
-    # 2) Call your existing prediction logic
-    try:
-        prediction = await predict_symbol(
-            symbol=sym,
-            budget=budget,
-            risk=risk,
-            fractional=fractional,
-        )
-    except Exception as e:
-        prediction = {
-            "symbol": sym,
-            "error": f"Prediction failed: {e}",
-        }
-
-    # 3) Run simple backtest using the helper from Day 7
-    try:
-        backtest = _run_simple_backtest(
-            symbol=sym,
-            candles=candles,
-            initial_budget=budget,
-        )
-    except Exception as e:
-        backtest = {
-            "symbol": sym,
-            "error": f"Backtest failed: {e}",
-        }
-
-    # 4) Run optimization helper from Day 7
-    try:
-        optimization = _run_optimization(
-            symbol=sym,
-            candles=candles,
-            budget=budget,
-        )
-    except Exception as e:
-        optimization = {
-            "symbol": sym,
-            "error": f"Optimization failed: {e}",
-        }
-
-    # 5) Return one combined bundle
     return {
-        "symbol": sym,
+        "symbol": symbol.upper(),
         "budget": budget,
         "risk": risk,
         "fractional": fractional,
-        "prediction": prediction,
-        "backtest": backtest,
-        "optimization": optimization,
-        "disclaimer": (
-            "This output is for informational and educational purposes only "
-            "and is not financial advice."
-        ),
+        "note": "Strategy endpoint stub – full logic coming next.",
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+   
 
 
 
