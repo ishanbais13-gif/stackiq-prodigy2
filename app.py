@@ -667,33 +667,7 @@ async def optimize_symbol(symbol: str, budget: float = 1000.0):
     result = _run_optimization(symbol.upper(), candles, budget)
     return result
 # -------------------------------------------------------------
-# API: /strategy/{symbol}
-# Combines prediction + backtest + optimization into one bundle
-# -------------------------------------------------------------
-@app.get("/strategy/{symbol}")
-async def full_strategy(
-    symbol: str,
-    budget: float = 1000.0,
-    risk: RiskProfile = RiskProfile.medium,
-    fractional: bool = True,
-):
-    """
-    Temporary safe version of the strategy endpoint.
 
-    It just echoes back the inputs so the app can start
-    without any complex logic. We'll plug in the real
-    prediction + backtest + optimization combo after
-    we confirm everything is stable.
-    """
-    return {
-        "symbol": symbol.upper(),
-        "budget": budget,
-        "risk": risk,
-        "fractional": fractional,
-        "note": "Strategy endpoint stub – full logic coming next.",
-    }
-
-   
 
 
 
