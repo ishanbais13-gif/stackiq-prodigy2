@@ -108,8 +108,14 @@ class PredictResponse(BaseModel):
     indicators: IndicatorInfo
     final_decision: FinalDecision
     raw_quote: RawQuote
+
+    # --- Day 8 additions ---
+    expected_move: float
+    confidence: float
+
     summary: str
     disclaimer: str
+
 
 
 class BatchPredictRequest(BaseModel):
@@ -226,15 +232,35 @@ def _compute_predict_payload(
 ) -> PredictResponse:
     price = float(quote.get("c") or 0.0)
     if price <= 0:
-        raise HTTPException(status_code=502, detail="Received invalid price from data provider.")
+        raise HTTPException(
+            status_code=502,
+            detail="Received invalid price from data provider.",
+        )
 
     change_pct_today = _safe_change_pct(quote)
     risk_conf = RISK_CONFIG[risk]
 
+    # --- Risk config / base params ---
     allocation_factor = risk_conf["allocation_factor"]
     stop_loss_pct = risk_conf["stop_loss_pct"]
     take_profit_pct = risk_conf["take_profit_pct"]
 
+    # --- Day 8: expected move & intraday range ---
+    day_high = float(quote.get("h") or 0.0)
+    day_low = float(quote.get("l") or 0.0)
+
+    if day_high > 0 and day_low > 0 and price > 0:
+        raw_range = max(day_high - day_low, 0.0)
+        day_range_pct = (raw_range / price) * 100.0 if price > 0 else None
+    else:
+        # Fallback: use today's % move as a proxy
+        raw_range = abs(price * change_pct_today / 100.0)
+        day_range_pct = None
+
+    # Never let expected_move be tiny – at least 1% of price
+    expected_move = round(max(raw_range, price * 0.01), 2)
+
+    # --- Position sizing ---
     max_allocation = budget * allocation_factor
     if max_allocation <= 0:
         shares_fractional = 0.0
@@ -257,6 +283,7 @@ def _compute_predict_payload(
         fractional_mode=fractional,
     )
 
+    # --- Risk management: stop & target prices ---
     stop_loss_price = round(price * (1 + stop_loss_pct / 100.0), 3)
     take_profit_price = round(price * (1 + take_profit_pct / 100.0), 3)
 
@@ -267,33 +294,45 @@ def _compute_predict_payload(
         take_profit_price=take_profit_price,
     )
 
+    # --- Signal & indicators ---
     signal = _build_signal(change_pct_today)
 
-    # For now, keep indicators simple / mostly placeholder but structured
     indicators = IndicatorInfo(
         volatility_label="unknown",
+        volatility_score_numeric=None,
+        volume_spike=False,
+        indicator_score=0.0,
         indicator_trend_label="unknown",
+        day_range_pct=day_range_pct,
         base_change_pct=change_pct_today,
         prev_close=float(quote.get("pc") or 0.0),
+        rsi=None,
+        ema_fast=None,
+        ema_slow=None,
+        macd_hist=None,
     )
 
-    # Combine signal & indicators into a final decision
-    # Slightly boost score if risk is high & move is up, or low & move is down (defensive)
+    # --- Final decision / score ---
     final_score = signal.score
+    # Tiny adjustment based on risk profile + direction
     if risk == "high" and change_pct_today > 0:
         final_score += 5
     if risk == "low" and change_pct_today < 0:
         final_score += 5
-    final_label = signal.label if final_score >= 50 else "avoid"
 
+    final_label = signal.label if final_score >= 50 else "avoid"
     final_decision = FinalDecision(label=final_label, score=final_score)
 
+    # --- Day 8: confidence score (0.30–0.95) ---
+    confidence = round(max(0.30, min(final_score / 100.0, 0.95)), 2)
+
+    # --- Raw quote passthrough ---
     raw_quote = RawQuote(
         c=float(quote.get("c") or 0.0),
         d=float(quote.get("d") or 0.0),
         dp=float(quote.get("dp") or 0.0),
-        h=float(quote.get("h") or 0.0),
-        l=float(quote.get("l") or 0.0),
+        h=day_high,
+        l=day_low,
         o=float(quote.get("o") or 0.0),
         pc=float(quote.get("pc") or 0.0),
         t=int(quote.get("t") or 0),
@@ -324,17 +363,12 @@ def _compute_predict_payload(
         indicators=indicators,
         final_decision=final_decision,
         raw_quote=raw_quote,
+        expected_move=expected_move,
+        confidence=confidence,
         summary=summary,
         disclaimer=disclaimer,
     )
 
-
-# -----------------------------
-# Routes
-# -----------------------------
-
-
-@app.get("/")
 async def root() -> Dict[str, Any]:
     return {
         "message": "StackIQ backend is live.",
