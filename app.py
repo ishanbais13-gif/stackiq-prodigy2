@@ -447,6 +447,7 @@ async def predict_single(
 
 
 @app.post("/predict/batch", response_model=BatchResult)
+@app.post("/predict/batch", response_model=BatchResult)
 async def predict_batch(request: BatchPredictRequest) -> BatchResult:
     if not request.symbols:
         raise HTTPException(status_code=400, detail="At least one symbol is required.")
@@ -462,6 +463,7 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
             quote = fetch_quote(symbol)
             if not quote or "c" not in quote:
                 raise ValueError("Invalid quote payload")
+
             prediction = _compute_predict_payload(
                 symbol=symbol,
                 quote=quote,
@@ -469,15 +471,21 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
                 risk=request.risk,
                 fractional=request.fractional,
             )
+
             results[symbol] = prediction
+
+            # Day 9: include expected_move + confidence for best_pick
             ranking.append(
                 {
                     "symbol": symbol,
                     "score": prediction.final_decision.score,
                     "label": prediction.final_decision.label,
                     "change_pct_today": prediction.change_pct_today,
+                    "expected_move": prediction.expected_move,
+                    "confidence": prediction.confidence,
                 }
             )
+
         except Exception as e:
             # On failure, capture a minimal error entry instead of killing the whole request
             results[symbol] = PredictResponse(
@@ -506,9 +514,33 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
                     score=0.0,
                     reason=f"Failed to compute prediction: {e}",
                 ),
-                indicators=IndicatorInfo(),
+                indicators=IndicatorInfo(
+                    volatility_label="error",
+                    volatility_score_numeric=None,
+                    volume_spike=False,
+                    indicator_score=0.0,
+                    indicator_trend_label="unknown",
+                    day_range_pct=None,
+                    base_change_pct=0.0,
+                    prev_close=0.0,
+                    rsi=None,
+                    ema_fast=None,
+                    ema_slow=None,
+                    macd_hist=None,
+                ),
                 final_decision=FinalDecision(label="error", score=0.0),
-                raw_quote=RawQuote(c=0.0, d=0.0, dp=0.0, h=0.0, l=0.0, o=0.0, pc=0.0, t=0),
+                raw_quote=RawQuote(
+                    c=0.0,
+                    d=0.0,
+                    dp=0.0,
+                    h=0.0,
+                    l=0.0,
+                    o=0.0,
+                    pc=0.0,
+                    t=0,
+                ),
+                expected_move=0.0,
+                confidence=0.0,
                 summary=f"Could not compute prediction for {symbol} due to an error.",
                 disclaimer=(
                     "This output is for informational and educational purposes only "
@@ -516,9 +548,18 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
                 ),
             )
 
-    # Rank by final decision score descending
-    ranking_sorted = sorted(ranking, key=lambda x: x["score"], reverse=True)
-    best_pick = ranking_sorted[0] if ranking_sorted else {"symbol": None, "score": 0.0}
+    # Day 9: rank by score then confidence
+    ranking_sorted = sorted(
+        ranking,
+        key=lambda x: (x["score"], x["confidence"]),
+        reverse=True,
+    )
+
+    best_pick = (
+        ranking_sorted[0]
+        if ranking_sorted
+        else {"symbol": None, "score": 0.0, "confidence": 0.0}
+    )
 
     meta = BatchMeta(
         total_budget=request.budget,
@@ -530,6 +571,10 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
     return BatchResult(
         symbols=[s.upper() for s in request.symbols],
         meta=meta,
+        results=results,
+        best_pick=best_pick,
+    )
+
         results=results,
         best_pick=best_pick,
     )# ============================================================
