@@ -447,97 +447,60 @@ async def predict_single(
 
 
 @app.post("/predict/batch", response_model=BatchResult)
-@app.post("/predict/batch", response_model=BatchResult)
-async def predict_batch(request: BatchPredictRequest) -> BatchResult:
-    if not request.symbols:
-        raise HTTPException(status_code=400, detail="At least one symbol is required.")
+    except Exception as e:
+        # On failure, capture a minimal error entry instead of killing the whole request
+        results[symbol] = PredictResponse(
+            symbol=symbol,
+            price=0.0,
+            change_pct_today=0.0,
+            budget_per_symbol_budget=per_symbol_budget,
+            risk_profile=request.risk,
+            allocation=AllocationInfo(
+                allocation_factor=RISK_CONFIG[request.risk]["allocation_factor"],
+                position_size_label="error",
+                max_allocation=0.0,
+                shares_integer=0,
+                shares_fractional=0.0,
+                estimated_cost_integer=0.0,
+                fractional_mode=request.fractional,
+            ),
+            risk_management=RiskManagementInfo(
+                stop_loss_pct=0.0,
+                take_profit_pct=0.0,
+                stop_loss_price=0.0,
+                take_profit_price=0.0,
+            ),
+            signal=SignalInfo(
+                label="error",
+                score=0.0,
+                reason=f"Failed to compute prediction: {e}",
+            ),
+            indicators=IndicatorInfo(
+                volatility_label="error",
+                volatility_score_numeric=None,
+                volume_spike=False,
+                indicator_score=0.0,
+                indicator_trend_label="unknown",
+                day_range_pct=None,
+                base_change_pct=0.0,
+                prev_close=0.0,
+                rsi=None,
+                ema_fast=None,
+                ema_slow=None,
+                macd_hist=None,
+            ),
+            final_decision=FinalDecision(label="error", score=0.0),
+            raw_quote=RawQuote(c=0.0, d=0.0, dp=0.0, h=0.0, l=0.0, o=0.0, pc=0.0, t=0),
+            expected_move=0.0,
+            confidence=0.0,
+            summary=f"Could not compute prediction for {symbol} due to an error.",
+            disclaimer=(
+                "This output is for informational and educational purposes only "
+                "and is not financial advice."
+            ),
+        )
 
-    per_symbol_budget = request.budget / len(request.symbols)
-
-    results: Dict[str, PredictResponse] = {}
-    ranking: List[Dict[str, Any]] = []
-
-    for raw_symbol in request.symbols:
-        symbol = raw_symbol.upper()
-        try:
-            quote = fetch_quote(symbol)
-            if not quote or "c" not in quote:
-                raise ValueError("Invalid quote payload")
-
-            prediction = _compute_predict_payload(
-                symbol=symbol,
-                quote=quote,
-                budget=per_symbol_budget,
-                risk=request.risk,
-                fractional=request.fractional,
-            )
-
-            results[symbol] = prediction
-
-            # Day 9: include expected_move + confidence for best_pick
-            ranking.append(
-                {
-                    "symbol": symbol,
-                    "score": prediction.final_decision.score,
-                    "label": prediction.final_decision.label,
-                    "change_pct_today": prediction.change_pct_today,
-                    "expected_move": prediction.expected_move,
-                    "confidence": prediction.confidence,
-                }
-            )
-
-        except Exception as e:
-            # On failure, capture a minimal error entry instead of killing the whole request
-            results[symbol] = PredictResponse(
-                symbol=symbol,
-                price=0.0,
-                change_pct_today=0.0,
-                budget=per_symbol_budget,
-                risk_profile=request.risk,
-                allocation=AllocationInfo(
-                    allocation_factor=RISK_CONFIG[request.risk]["allocation_factor"],
-                    position_size_label="error",
-                    max_allocation=0.0,
-                    shares_integer=0,
-                    shares_fractional=0.0,
-                    estimated_cost_integer=0.0,
-                    fractional_mode=request.fractional,
-                ),
-                risk_management=RiskManagementInfo(
-                    stop_loss_pct=0.0,
-                    take_profit_pct=0.0,
-                    stop_loss_price=0.0,
-                    take_profit_price=0.0,
-                ),
-                signal=SignalInfo(
-                    label="error",
-                    score=0.0,
-                    reason=f"Failed to compute prediction: {e}",
-                ),
-                indicators=IndicatorInfo(
-                    volatility_label="error",
-                    volatility_score_numeric=None,
-                    volume_spike=False,
-                    indicator_score=0.0,
-                    indicator_trend_label="unknown",
-                    day_range_pct=None,
-                    base_change_pct=0.0,
-                    prev_close=0.0,
-                    rsi=None,
-                    ema_fast=None,
-                    ema_slow=None,
-                    macd_hist=None,
-                ),
-                final_decision=FinalDecision(label="error", score=0.0),
-                raw_quote=RawQuote(
-                    c=0.0,
-                    d=0.0,
-                    dp=0.0,
-                    h=0.0,
-                    l=0.0,
-                    o=0.0,
-                    pc=0.0,
-                      # Day 9: rank by score then confidence
+    # Rank by score then confidence
     ranking_sorted = sorted(
         ranking,
         key=lambda x: (x["score"], x["confidence"]),
@@ -564,8 +527,15 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
         best_pick=best_pick,
     )
 
+# ---------------- BACKTEST SECTION -----------------
 
-    # Need at least 10 candles minimum
+# Need at least 10 candles minimum for backtest
+def _run_simple_backtest(
+    symbol: str,
+    candles: Dict[str, Any],
+    initial_budget: float,
+) -> Dict[str, Any]:
+
     if not candles or "c" not in candles or len(candles["c"]) < 10:
         return {
             "symbol": symbol,
@@ -573,23 +543,23 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
             "profit_pct": 0.0,
             "final_value": initial_budget,
             "trades": 0,
-            "notes": "Insufficient price history"
+            "notes": "Insufficient price history",
         }
 
     close = candles["c"]
     trades = 0
     cash = initial_budget
-    position = 0  # shares
+    position = 0
     last_price = close[0]
 
     for price in close[1:]:
-        # If price jumps 1%+ above last day → buy
+        # Buy if price jumps more than 1%
         if price > last_price * 1.01 and cash > price:
             position = cash / price
             cash = 0
             trades += 1
 
-        # If price drops 1%+ → sell
+        # Sell if price drops more than 1%
         if position > 0 and price < last_price * 0.99:
             cash = position * price
             position = 0
@@ -597,61 +567,17 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
 
         last_price = price
 
-    # Close any open position at end
-    if position > 0:
-        cash = position * close[-1]
-        position = 0
-
-    profit_pct = ((cash - initial_budget) / initial_budget) * 100.0
+    final_value = cash + (position * last_price if position > 0 else 0)
+    profit_pct = ((final_value - initial_budget) / initial_budget) * 100
 
     return {
         "symbol": symbol,
-        "profit_pct": round(profit_pct, 2),
-        "final_value": round(cash, 2),
+        "profit_pct": profit_pct,
+        "final_value": final_value,
         "trades": trades,
-        "notes": "Backtest complete"
+        "notes": "Simple backtest completed",
     }
 
-
-# ------------------------------------------------------------
-# API: /backtest/{symbol}
-# ------------------------------------------------------------
-@app.get("/backtest/{symbol}")
-async def backtest_symbol(symbol: str, budget: float = 1000.0):
-    """
-    Run a simple backtest using candle data from Finnhub
-    """
-    try:
-        candles = fetch_candles(symbol.upper())
-    except Exception as e:
-        return {
-            "symbol": symbol.upper(),
-            "error": f"Failed to fetch candles: {e}"
-        }
-
-    result = _run_simple_backtest(symbol.upper(), candles, budget)
-    return result
-
-
-# ------------------------------------------------------------
-# Optimization logic: Try multiple parameter combos
-# ------------------------------------------------------------
-def _run_optimization(
-    symbol: str,
-    candles: Dict[str, Any],
-    budget: float
-) -> Dict[str, Any]:
-
-    if not candles or "c" not in candles or len(candles["c"]) < 10:
-        return {
-            "symbol": symbol,
-            "error": "Not enough data for optimization"
-        }
-
-    best = None
-
-    # Try multiple thresholds for buy/sell
-    buy_thresholds = [0.005, 0.01, 0.02]
     sell_thresholds = [0.005, 0.01, 0.02]
 
     for buy_t in buy_thresholds:
