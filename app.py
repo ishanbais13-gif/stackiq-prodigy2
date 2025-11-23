@@ -357,117 +357,116 @@ def _compute_predict_payload(
         change_pct_today=change_pct_today,
         budget=budget,
         risk_profile=risk,
-        allocation=allocation,
-        risk_management=risk_mgmt,
-        signal=signal,
-        indicators=indicators,
-        final_decision=final_decision,
-        raw_quote=raw_quote,
-        expected_move=expected_move,
-        confidence=confidence,
-        summary=summary,
-        disclaimer=disclaimer,
+        @app.post("/predict/batch", response_model=BatchResult)
+async def predict_batch(request: BatchPredictRequest) -> BatchResult:
+    results: Dict[str, PredictResponse] = {}
+    ranking = []
+
+    per_symbol_budget = request.budget / max(len(request.symbols), 1)
+
+    for symbol in request.symbols:
+        try:
+            quote = fetch_quote(symbol)
+            if not quote or "c" not in quote:
+                raise ValueError("Invalid quote returned")
+
+            prediction = _compute_predict_payload(
+                symbol=symbol,
+                quote=quote,
+                budget=per_symbol_budget,
+                risk=request.risk,
+                fractional=request.fractional,
+            )
+
+            results[symbol] = prediction
+
+            ranking.append(
+                {
+                    "symbol": symbol,
+                    "score": prediction.final_decision.score,
+                    "confidence": prediction.confidence,
+                }
+            )
+
+        except Exception as e:
+            results[symbol] = PredictResponse(
+                symbol=symbol,
+                price=0.0,
+                change_pct_today=0.0,
+                budget=per_symbol_budget,
+                risk_profile=request.risk,
+                allocation=AllocationInfo(
+                    allocation_factor=RISK_CONFIG[request.risk]["allocation_factor"],
+                    position_size_label="error",
+                    max_allocation=0.0,
+                    shares_integer=0,
+                    shares_fractional=0.0,
+                    estimated_cost_integer=0.0,
+                    fractional_mode=request.fractional,
+                ),
+                risk_management=RiskManagementInfo(
+                    stop_loss_pct=0.0,
+                    take_profit_pct=0.0,
+                    stop_loss_price=0.0,
+                    take_profit_price=0.0,
+                ),
+                signal=SignalInfo(
+                    label="error",
+                    score=0.0,
+                    reason=f"Failed to compute prediction: {e}",
+                ),
+                indicators=IndicatorInfo(
+                    volatility_label="error",
+                    volatility_score_numeric=None,
+                    volume_spike=False,
+                    indicator_score=0.0,
+                    indicator_trend_label="unknown",
+                    day_range_pct=None,
+                    base_change_pct=0.0,
+                    prev_close=0.0,
+                    rsi=None,
+                    ema_fast=None,
+                    ema_slow=None,
+                    macd_hist=None,
+                ),
+                final_decision=FinalDecision(label="error", score=0.0),
+                raw_quote=RawQuote(c=0, d=0, dp=0, h=0, l=0, o=0, pc=0, t=0),
+                expected_move=0.0,
+                confidence=0.0,
+                summary=f"Could not compute prediction for {symbol} due to an error.",
+                disclaimer=(
+                    "This output is for informational and educational purposes only "
+                    "and is not financial advice."
+                ),
+            )
+
+    # Rank by score then confidence
+    ranking_sorted = sorted(
+        ranking,
+        key=lambda x: (x["score"], x["confidence"]),
+        reverse=True,
     )
 
-async def root() -> Dict[str, Any]:
-    return {
-        "message": "StackIQ backend is live.",
-        "endpoints": [
-            "/health",
-            "/quote/{symbol}",
-            "/candles/{symbol}?resolution=D&days=30",
-            "/predict/{symbol}?budget=100&risk=medium&fractional=true",
-            "/predict/batch",
-        ],
-    }
+    best_pick = (
+        ranking_sorted[0]
+        if ranking_sorted
+        else {"symbol": None, "score": 0.0, "confidence": 0.0}
+    )
 
+    meta = BatchMeta(
+        total_budget=request.budget,
+        per_symbol_budget=round(per_symbol_budget, 2),
+        risk_profile=request.risk,
+        fractional=request.fractional,
+    )
 
-@app.get("/health")
-async def health() -> Dict[str, str]:
-    return {"status": "ok", "message": "StackIQ backend is running"}
+    return BatchResult(
+        symbols=[s.upper() for s in request.symbols],
+        meta=meta,
+        results=results,
+        best_pick=best_pick,
+    )
 
-
-@app.get("/quote/{symbol}")
-async def get_quote(symbol: str) -> Dict[str, Any]:
-    try:
-        quote = fetch_quote(symbol)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch quote: {e}")
-    if not quote or "c" not in quote:
-        raise HTTPException(status_code=502, detail="Invalid quote received from Finnhub.")
-    return {"symbol": symbol.upper(), "quote": quote}
-
-
-@app.get("/candles/{symbol}")
-async def get_candles(
-    symbol: str,
-    resolution: str = "D",
-    days: int = 30,
-) -> Dict[str, Any]:
-    try:
-        data = fetch_candles(symbol, resolution=resolution, days=days)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch candles from Finnhub: {e}")
-
-    # Finnhub returns { s: "ok"|"no_data"|"error", t: [...], c: [...], ... }
-    status = data.get("s")
-    if status != "ok":
-        raise HTTPException(
-            status_code=502,
-            detail=f"Finnhub returned status '{status}' for candles.",
-        )
-
-    return {
-        "symbol": symbol.upper(),
-        "resolution": resolution,
-        "days": days,
-        "data": data,
-    }
-
-
-@app.get("/predict/{symbol}", response_model=PredictResponse)
-async def predict_single(
-    symbol: str,
-    budget: float,
-    risk: RiskProfileLiteral = "medium",
-    fractional: bool = True,
-) -> PredictResponse:
-    if budget <= 0:
-        raise HTTPException(status_code=400, detail="Budget must be positive.")
-
-    try:
-        quote = fetch_quote(symbol)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch quote: {e}")
-
-    if not quote or "c" not in quote:
-        raise HTTPException(status_code=502, detail="Invalid quote received from Finnhub.")
-
-    return _compute_predict_payload(symbol, quote, budget, risk, fractional)
-
-
-@app.post("/predict/batch", response_model=BatchResult)
-    except Exception as e:
-        # On failure, capture a minimal error entry instead of killing the whole request
-        results[symbol] = PredictResponse(
-            symbol=symbol,
-            price=0.0,
-            change_pct_today=0.0,
-            budget_per_symbol_budget=per_symbol_budget,
-            risk_profile=request.risk,
-            allocation=AllocationInfo(
-                allocation_factor=RISK_CONFIG[request.risk]["allocation_factor"],
-                position_size_label="error",
-                max_allocation=0.0,
-                shares_integer=0,
-                shares_fractional=0.0,
-                estimated_cost_integer=0.0,
-                fractional_mode=request.fractional,
-            ),
-            risk_management=RiskManagementInfo(
-                stop_loss_pct=0.0,
-                take_profit_pct=0.0,
-                stop_loss_price=0.0,
                 take_profit_price=0.0,
             ),
             signal=SignalInfo(
