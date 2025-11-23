@@ -574,8 +574,7 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
         
     )
 
-        results=results,
-        best_pick=best_pick,
+        
     )# ============================================================
 # DAY 7 – BACKTEST + OPTIMIZATION ENGINE (FULL BLOCK)
 # PASTE THIS DIRECTLY AFTER THE BatchResult RETURN
