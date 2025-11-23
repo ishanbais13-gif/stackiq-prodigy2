@@ -546,9 +546,7 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
                     "This output is for informational and educational purposes only "
                     "and is not financial advice."
                 ),
-            )
-
-    # Day 9: rank by score then confidence
+                # Day 9: rank by score then confidence
     ranking_sorted = sorted(
         ranking,
         key=lambda x: (x["score"], x["confidence"]),
@@ -571,19 +569,9 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
     return BatchResult(
         symbols=[s.upper() for s in request.symbols],
         meta=meta,
-        
+        results=results,
+        best_pick=best_pick,
     )
-
-        
-    )# ============================================================
-# DAY 7 – BACKTEST + OPTIMIZATION ENGINE (FULL BLOCK)
-# PASTE THIS DIRECTLY AFTER THE BatchResult RETURN
-# ============================================================
-
-from typing import Dict, Any, List
-import statistics
-import math
-
 
 # ------------------------------------------------------------
 # Helper: Simple backtest using daily candles
