@@ -537,16 +537,7 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
                     l=0.0,
                     o=0.0,
                     pc=0.0,
-                    t=0,
-                ),
-                expected_move=0.0,
-                confidence=0.0,
-                summary=f"Could not compute prediction for {symbol} due to an error.",
-                disclaimer=(
-                    "This output is for informational and educational purposes only "
-                    "and is not financial advice."
-                ),
-                # Day 9: rank by score then confidence
+                      # Day 9: rank by score then confidence
     ranking_sorted = sorted(
         ranking,
         key=lambda x: (x["score"], x["confidence"]),
@@ -573,14 +564,6 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
         best_pick=best_pick,
     )
 
-# ------------------------------------------------------------
-# Helper: Simple backtest using daily candles
-# ------------------------------------------------------------
-def _run_simple_backtest(
-    symbol: str,
-    candles: Dict[str, Any],
-    initial_budget: float,
-) -> Dict[str, Any]:
 
     # Need at least 10 candles minimum
     if not candles or "c" not in candles or len(candles["c"]) < 10:
