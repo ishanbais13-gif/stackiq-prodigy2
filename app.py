@@ -571,8 +571,7 @@ async def predict_batch(request: BatchPredictRequest) -> BatchResult:
     return BatchResult(
         symbols=[s.upper() for s in request.symbols],
         meta=meta,
-        results=results,
-        best_pick=best_pick,
+        
     )
 
         results=results,
