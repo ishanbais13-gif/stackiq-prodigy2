@@ -1,272 +1,178 @@
 import os
-import time
-from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 import requests
 
-# ---------------------------------------------------------------------------
-# Environment / Config
-# ---------------------------------------------------------------------------
-
+# Environment variables (already set in Azure)
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET")
-# You set this in Azure as https://data.alpaca.markets
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
-
-# News lives under the same host, different path
-ALPACA_NEWS_PATH = "/v1beta1/news"
-
-if not ALPACA_API_KEY or not ALPACA_SECRET:
-    # Don't crash the app, but make it obvious in logs
-    print("WARNING: ALPACA_API_KEY or ALPACA_SECRET is not set in environment variables.")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET")
+ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")
+ALPACA_DATA_URL = os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets")
 
 
-# ---------------------------------------------------------------------------
-# Low-level Alpaca helper
-# ---------------------------------------------------------------------------
-
-def _alpaca_get(base: str, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _alpaca_get(
+    base: str, path: str, params: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
     """
-    Low-level helper to GET from Alpaca with auth headers and basic error handling.
+    Low-level helper to GET from Alpaca with auth headers + basic error handling.
     """
+    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+        raise RuntimeError("ALPACA_API_KEY or ALPACA_SECRET is not set in env vars")
+
     url = base.rstrip("/") + path
     headers = {
-        "APCA-API-KEY-ID": ALPACA_API_KEY or "",
-        "APCA-API-SECRET-KEY": ALPACA_SECRET or "",
+        "APCA-API-KEY-ID": ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
     }
 
     try:
         resp = requests.get(url, headers=headers, params=params, timeout=10)
     except requests.RequestException as e:
-        raise RuntimeError(f"Network error talking to Alpaca: {e}") from e
+        raise RuntimeError(f"Network error talking to Alpaca: {e}")
 
-    if resp.status_code == 200:
-        return resp.json()
+    if resp.status_code != 200:
+        raise RuntimeError(f"Alpaca error {resp.status_code}: {resp.text[:300]}")
 
-    # Bubble up a short, readable error
-    raise RuntimeError(f"Alpaca error {resp.status_code}: {resp.text[:300]}")
+    return resp.json()
 
 
-# ---------------------------------------------------------------------------
-# Quotes
-# ---------------------------------------------------------------------------
+# ---------- Core data helpers ----------
+
+
+def get_candles(
+    symbol: str, days: int = 60, timeframe: str = "1Day"
+) -> List[Dict[str, Any]]:
+    """
+    Fetch recent OHLCV candles using Alpaca market data.
+    Uses bars endpoint: https://data.alpaca.markets/v2/stocks/{symbol}/bars
+    """
+    symbol = symbol.upper()
+    params = {
+        "timeframe": timeframe,
+        "limit": days,
+        "adjustment": "raw",
+        "feed": "iex",
+    }
+    data = _alpaca_get(ALPACA_DATA_URL, f"/v2/stocks/{symbol}/bars", params=params)
+
+    bars = data.get("bars", [])
+    candles: List[Dict[str, Any]] = []
+    for bar in bars:
+        candles.append(
+            {
+                "timestamp": bar.get("t"),
+                "open": bar.get("o"),
+                "high": bar.get("h"),
+                "low": bar.get("l"),
+                "close": bar.get("c"),
+                "volume": bar.get("v"),
+            }
+        )
+    return candles
+
 
 def get_quote(symbol: str) -> Dict[str, Any]:
     """
-    Get a snapshot for a single symbol and normalize it into a simple quote dict.
-
-    Uses:
-      GET /v2/stocks/{symbol}/snapshot
+    Build a quote-style snapshot from the most recent daily bars.
+    (We fake a "quote" using the latest daily close + previous close.)
     """
-    symbol = symbol.upper()
-    data = _alpaca_get(ALPACA_BASE_URL, f"/v2/stocks/{symbol}/snapshot")
+    candles = get_candles(symbol, days=2, timeframe="1Day")
+    if not candles:
+        raise RuntimeError("No candle data returned from Alpaca")
 
-    latest_trade = data.get("latestTrade") or {}
-    latest_quote = data.get("latestQuote") or {}
-    daily_bar = data.get("dailyBar") or {}
-    prev_daily_bar = data.get("prevDailyBar") or {}
+    last = candles[-1]
+    prev = candles[-2] if len(candles) > 1 else last
 
-    last_price = latest_trade.get("p") or daily_bar.get("c") or prev_daily_bar.get("c")
-    open_price = daily_bar.get("o")
-    high_price = daily_bar.get("h")
-    low_price = daily_bar.get("l")
-    prev_close = prev_daily_bar.get("c")
-    volume = daily_bar.get("v") or 0
-
-    # Change vs previous close if both exist
+    current = last["close"]
+    previous_close = prev["close"]
     change = None
-    change_pct = None
-    if last_price is not None and prev_close is not None and prev_close != 0:
-        change = last_price - prev_close
-        change_pct = (change / prev_close) * 100
-
-    # Timestamps come back as RFC3339 / ISO strings; we just pass them through
-    trade_ts = latest_trade.get("t")
+    percent_change = None
+    if current is not None and previous_close not in (None, 0):
+        change = current - previous_close
+        percent_change = (change / previous_close) * 100
 
     return {
-        "symbol": symbol,
-        "last": last_price,
-        "open": open_price,
-        "high": high_price,
-        "low": low_price,
-        "prev_close": prev_close,
+        "symbol": symbol.upper(),
+        "current": current,
+        "open": last.get("open"),
+        "high": last.get("high"),
+        "low": last.get("low"),
+        "previous_close": previous_close,
         "change": change,
-        "change_percent": change_pct,
-        "volume": volume,
-        "bid": latest_quote.get("bp"),
-        "ask": latest_quote.get("ap"),
-        "bid_size": latest_quote.get("bs"),
-        "ask_size": latest_quote.get("as"),
-        "timestamp": trade_ts,
-        "raw": data,  # keep full snapshot if the API layer wants anything else
+        "percent_change": percent_change,
+        "timestamp": last.get("timestamp"),
     }
 
 
-# ---------------------------------------------------------------------------
-# Candles (historical bars)
-# ---------------------------------------------------------------------------
-
-def get_candles(
-    symbol: str,
-    timeframe: str = "1Day",
-    limit: int = 60,
-) -> List[Dict[str, Any]]:
+def get_news(symbol: str, limit: int = 5) -> List[Dict[str, Any]]:
     """
-    Fetch historical bars for a single symbol.
-
-    Uses:
-      GET /v2/stocks/{symbol}/bars
-
-    timeframe examples:
-      "1Min", "5Min", "15Min", "1Hour", "1Day"
+    Fetch latest news for a symbol using Alpaca's news endpoint.
+    If the endpoint fails, we just return [] instead of crashing the API.
     """
     symbol = symbol.upper()
+    params = {"symbols": symbol, "limit": limit}
+    try:
+        data = _alpaca_get(ALPACA_DATA_URL, "/v1beta1/news", params=params)
+    except Exception:
+        return []
 
-    # Alpaca expects ISO8601 UTC timestamps with 'Z'
-    now = datetime.utcnow()
-    # Go back a bit further than limit so we don't hit weekends/holidays
-    start = (now - timedelta(days=limit * 2)).replace(microsecond=0).isoformat() + "Z"
-    end = now.replace(microsecond=0).isoformat() + "Z"
-
-    params = {
-        "timeframe": timeframe,
-        "start": start,
-        "end": end,
-        "limit": limit,
-    }
-
-    data = _alpaca_get(ALPACA_BASE_URL, f"/v2/stocks/{symbol}/bars", params=params)
-    bars = data.get("bars", [])
-
-    normalized: List[Dict[str, Any]] = []
-    for b in bars:
-        normalized.append(
-            {
-                "t": b.get("t"),  # ISO8601 time
-                "o": b.get("o"),
-                "h": b.get("h"),
-                "l": b.get("l"),
-                "c": b.get("c"),
-                "v": b.get("v"),
-            }
-        )
-
-    return normalized
-
-
-# ---------------------------------------------------------------------------
-# News
-# ---------------------------------------------------------------------------
-
-def get_news(symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
-    """
-    Fetch recent news for a symbol.
-
-    Uses:
-      GET /v1beta1/news?symbols={symbol}&limit={limit}
-    """
-    symbol = symbol.upper()
-
-    params = {
-        "symbols": symbol,
-        "limit": limit,
-        "sort": "desc",
-    }
-
-    data = _alpaca_get(ALPACA_BASE_URL, ALPACA_NEWS_PATH, params=params)
-    # Alpaca returns a list of articles at top level
-    articles = data if isinstance(data, list) else data.get("news", [])
-
-    normalized: List[Dict[str, Any]] = []
-    for item in articles:
-        normalized.append(
+    items: List[Dict[str, Any]] = []
+    for item in data.get("news", []):
+        items.append(
             {
                 "id": item.get("id"),
                 "headline": item.get("headline"),
                 "summary": item.get("summary"),
-                "source": item.get("source"),
                 "url": item.get("url"),
-                "symbols": item.get("symbols") or [],
                 "created_at": item.get("created_at"),
+                "source": item.get("source"),
             }
         )
+    return items
 
-    return normalized
+
+# ---------- Stub helpers (safe, no external calls) ----------
 
 
-# ---------------------------------------------------------------------------
-# Synthetic “targets” (no extra API, just logic)
-# ---------------------------------------------------------------------------
-
-def get_targets(symbol: str) -> Dict[str, Any]:
+def get_price_targets(symbol: str) -> Dict[str, Any]:
     """
-    Synthetic analyst-style price targets based on current price.
-    This avoids any premium endpoints while still giving StackIQ
-    something useful to show.
+    Placeholder price-targets helper.
 
-    Strategy:
-      - Use latest price
-      - Target_low  = -10%
-      - Target_avg  = +5%
-      - Target_high = +20%
+    Alpaca's public API does not expose analyst price targets directly,
+    so for now we return a simple stub structure that the frontend can use.
     """
-    q = get_quote(symbol)
-    current = q.get("last")
-
-    if current is None:
-        raise RuntimeError(f"Unable to compute targets, missing last price for {symbol}")
-
-    low = round(current * 0.90, 2)
-    avg = round(current * 1.05, 2)
-    high = round(current * 1.20, 2)
-
     return {
-        "symbol": q["symbol"],
-        "current": current,
-        "target_low": low,
-        "target_average": avg,
-        "target_high": high,
-        "source": "StackIQ synthetic targets (Alpaca price-based)",
+        "symbol": symbol.upper(),
+        "note": "Price targets are not available from Alpaca free API yet.",
+        "median_target": None,
+        "high_target": None,
+        "low_target": None,
+        "rating": None,
     }
 
 
-# ---------------------------------------------------------------------------
-# Synthetic options-helper (also pure logic)
-# ---------------------------------------------------------------------------
-
-def get_options_helper(symbol: str) -> Dict[str, Any]:
+def get_options_helper(symbol: str, risk: str = "medium") -> Dict[str, Any]:
     """
-    Very lightweight "options helper" that *doesn't* hit any options API
-    (Alpaca doesn't expose a free options chain anyway).
-
-    We just:
-      - Grab the latest price
-      - Suggest 3 strikes around the money
-    The FastAPI layer can turn this into whatever UX it wants.
+    Placeholder options helper – does NOT place trades or call any options API.
+    It just returns a simple plan structure based on the risk level.
     """
-    q = get_quote(symbol)
-    last = q.get("last")
+    symbol = symbol.upper()
+    risk = risk.lower()
+    if risk not in {"low", "medium", "high"}:
+        risk = "medium"
 
-    if last is None:
-        raise RuntimeError(f"Unable to compute options helper, missing last price for {symbol}")
-
-    # Round strikes to neat numbers
-    base = round(last / 5) * 5  # nearest 5 dollars
-    strikes = sorted(
-        {
-            round(base - 5, 2),
-            round(base, 2),
-            round(base + 5, 2),
-        }
-    )
+    leverage = {"low": 0.5, "medium": 1.0, "high": 1.5}[risk]
 
     return {
-        "symbol": q["symbol"],
-        "last": last,
-        "suggested_strikes": strikes,
-        "notes": "Synthetic strikes based on current price; not a real options chain.",
+        "symbol": symbol,
+        "risk": risk,
+        "leverage_hint": leverage,
+        "note": (
+            "This is a placeholder options helper. "
+            "In a future version we can integrate real options chains."
+        ),
     }
+
 
 
 
