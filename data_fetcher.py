@@ -1,123 +1,121 @@
 import os
-from typing import Any, Dict, List, Optional
-
 import requests
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional
 
-# Environment variables (already set in Azure)
+# --- Alpaca config ---
+
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets/v2")
-ALPACA_DATA_URL = os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets")
+ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET")
+ALPACA_BASE_URL = "https://data.alpaca.markets"
 
 
-def _alpaca_get(
-    base: str, path: str, params: Optional[Dict[str, Any]] = None
-) -> Dict[str, Any]:
-    """
-    Low-level helper to GET from Alpaca with auth headers + basic error handling.
-    """
-    if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
-        raise RuntimeError("ALPACA_API_KEY or ALPACA_SECRET is not set in env vars")
-
-    url = base.rstrip("/") + path
-    headers = {
+def _get_headers() -> Dict[str, str]:
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        # Still return something graceful; app will surface a clean error
+        raise RuntimeError("Missing ALPACA_API_KEY or ALPACA_API_SECRET environment variables.")
+    return {
         "APCA-API-KEY-ID": ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
+        "APCA-API-SECRET-KEY": ALPACA_API_SECRET,
     }
 
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
-    except requests.RequestException as e:
-        raise RuntimeError(f"Network error talking to Alpaca: {e}")
 
-    if resp.status_code != 200:
-        raise RuntimeError(f"Alpaca error {resp.status_code}: {resp.text[:300]}")
-
+def _alpaca_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    url = f"{ALPACA_BASE_URL}{path}"
+    resp = requests.get(url, headers=_get_headers(), params=params or {}, timeout=10)
+    resp.raise_for_status()
     return resp.json()
 
 
-# ---------- Core data helpers ----------
-
-
-def get_candles(
-    symbol: str, days: int = 60, timeframe: str = "1Day"
-) -> List[Dict[str, Any]]:
+# --------------------------------------------------------------------
+#  Quote
+# --------------------------------------------------------------------
+def get_quote(symbol: str) -> Dict[str, Any]:
     """
-    Fetch recent OHLCV candles using Alpaca market data.
-    Uses bars endpoint: https://data.alpaca.markets/v2/stocks/{symbol}/bars
+    Get the latest quote for a symbol from Alpaca.
     """
     symbol = symbol.upper()
+    data = _alpaca_get(f"/v2/stocks/{symbol}/quotes/latest")
+
+    quote = data.get("quote", {})
+    return {
+        "symbol": symbol,
+        "bid": quote.get("bp"),
+        "ask": quote.get("ap"),
+        "bid_size": quote.get("bs"),
+        "ask_size": quote.get("as"),
+        "timestamp": quote.get("t"),
+        "raw": quote,
+    }
+
+
+# --------------------------------------------------------------------
+#  Candles / Bars
+# --------------------------------------------------------------------
+def _resolution_to_timeframe(resolution: str) -> str:
+    """
+    Map a generic resolution to Alpaca timeframe strings.
+    """
+    resolution = str(resolution).upper()
+    if resolution in ("D", "1D", "DAY"):
+        return "1Day"
+    if resolution in ("60", "60MIN", "1H"):
+        return "1Hour"
+    if resolution in ("15", "15MIN"):
+        return "15Min"
+    if resolution in ("5", "5MIN"):
+        return "5Min"
+    return "1Day"
+
+
+def get_candles(symbol: str, days: int = 30, resolution: str = "D") -> List[Dict[str, Any]]:
+    """
+    Get recent OHLCV bars for a symbol.
+    """
+    symbol = symbol.upper()
+    timeframe = _resolution_to_timeframe(resolution)
+
+    end = datetime.utcnow()
+    start = end - timedelta(days=days + 2)
+
     params = {
         "timeframe": timeframe,
-        "limit": days,
-        "adjustment": "raw",
-        "feed": "iex",
+        "start": start.isoformat(timespec="seconds") + "Z",
+        "end": end.isoformat(timespec="seconds") + "Z",
+        "limit": 1000,
     }
-    data = _alpaca_get(ALPACA_DATA_URL, f"/v2/stocks/{symbol}/bars", params=params)
 
+    data = _alpaca_get(f"/v2/stocks/{symbol}/bars", params=params)
     bars = data.get("bars", [])
+
     candles: List[Dict[str, Any]] = []
-    for bar in bars:
+    for b in bars:
         candles.append(
             {
-                "timestamp": bar.get("t"),
-                "open": bar.get("o"),
-                "high": bar.get("h"),
-                "low": bar.get("l"),
-                "close": bar.get("c"),
-                "volume": bar.get("v"),
+                "time": b.get("t"),
+                "open": b.get("o"),
+                "high": b.get("h"),
+                "low": b.get("l"),
+                "close": b.get("c"),
+                "volume": b.get("v"),
             }
         )
     return candles
 
 
-def get_quote(symbol: str) -> Dict[str, Any]:
+# --------------------------------------------------------------------
+#  News
+# --------------------------------------------------------------------
+def get_news(symbol: str, limit: int = 5) -> Dict[str, Any]:
     """
-    Build a quote-style snapshot from the most recent daily bars.
-    (We fake a "quote" using the latest daily close + previous close.)
-    """
-    candles = get_candles(symbol, days=2, timeframe="1Day")
-    if not candles:
-        raise RuntimeError("No candle data returned from Alpaca")
-
-    last = candles[-1]
-    prev = candles[-2] if len(candles) > 1 else last
-
-    current = last["close"]
-    previous_close = prev["close"]
-    change = None
-    percent_change = None
-    if current is not None and previous_close not in (None, 0):
-        change = current - previous_close
-        percent_change = (change / previous_close) * 100
-
-    return {
-        "symbol": symbol.upper(),
-        "current": current,
-        "open": last.get("open"),
-        "high": last.get("high"),
-        "low": last.get("low"),
-        "previous_close": previous_close,
-        "change": change,
-        "percent_change": percent_change,
-        "timestamp": last.get("timestamp"),
-    }
-
-
-def get_news(symbol: str, limit: int = 5) -> List[Dict[str, Any]]:
-    """
-    Fetch latest news for a symbol using Alpaca's news endpoint.
-    If the endpoint fails, we just return [] instead of crashing the API.
+    Get recent news for a symbol.
     """
     symbol = symbol.upper()
     params = {"symbols": symbol, "limit": limit}
-    try:
-        data = _alpaca_get(ALPACA_DATA_URL, "/v1beta1/news", params=params)
-    except Exception:
-        return []
+    data = _alpaca_get("/v1beta1/news", params=params)
 
-    items: List[Dict[str, Any]] = []
-    for item in data.get("news", []):
+    items = []
+    for item in data:
         items.append(
             {
                 "id": item.get("id"),
@@ -128,49 +126,86 @@ def get_news(symbol: str, limit: int = 5) -> List[Dict[str, Any]]:
                 "source": item.get("source"),
             }
         )
-    return items
+
+    return {"symbol": symbol, "items": items}
 
 
-# ---------- Stub helpers (safe, no external calls) ----------
-
-
-def get_price_targets(symbol: str) -> Dict[str, Any]:
+# --------------------------------------------------------------------
+#  TEMP PREDICT ENGINE (mock but NEVER returns None)
+# --------------------------------------------------------------------
+def run_predict_engine(symbol: str, budget: float, risk: str = "medium") -> Dict[str, Any]:
     """
-    Placeholder price-targets helper.
-
-    Alpaca's public API does not expose analyst price targets directly,
-    so for now we return a simple stub structure that the frontend can use.
-    """
-    return {
-        "symbol": symbol.upper(),
-        "note": "Price targets are not available from Alpaca free API yet.",
-        "median_target": None,
-        "high_target": None,
-        "low_target": None,
-        "rating": None,
-    }
-
-
-def get_options_helper(symbol: str, risk: str = "medium") -> Dict[str, Any]:
-    """
-    Placeholder options helper – does NOT place trades or call any options API.
-    It just returns a simple plan structure based on the risk level.
+    Temporary mock predict engine.
+    Uses recent candles to build a simple but stable trade idea.
+    This is intentionally simple so your UI always has data.
     """
     symbol = symbol.upper()
-    risk = risk.lower()
-    if risk not in {"low", "medium", "high"}:
-        risk = "medium"
+    risk = (risk or "medium").lower()
 
-    leverage = {"low": 0.5, "medium": 1.0, "high": 1.5}[risk]
+    try:
+        candles = get_candles(symbol, days=20, resolution="D")
+    except Exception:
+        candles = []
+
+    if not candles or len(candles) < 2:
+        # Safe fallback – still returns something your frontend can render.
+        return {
+            "symbol": symbol,
+            "buy_zone": "N/A",
+            "target": None,
+            "stop": None,
+            "position_size": None,
+            "risk": risk,
+            "confidence": 0,
+            "projected_roi": 0,
+            "notes": "Not enough recent data to generate a mock setup.",
+        }
+
+    last = candles[-1]
+    prev = candles[-2]
+
+    price = float(last["close"])
+    prev_price = float(prev["close"])
+
+    change = price - prev_price
+    direction = "up" if change >= 0 else "down"
+
+    # Risk preset multipliers
+    if risk == "high":
+        buy_low_mult, buy_high_mult, target_mult, stop_mult = 0.96, 0.99, 1.08, 0.93
+        conf = 58
+        roi = 14
+    elif risk == "low":
+        buy_low_mult, buy_high_mult, target_mult, stop_mult = 0.985, 0.995, 1.03, 0.97
+        conf = 72
+        roi = 6
+    else:  # medium
+        buy_low_mult, buy_high_mult, target_mult, stop_mult = 0.97, 0.99, 1.05, 0.95
+        conf = 65
+        roi = 10
+
+    buy_low = round(price * buy_low_mult, 2)
+    buy_high = round(price * buy_high_mult, 2)
+    target = round(price * target_mult, 2)
+    stop = round(price * stop_mult, 2)
+
+    # Simple position sizing: risk ~2% of budget per trade
+    max_risk_per_trade = budget * 0.02
+    per_share_risk = max(price - stop, 0.01)
+    shares = max(int(max_risk_per_trade // per_share_risk), 1)
 
     return {
         "symbol": symbol,
+        "last_price": price,
+        "direction": direction,
+        "buy_zone": f"{buy_low}–{buy_high}",
+        "target": target,
+        "stop": stop,
+        "position_size": f"{shares} shares",
         "risk": risk,
-        "leverage_hint": leverage,
-        "note": (
-            "This is a placeholder options helper. "
-            "In a future version we can integrate real options chains."
-        ),
+        "confidence": conf,
+        "projected_roi": roi,
+        "notes": f"Mock {risk} setup based on recent daily momentum ({direction}).",
     }
 
 
