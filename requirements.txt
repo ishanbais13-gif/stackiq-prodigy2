@@ -1,9 +1,8 @@
-fastapi
-uvicorn
-gunicorn
-requests
-python-dotenv
-
+fastapi==0.115.5
+uvicorn==0.32.0
+gunicorn==23.0.0
+requests==2.32.3
+python-dotenv==1.0.1
 
 
 
