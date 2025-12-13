@@ -1,154 +1,144 @@
 import os
-import time
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional
+
 import requests
-from typing import Any, Dict, Optional, Tuple
 
-# Alpaca endpoints
-ALPACA_DATA_BASE = os.getenv("ALPACA_DATA_BASE", "https://data.alpaca.markets")
-ALPACA_PAPER_BASE = os.getenv("ALPACA_PAPER_BASE", "https://paper-api.alpaca.markets")
 
-class APIError(Exception):
-    def __init__(self, message: str, status_code: int = 500, details: Optional[dict] = None):
-        super().__init__(message)
-        self.status_code = status_code
-        self.details = details or {}
+class AlpacaClient:
+    """
+    Alpaca Data API client (stocks).
+    Env vars required:
+      - ALPACA_API_KEY
+      - ALPACA_SECRET_KEY
 
-def _get_alpaca_headers() -> Dict[str, str]:
-    key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
-    secret = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
+    Optional:
+      - ALPACA_DATA_BASE_URL (default: https://data.alpaca.markets)
+      - ALPACA_FEED (default: iex)  # iex works for most free accounts; sip requires paid
+    """
 
-    if not key or not secret:
-        raise APIError(
-            "Missing ALPACA_API_KEY / ALPACA_SECRET_KEY in environment variables",
-            status_code=500,
-            details={"needed": ["ALPACA_API_KEY", "ALPACA_SECRET_KEY"]}
+    def __init__(self) -> None:
+        self.api_key = os.getenv("ALPACA_API_KEY", "").strip()
+        self.secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
+
+        if not self.api_key or not self.secret_key:
+            raise ValueError("Missing ALPACA_API_KEY / ALPACA_SECRET_KEY in environment variables")
+
+        self.data_base_url = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets").strip().rstrip("/")
+        self.feed = os.getenv("ALPACA_FEED", "iex").strip()
+
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "APCA-API-KEY-ID": self.api_key,
+                "APCA-API-SECRET-KEY": self.secret_key,
+                "Accept": "application/json",
+            }
         )
 
-    return {
-        "APCA-API-KEY-ID": key,
-        "APCA-API-SECRET-KEY": secret,
-        "Accept": "application/json",
-    }
+    def _get(self, url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        try:
+            resp = self.session.get(url, params=params or {}, timeout=15)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            # Try to include Alpaca error body if present
+            detail = ""
+            try:
+                detail = resp.text  # type: ignore[name-defined]
+            except Exception:
+                pass
+            raise RuntimeError(f"Alpaca HTTP error: {e}. Body: {detail}") from e
+        except requests.exceptions.RequestException as e:
+            raise RuntimeError(f"Network error calling Alpaca: {e}") from e
+        except ValueError as e:
+            raise RuntimeError(f"Invalid JSON from Alpaca: {e}") from e
 
-def _request(method: str, url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 12) -> Dict[str, Any]:
-    headers = _get_alpaca_headers()
-    params = params or {}
+    @staticmethod
+    def _iso(dt: datetime) -> str:
+        # Alpaca accepts RFC3339/ISO timestamps
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    try:
-        resp = requests.request(method, url, headers=headers, params=params, timeout=timeout)
-    except requests.RequestException as e:
-        raise APIError("Alpaca request failed (network/timeout)", status_code=502, details={"error": str(e)})
+    def get_latest_quote(self, symbol: str) -> Dict[str, Any]:
+        symbol = symbol.upper().strip()
+        url = f"{self.data_base_url}/v2/stocks/{symbol}/quotes/latest"
+        params = {"feed": self.feed}
+        data = self._get(url, params=params)
 
-    # Try json
-    try:
-        data = resp.json()
-    except Exception:
-        data = {"raw": resp.text[:5000]}
+        # Alpaca returns {"quote": {...}} for this endpoint
+        q = data.get("quote") or {}
+        return {
+            "symbol": symbol,
+            "bid": q.get("bp"),
+            "ask": q.get("ap"),
+            "bid_size": q.get("bs"),
+            "ask_size": q.get("as"),
+            "timestamp": q.get("t"),
+            "raw": q,
+        }
 
-    if resp.status_code >= 400:
-        raise APIError(
-            "Alpaca returned error",
-            status_code=resp.status_code,
-            details={"status": resp.status_code, "url": url, "params": params, "body": data}
-        )
+    def get_bars(
+        self,
+        symbol: str,
+        timeframe: str = "1Day",
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        limit: int = 200,
+        adjustment: str = "raw",
+    ) -> Dict[str, Any]:
+        """
+        timeframe examples: 1Min, 5Min, 15Min, 1Hour, 1Day
+        start/end: ISO strings (YYYY-MM-DD or full ISO). If missing, defaults to last 30 days.
+        """
 
-    return data
+        symbol = symbol.upper().strip()
+        url = f"{self.data_base_url}/v2/stocks/{symbol}/bars"
 
-# --- tiny in-memory cache (helps avoid rate issues) ---
-_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        now = datetime.now(timezone.utc)
+        if not start and not end:
+            start_dt = now - timedelta(days=30)
+            end_dt = now
+            start = self._iso(start_dt)
+            end = self._iso(end_dt)
 
-def _cache_get(key: str) -> Optional[Dict[str, Any]]:
-    item = _cache.get(key)
-    if not item:
-        return None
-    expires_at, value = item
-    if time.time() > expires_at:
-        _cache.pop(key, None)
-        return None
-    return value
+        params = {
+            "timeframe": timeframe,
+            "start": start,
+            "end": end,
+            "limit": max(1, min(int(limit), 10000)),
+            "adjustment": adjustment,
+            "feed": self.feed,
+        }
 
-def _cache_set(key: str, value: Dict[str, Any], ttl_seconds: int) -> None:
-    _cache[key] = (time.time() + ttl_seconds, value)
+        data = self._get(url, params=params)
 
-def get_quote(symbol: str, feed: str = "iex") -> Dict[str, Any]:
-    """
-    Alpaca latest quote:
-    GET /v2/stocks/{symbol}/quotes/latest?feed=iex
-    """
-    symbol = symbol.upper().strip()
-    cache_key = f"quote:{symbol}:{feed}"
-    cached = _cache_get(cache_key)
-    if cached:
-        return cached
+        bars = data.get("bars") or []
+        # Normalize output to something your frontend can use
+        normalized = [
+            {
+                "t": b.get("t"),
+                "o": b.get("o"),
+                "h": b.get("h"),
+                "l": b.get("l"),
+                "c": b.get("c"),
+                "v": b.get("v"),
+                "n": b.get("n"),
+                "vw": b.get("vw"),
+            }
+            for b in bars
+        ]
 
-    url = f"{ALPACA_DATA_BASE}/v2/stocks/{symbol}/quotes/latest"
-    data = _request("GET", url, params={"feed": feed}, timeout=10)
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "start": start,
+            "end": end,
+            "limit": params["limit"],
+            "feed": self.feed,
+            "bars": normalized,
+            "raw": data,
+        }
 
-    # Alpaca usually returns {"quote": {...}, "symbol":"AAPL"}
-    quote = data.get("quote") if isinstance(data, dict) else None
-    if not quote:
-        raise APIError("Unexpected Alpaca quote response", status_code=502, details={"data": data})
-
-    out = {
-        "symbol": data.get("symbol", symbol),
-        "bid": quote.get("bp"),
-        "ask": quote.get("ap"),
-        "bid_size": quote.get("bs"),
-        "ask_size": quote.get("as"),
-        "timestamp": quote.get("t"),
-        "raw": data,
-    }
-
-    _cache_set(cache_key, out, ttl_seconds=8)
-    return out
-
-def get_bars(
-    symbol: str,
-    timeframe: str,
-    start: str,
-    end: str,
-    limit: int = 1000,
-    feed: str = "iex",
-    adjustment: str = "raw",
-) -> Dict[str, Any]:
-    """
-    Alpaca bars:
-    GET /v2/stocks/{symbol}/bars?timeframe=1Day&start=...&end=...&limit=1000&feed=iex&adjustment=raw
-    start/end should be ISO 8601 with timezone, e.g. 2025-12-01T00:00:00Z
-    """
-    symbol = symbol.upper().strip()
-    cache_key = f"bars:{symbol}:{timeframe}:{start}:{end}:{limit}:{feed}:{adjustment}"
-    cached = _cache_get(cache_key)
-    if cached:
-        return cached
-
-    url = f"{ALPACA_DATA_BASE}/v2/stocks/{symbol}/bars"
-    params = {
-        "timeframe": timeframe,
-        "start": start,
-        "end": end,
-        "limit": limit,
-        "feed": feed,
-        "adjustment": adjustment,
-    }
-    data = _request("GET", url, params=params, timeout=15)
-
-    bars = data.get("bars") if isinstance(data, dict) else None
-    if bars is None:
-        raise APIError("Unexpected Alpaca bars response", status_code=502, details={"data": data})
-
-    out = {
-        "symbol": data.get("symbol", symbol),
-        "timeframe": timeframe,
-        "start": start,
-        "end": end,
-        "count": len(bars),
-        "bars": bars,      # list of {t,o,h,l,c,v,n,vw}
-        "raw": data,
-    }
-
-    _cache_set(cache_key, out, ttl_seconds=30)
-    return out
 
 
 
