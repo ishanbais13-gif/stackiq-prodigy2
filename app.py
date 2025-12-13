@@ -1,16 +1,11 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from data_fetcher import (
-    get_quote,
-    get_candles,
-    get_news,
-    run_predict_engine,
-)
+import data_fetcher
 
-app = FastAPI(title="StackIQ API", version="0.1.0")
+app = FastAPI()
 
-# CORS (safe for v1; lock down later)
+# Allow your frontend to call this API (adjust origins later if you want)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,6 +13,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/")
+def root():
+    return {"ok": True, "service": "stackiq-web", "endpoints": ["/health", "/quote/{symbol}", "/candles/{symbol}", "/news/{symbol}", "/predict/{symbol}"]}
 
 
 @app.get("/health")
@@ -28,41 +28,34 @@ def health():
 @app.get("/quote/{symbol}")
 def quote(symbol: str):
     try:
-        return get_quote(symbol)
+        return data_fetcher.get_quote(symbol)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/candles/{symbol}")
-def candles(
-    symbol: str,
-    days: int = Query(30, ge=1, le=365),
-    resolution: str = Query("D"),  # D, 60, 15, 5
-):
+def candles(symbol: str, days: int = 30, resolution: str = "1Day"):
     try:
-        return {"symbol": symbol.upper(), "candles": get_candles(symbol, days=days, resolution=resolution)}
+        return data_fetcher.get_candles(symbol, days=days, resolution=resolution)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/news/{symbol}")
-def news(symbol: str, limit: int = Query(5, ge=1, le=50)):
+def news(symbol: str, limit: int = 5):
     try:
-        return get_news(symbol, limit=limit)
+        return data_fetcher.get_news(symbol, limit=limit)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/predict/{symbol}")
-def predict(
-    symbol: str,
-    budget: float = Query(..., gt=0),
-    risk: str = Query("medium"),  # low | medium | high
-):
+def predict(symbol: str, budget: float = 1000.0, risk: str = "medium"):
     try:
-        return run_predict_engine(symbol=symbol, budget=budget, risk=risk)
+        return data_fetcher.run_predict_engine(symbol, budget=budget, risk=risk)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 
