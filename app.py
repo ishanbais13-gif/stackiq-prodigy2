@@ -1,82 +1,53 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Any
+import os
+import requests
 
-import data_fetcher
+app = FastAPI()
 
-app = FastAPI(title="StackIQ Backend", version="1.0.0")
+# --- Alpaca Environment Variables ---
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET")
+ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
 
-# --- CORS so your React app + localhost + Azure can call this ---
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # you can tighten later
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+HEADERS = {
+    "APCA-API-KEY-ID": ALPACA_API_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_API_SECRET
+}
 
-
-# -------------------------------------------------------------
-#  Health
-# -------------------------------------------------------------
+# --- Health Check (CRITICAL FOR AZURE) ---
 @app.get("/health")
-def health() -> dict:
+def health():
     return {"status": "ok"}
 
-
-# -------------------------------------------------------------
-#  Quote
-# -------------------------------------------------------------
+# --- Quote Endpoint ---
 @app.get("/quote/{symbol}")
-def quote(symbol: str) -> Any:
+def get_quote(symbol: str):
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        raise HTTPException(status_code=500, detail="Alpaca API keys not set")
+
+    url = f"{ALPACA_BASE_URL}/v2/stocks/{symbol.upper()}/quotes/latest"
+
     try:
-        return data_fetcher.get_quote(symbol)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Quote error: {e}")
+        r = requests.get(url, headers=HEADERS, timeout=5)
+        r.raise_for_status()
+        data = r.json()
 
+        quote = data.get("quote")
+        if not quote:
+            raise HTTPException(status_code=404, detail="Quote not found")
 
-# -------------------------------------------------------------
-#  Candles
-# -------------------------------------------------------------
-@app.get("/candles/{symbol}")
-def candles(symbol: str, resolution: str = "D", days: int = 30) -> Any:
-    """
-    resolution: "D", "60", "15", "5", etc – we map to Alpaca internally.
-    """
-    try:
-        data = data_fetcher.get_candles(symbol, days=days, resolution=resolution)
-        return {"symbol": symbol.upper(), "resolution": resolution, "days": days, "candles": data}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Candles error: {e}")
+        return {
+            "symbol": symbol.upper(),
+            "bid_price": quote.get("bp"),
+            "ask_price": quote.get("ap"),
+            "bid_size": quote.get("bs"),
+            "ask_size": quote.get("as"),
+            "timestamp": quote.get("t")
+        }
 
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# -------------------------------------------------------------
-#  News
-# -------------------------------------------------------------
-@app.get("/news/{symbol}")
-def news(symbol: str, limit: int = 5) -> Any:
-    try:
-        return data_fetcher.get_news(symbol, limit=limit)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"News error: {e}")
-
-
-# -------------------------------------------------------------
-#  Predict (mock engine for v1)
-# -------------------------------------------------------------
-@app.get("/predict/{symbol}")
-def predict(symbol: str, budget: float, risk: str = "medium", fractional: bool = True) -> Any:
-    """
-    Main endpoint your UI will hit.
-    Returns a mock-but-consistent trade idea so your app never crashes.
-    """
-    try:
-        result = data_fetcher.run_predict_engine(symbol, budget, risk)
-        # keep fractional in response for future real engine
-        result["fractional"] = fractional
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Predict error: {e}")
 
 
 
