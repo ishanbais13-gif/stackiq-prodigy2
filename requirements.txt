@@ -3,7 +3,9 @@ uvicorn[standard]
 gunicorn
 requests
 python-dotenv
+alpaca-py
 numpy
+
 
 
 
