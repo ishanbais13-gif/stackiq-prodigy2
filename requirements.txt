@@ -3,12 +3,9 @@ uvicorn[standard]
 gunicorn
 requests
 python-dotenv
-
-# Alpaca (stable)
 alpaca-py==0.21.0
-
-# Math (Azure-safe)
 numpy==1.26.4
+
 
 
 
