@@ -1,60 +1,60 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-
-import data_fetcher
-
-app = FastAPI()
-
-# Allow your frontend to call this API (adjust origins later if you want)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+from data_fetcher import (
+    get_quote,
+    get_candles,
+    run_predict_engine
 )
 
+app = FastAPI(title="StackIQ API", version="v1")
 
-@app.get("/")
-def root():
-    return {"ok": True, "service": "stackiq-web", "endpoints": ["/health", "/quote/{symbol}", "/candles/{symbol}", "/news/{symbol}", "/predict/{symbol}"]}
 
+# ==========================
+# Health Check (Azure)
+# ==========================
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 
+# ==========================
+# Market Endpoints
+# ==========================
+
 @app.get("/quote/{symbol}")
 def quote(symbol: str):
     try:
-        return data_fetcher.get_quote(symbol)
+        return get_quote(symbol)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/candles/{symbol}")
-def candles(symbol: str, days: int = 30, resolution: str = "1Day"):
+def candles(symbol: str, days: int = 30):
     try:
-        return data_fetcher.get_candles(symbol, days=days, resolution=resolution)
+        return {
+            "symbol": symbol.upper(),
+            "candles": get_candles(symbol, days)
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/news/{symbol}")
-def news(symbol: str, limit: int = 5):
-    try:
-        return data_fetcher.get_news(symbol, limit=limit)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+# ==========================
+# Prediction Endpoint
+# ==========================
 
 @app.get("/predict/{symbol}")
-def predict(symbol: str, budget: float = 1000.0, risk: str = "medium"):
+def predict(
+    symbol: str,
+    budget: float = 1000,
+    risk: str = "medium"
+):
     try:
-        return data_fetcher.run_predict_engine(symbol, budget=budget, risk=risk)
+        return run_predict_engine(symbol, budget, risk)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 
