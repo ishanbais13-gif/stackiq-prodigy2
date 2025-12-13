@@ -1,180 +1,155 @@
 import os
+import time
 import requests
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Literal
+from typing import Any, Dict, Optional, Tuple
 
-# IMPORTANT:
-# - Do NOT raise errors at import-time (Azure will 504)
-# - Only validate keys inside request functions
+# Alpaca endpoints
+ALPACA_DATA_BASE = os.getenv("ALPACA_DATA_BASE", "https://data.alpaca.markets")
+ALPACA_PAPER_BASE = os.getenv("ALPACA_PAPER_BASE", "https://paper-api.alpaca.markets")
 
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
+class APIError(Exception):
+    def __init__(self, message: str, status_code: int = 500, details: Optional[dict] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.details = details or {}
 
-# Use Alpaca DATA domain for quotes/bars/news:
-ALPACA_DATA_BASE_URL = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets").rstrip("/")
+def _get_alpaca_headers() -> Dict[str, str]:
+    key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
+    secret = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
 
-DEFAULT_TIMEOUT = 10  # seconds
-
-def _headers() -> Dict[str, str]:
-    # read latest values (in case Azure injects after boot)
-    key = os.getenv("ALPACA_API_KEY")
-    secret = os.getenv("ALPACA_SECRET_KEY")
     if not key or not secret:
-        raise Exception("Missing ALPACA_API_KEY / ALPACA_SECRET_KEY in environment variables")
+        raise APIError(
+            "Missing ALPACA_API_KEY / ALPACA_SECRET_KEY in environment variables",
+            status_code=500,
+            details={"needed": ["ALPACA_API_KEY", "ALPACA_SECRET_KEY"]}
+        )
+
     return {
         "APCA-API-KEY-ID": key,
         "APCA-API-SECRET-KEY": secret,
+        "Accept": "application/json",
     }
 
-def _get(url: str, params: Optional[dict] = None) -> Dict[str, Any]:
-    r = requests.get(url, headers=_headers(), params=params or {}, timeout=DEFAULT_TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+def _request(method: str, url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 12) -> Dict[str, Any]:
+    headers = _get_alpaca_headers()
+    params = params or {}
 
-# -------------------------
-# QUOTE (latest)
-# -------------------------
-def get_latest_quote(symbol: str) -> Dict[str, Any]:
-    sym = symbol.upper().strip()
-    url = f"{ALPACA_DATA_BASE_URL}/v2/stocks/{sym}/quotes/latest"
-    data = _get(url)
-    q = data.get("quote") or {}
-    if not q:
-        raise Exception("Quote not found (check symbol or Alpaca permissions)")
-    return q
+    try:
+        resp = requests.request(method, url, headers=headers, params=params, timeout=timeout)
+    except requests.RequestException as e:
+        raise APIError("Alpaca request failed (network/timeout)", status_code=502, details={"error": str(e)})
 
-# -------------------------
-# BARS / CANDLES
-# -------------------------
-def get_bars(
-    symbol: str,
-    days: int = 30,
-    timeframe: Literal["1Day", "1Hour", "15Min", "5Min"] = "1Day",
-    feed: Optional[Literal["iex", "sip"]] = "iex",
-) -> List[Dict[str, Any]]:
-    """
-    Alpaca bars endpoint expects timeframe like 1Day/1Hour/15Min/5Min
-    feed=iex works for most free accounts; sip may 403 without subscription.
-    """
-    sym = symbol.upper().strip()
+    # Try json
+    try:
+        data = resp.json()
+    except Exception:
+        data = {"raw": resp.text[:5000]}
 
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days + 2)
-
-    params = {
-        "timeframe": timeframe,
-        "start": start.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "end": end.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "limit": min(1000, max(2, days * 5)),
-    }
-
-    # only include feed if provided
-    if feed:
-        params["feed"] = feed
-
-    url = f"{ALPACA_DATA_BASE_URL}/v2/stocks/{sym}/bars"
-    data = _get(url, params=params)
-    bars = data.get("bars", [])
-
-    # Normalize output for frontend (v1)
-    out: List[Dict[str, Any]] = []
-    for b in bars:
-        out.append(
-            {
-                "t": b.get("t"),   # time
-                "o": b.get("o"),
-                "h": b.get("h"),
-                "l": b.get("l"),
-                "c": b.get("c"),
-                "v": b.get("v"),
-            }
+    if resp.status_code >= 400:
+        raise APIError(
+            "Alpaca returned error",
+            status_code=resp.status_code,
+            details={"status": resp.status_code, "url": url, "params": params, "body": data}
         )
+
+    return data
+
+# --- tiny in-memory cache (helps avoid rate issues) ---
+_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+def _cache_get(key: str) -> Optional[Dict[str, Any]]:
+    item = _cache.get(key)
+    if not item:
+        return None
+    expires_at, value = item
+    if time.time() > expires_at:
+        _cache.pop(key, None)
+        return None
+    return value
+
+def _cache_set(key: str, value: Dict[str, Any], ttl_seconds: int) -> None:
+    _cache[key] = (time.time() + ttl_seconds, value)
+
+def get_quote(symbol: str, feed: str = "iex") -> Dict[str, Any]:
+    """
+    Alpaca latest quote:
+    GET /v2/stocks/{symbol}/quotes/latest?feed=iex
+    """
+    symbol = symbol.upper().strip()
+    cache_key = f"quote:{symbol}:{feed}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
+    url = f"{ALPACA_DATA_BASE}/v2/stocks/{symbol}/quotes/latest"
+    data = _request("GET", url, params={"feed": feed}, timeout=10)
+
+    # Alpaca usually returns {"quote": {...}, "symbol":"AAPL"}
+    quote = data.get("quote") if isinstance(data, dict) else None
+    if not quote:
+        raise APIError("Unexpected Alpaca quote response", status_code=502, details={"data": data})
+
+    out = {
+        "symbol": data.get("symbol", symbol),
+        "bid": quote.get("bp"),
+        "ask": quote.get("ap"),
+        "bid_size": quote.get("bs"),
+        "ask_size": quote.get("as"),
+        "timestamp": quote.get("t"),
+        "raw": data,
+    }
+
+    _cache_set(cache_key, out, ttl_seconds=8)
     return out
 
-# -------------------------
-# NEWS
-# -------------------------
-def get_news(symbol: str, limit: int = 5) -> List[Dict[str, Any]]:
-    sym = symbol.upper().strip()
-    # Alpaca data news endpoint:
-    url = f"{ALPACA_DATA_BASE_URL}/v1beta1/news"
-    params = {"symbols": sym, "limit": limit}
-    data = _get(url, params=params)
+def get_bars(
+    symbol: str,
+    timeframe: str,
+    start: str,
+    end: str,
+    limit: int = 1000,
+    feed: str = "iex",
+    adjustment: str = "raw",
+) -> Dict[str, Any]:
+    """
+    Alpaca bars:
+    GET /v2/stocks/{symbol}/bars?timeframe=1Day&start=...&end=...&limit=1000&feed=iex&adjustment=raw
+    start/end should be ISO 8601 with timezone, e.g. 2025-12-01T00:00:00Z
+    """
+    symbol = symbol.upper().strip()
+    cache_key = f"bars:{symbol}:{timeframe}:{start}:{end}:{limit}:{feed}:{adjustment}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
 
-    items: List[Dict[str, Any]] = []
-    for item in data if isinstance(data, list) else []:
-        items.append(
-            {
-                "id": item.get("id"),
-                "headline": item.get("headline"),
-                "summary": item.get("summary"),
-                "url": item.get("url"),
-                "created_at": item.get("created_at"),
-                "source": item.get("source"),
-            }
-        )
-    return items
-
-# -------------------------
-# SIMPLE V1 "PREDICT" ENGINE
-# -------------------------
-def run_predict_engine(symbol: str, budget: float, risk: str = "medium") -> Dict[str, Any]:
-    sym = symbol.upper().strip()
-    risk = (risk or "medium").lower()
-
-    # Get recent daily bars
-    bars = get_bars(sym, days=30, timeframe="1Day", feed="iex")
-
-    if len(bars) < 5:
-        return {
-            "symbol": sym,
-            "risk": risk,
-            "error": "Not enough bar data to generate setup",
-            "setup": None,
-        }
-
-    last_close = float(bars[-1]["c"])
-    prev_close = float(bars[-2]["c"])
-    change = last_close - prev_close
-    direction = "up" if change >= 0 else "down"
-
-    # Simple risk presets (V1)
-    if risk == "high":
-        buy_low_mult, buy_high_mult, target_mult, stop_mult = 0.985, 0.995, 1.06, 0.94
-        confidence = 55
-        projected_roi = 12
-    elif risk == "low":
-        buy_low_mult, buy_high_mult, target_mult, stop_mult = 0.993, 0.998, 1.03, 0.97
-        confidence = 72
-        projected_roi = 5
-    else:
-        buy_low_mult, buy_high_mult, target_mult, stop_mult = 0.99, 0.997, 1.045, 0.955
-        confidence = 64
-        projected_roi = 8
-
-    buy_low = round(last_close * buy_low_mult, 2)
-    buy_high = round(last_close * buy_high_mult, 2)
-    target = round(last_close * target_mult, 2)
-    stop = round(last_close * stop_mult, 2)
-
-    # position sizing: risk 2% of budget, approximate stop distance
-    max_risk = budget * 0.02
-    per_share_risk = max(last_close - stop, 0.01)
-    shares = max(int(max_risk // per_share_risk), 1)
-
-    return {
-        "symbol": sym,
-        "last_price": last_close,
-        "direction": direction,
-        "risk": risk,
-        "buy_zone": f"{buy_low} - {buy_high}",
-        "target": target,
-        "stop": stop,
-        "position_size": f"{shares} shares",
-        "confidence": confidence,
-        "projected_roi": projected_roi,
-        "notes": "V1 mock engine: uses recent daily momentum + fixed risk presets. Replace with real model later.",
+    url = f"{ALPACA_DATA_BASE}/v2/stocks/{symbol}/bars"
+    params = {
+        "timeframe": timeframe,
+        "start": start,
+        "end": end,
+        "limit": limit,
+        "feed": feed,
+        "adjustment": adjustment,
     }
+    data = _request("GET", url, params=params, timeout=15)
+
+    bars = data.get("bars") if isinstance(data, dict) else None
+    if bars is None:
+        raise APIError("Unexpected Alpaca bars response", status_code=502, details={"data": data})
+
+    out = {
+        "symbol": data.get("symbol", symbol),
+        "timeframe": timeframe,
+        "start": start,
+        "end": end,
+        "count": len(bars),
+        "bars": bars,      # list of {t,o,h,l,c,v,n,vw}
+        "raw": data,
+    }
+
+    _cache_set(cache_key, out, ttl_seconds=30)
+    return out
+
 
 
 
