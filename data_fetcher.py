@@ -1,37 +1,45 @@
- import os
+import os
 import requests
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
 
-# Alpaca Market Data base
-ALPACA_DATA_BASE = os.getenv("ALPACA_DATA_BASE", "https://data.alpaca.markets")
+# ==========================
+# Alpaca Configuration
+# ==========================
 
-# Keys (these MUST be set in Azure App Service env vars)
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
 ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET")
+ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
+
+if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+    raise RuntimeError("Missing Alpaca API credentials")
+
+HEADERS = {
+    "APCA-API-KEY-ID": ALPACA_API_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_API_SECRET
+}
 
 
-def _headers() -> Dict[str, str]:
-    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
-        raise RuntimeError("Missing ALPACA_API_KEY or ALPACA_API_SECRET environment variables.")
-    return {
-        "APCA-API-KEY-ID": ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_API_SECRET,
-    }
+# ==========================
+# Internal Helpers
+# ==========================
+
+def _alpaca_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    url = f"{ALPACA_BASE_URL}{path}"
+    response = requests.get(url, headers=HEADERS, params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
 
 
-def _get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    url = f"{ALPACA_DATA_BASE}{path}"
-    r = requests.get(url, headers=_headers(), params=params or {}, timeout=15)
-    r.raise_for_status()
-    return r.json()
-
+# ==========================
+# Market Data
+# ==========================
 
 def get_quote(symbol: str) -> Dict[str, Any]:
     symbol = symbol.upper()
-    # Force free feed
-    data = _get(f"/v2/stocks/{symbol}/quotes/latest", params={"feed": "iex"})
-    quote = data.get("quote") or {}
+    data = _alpaca_get(f"/v2/stocks/{symbol}/quotes/latest")
+    quote = data.get("quote", {})
+
     return {
         "symbol": symbol,
         "bid": quote.get("bp"),
@@ -39,141 +47,96 @@ def get_quote(symbol: str) -> Dict[str, Any]:
         "bid_size": quote.get("bs"),
         "ask_size": quote.get("as"),
         "timestamp": quote.get("t"),
-        "raw": quote,
+        "raw": quote
     }
 
 
-def _resolution_to_timeframe(resolution: str) -> str:
-    r = (resolution or "1Day").strip().upper()
-    if r in ("D", "1D", "DAY", "1DAY"):
-        return "1Day"
-    if r in ("60", "60MIN", "1H", "HOUR", "1HOUR"):
-        return "1Hour"
-    if r in ("15", "15MIN"):
-        return "15Min"
-    if r in ("5", "5MIN"):
-        return "5Min"
-    return "1Day"
-
-
-def get_candles(symbol: str, days: int = 30, resolution: str = "1Day") -> Dict[str, Any]:
+def get_candles(symbol: str, days: int = 30) -> List[Dict[str, Any]]:
     symbol = symbol.upper()
-    timeframe = _resolution_to_timeframe(resolution)
-
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=max(2, days))
+    end = datetime.utcnow()
+    start = end - timedelta(days=days)
 
     params = {
-        "timeframe": timeframe,
-        "start": start.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "end": end.isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "limit": 1000,
-        # THIS is the important part for your 403:
-        "feed": "iex",
+        "timeframe": "1Day",
+        "start": start.isoformat() + "Z",
+        "end": end.isoformat() + "Z",
+        "limit": 1000
     }
 
-    data = _get(f"/v2/stocks/{symbol}/bars", params=params)
-    bars = data.get("bars", []) or []
+    data = _alpaca_get(f"/v2/stocks/{symbol}/bars", params=params)
+    bars = data.get("bars", [])
 
-    candles: List[Dict[str, Any]] = []
-    for b in bars:
-        candles.append(
-            {
-                "time": b.get("t"),
-                "open": b.get("o"),
-                "high": b.get("h"),
-                "low": b.get("l"),
-                "close": b.get("c"),
-                "volume": b.get("v"),
-            }
-        )
+    candles = []
+    for bar in bars:
+        candles.append({
+            "time": bar.get("t"),
+            "open": bar.get("o"),
+            "high": bar.get("h"),
+            "low": bar.get("l"),
+            "close": bar.get("c"),
+            "volume": bar.get("v")
+        })
 
-    return {"symbol": symbol, "timeframe": timeframe, "count": len(candles), "candles": candles}
+    return candles
 
 
-def get_news(symbol: str, limit: int = 5) -> Dict[str, Any]:
+# ==========================
+# Predict Engine (V1)
+# ==========================
+
+def run_predict_engine(
+    symbol: str,
+    budget: float,
+    risk: str = "medium"
+) -> Dict[str, Any]:
     symbol = symbol.upper()
-    # News endpoint is /v1beta1/news (still market-data domain)
-    data = _get("/v1beta1/news", params={"symbols": symbol, "limit": int(limit)})
-    items = []
-    for item in (data or []):
-        items.append(
-            {
-                "id": item.get("id"),
-                "headline": item.get("headline"),
-                "summary": item.get("summary"),
-                "url": item.get("url"),
-                "created_at": item.get("created_at"),
-                "source": item.get("source"),
-            }
-        )
-    return {"symbol": symbol, "items": items}
+    risk = risk.lower()
 
-
-def run_predict_engine(symbol: str, budget: float, risk: str = "medium") -> Dict[str, Any]:
-    """
-    Simple v1 placeholder: uses recent candles to output a stable "trade idea"
-    so your frontend has something consistent to render.
-    """
-    risk = (risk or "medium").lower()
-    try:
-        candles = get_candles(symbol, days=20, resolution="1Day")["candles"]
-    except Exception:
-        candles = []
-
+    candles = get_candles(symbol, days=20)
     if len(candles) < 2:
         return {
-            "symbol": symbol.upper(),
-            "direction": "unknown",
-            "buy_zone": "N/A",
-            "target": None,
-            "stop": None,
-            "position_size": None,
-            "risk": risk,
-            "confidence": 0,
-            "projected_roi": 0,
-            "notes": "Not enough recent candle data.",
+            "symbol": symbol,
+            "error": "Not enough historical data"
         }
 
-    last = candles[-1]
-    prev = candles[-2]
-    price = float(last["close"])
-    prev_price = float(prev["close"])
-    change = price - prev_price
-    direction = "up" if change >= 0 else "down"
+    last = candles[-1]["close"]
+    prev = candles[-2]["close"]
+    direction = "up" if last >= prev else "down"
 
-    # Risk presets (tweak later)
-    if risk == "high":
-        buy_mult, target_mult, stop_mult, conf = 0.99, 1.08, 0.93, 58
-        roi = 14
-    elif risk == "low":
-        buy_mult, target_mult, stop_mult, conf = 0.995, 1.03, 0.97, 72
-        roi = 6
+    # Risk profiles
+    if risk == "low":
+        target_mult = 1.03
+        stop_mult = 0.97
+        confidence = 72
+    elif risk == "high":
+        target_mult = 1.08
+        stop_mult = 0.93
+        confidence = 58
     else:
-        buy_mult, target_mult, stop_mult, conf = 0.99, 1.05, 0.95, 65
-        roi = 10
+        target_mult = 1.05
+        stop_mult = 0.95
+        confidence = 65
 
-    buy = round(price * buy_mult, 2)
-    target = round(price * target_mult, 2)
-    stop = round(price * stop_mult, 2)
+    target = round(last * target_mult, 2)
+    stop = round(last * stop_mult, 2)
 
-    max_risk_per_trade = float(budget) * 0.02
-    per_share_risk = max(price - stop, 0.01)
-    shares = max(int(max_risk_per_trade // per_share_risk), 1)
+    max_risk = budget * 0.02
+    per_share_risk = max(last - stop, 0.01)
+    shares = int(max_risk // per_share_risk)
 
     return {
-        "symbol": symbol.upper(),
-        "last_price": price,
+        "symbol": symbol,
+        "last_price": last,
         "direction": direction,
-        "buy_zone": f"{buy}",
         "target": target,
         "stop": stop,
-        "position_size": f"{shares} shares",
+        "shares": max(shares, 1),
+        "budget": budget,
         "risk": risk,
-        "confidence": conf,
-        "projected_roi": roi,
-        "notes": f"Mock v1 setup using IEX daily candles. Direction: {direction}.",
+        "confidence": confidence,
+        "notes": "V1 momentum-based prediction using recent daily candles"
     }
+
 
 
 
