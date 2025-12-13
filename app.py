@@ -1,101 +1,84 @@
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, Literal, Dict, Any
-import os
 
-from data_fetcher import (
-    get_latest_quote,
-    get_bars,
-    get_news,
-    run_predict_engine,
-)
+from data_fetcher import get_quote, get_bars, APIError
 
-app = FastAPI(title="StackIQ V1", version="1.0.0")
+app = FastAPI(title="StackIQ API", version="1.0.0")
 
-# Allow your frontend to call this API (safe for V1)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # tighten later
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/")
-def root():
-    return {"ok": True, "service": "stackiq", "version": "1.0.0"}
+def iso_z(dt: datetime) -> str:
+    # Always Zulu time
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 @app.get("/health")
 def health():
-    # IMPORTANT: should never call Alpaca here (keep it instant)
-    return {"status": "ok"}
-
-@app.get("/config")
-def config():
-    # Helps debug if Azure env vars are present (does NOT reveal keys)
-    return {
-        "alpaca_key_set": bool(os.getenv("ALPACA_API_KEY")),
-        "alpaca_secret_set": bool(os.getenv("ALPACA_SECRET_KEY")),
-        "alpaca_data_base_url": os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets"),
-    }
+    return {"status": "ok", "time": int(time.time()), "version": "1.0.0"}
 
 @app.get("/quote/{symbol}")
-def quote(symbol: str):
+def quote(
+    symbol: str,
+    feed: str = Query(default="iex", description="Alpaca feed (usually 'iex'; 'sip' requires entitlement)"),
+):
     try:
-        q = get_latest_quote(symbol)
-        return {
-            "symbol": symbol.upper(),
-            "bid": q.get("bp"),
-            "ask": q.get("ap"),
-            "bid_size": q.get("bs"),
-            "ask_size": q.get("as"),
-            "timestamp": q.get("t"),
-            "raw": q,
-        }
+        return get_quote(symbol, feed=feed)
+    except APIError as e:
+        raise HTTPException(status_code=e.status_code, detail={"message": str(e), **e.details})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail={"message": "Unexpected server error", "error": str(e)})
 
 @app.get("/candles/{symbol}")
 def candles(
     symbol: str,
-    days: int = Query(30, ge=2, le=365),
-    timeframe: Literal["1Day", "1Hour", "15Min", "5Min"] = "1Day",
-    feed: Optional[Literal["iex", "sip"]] = "iex",
+    timeframe: str = Query(default="1Day", description="Examples: 1Min, 5Min, 15Min, 1Hour, 1Day"),
+    days: int = Query(default=30, ge=1, le=365, description="Lookback window in days (if start/end not provided)"),
+    start: Optional[str] = Query(default=None, description="ISO 8601 Z time, e.g. 2025-12-01T00:00:00Z"),
+    end: Optional[str] = Query(default=None, description="ISO 8601 Z time, e.g. 2025-12-13T00:00:00Z"),
+    limit: int = Query(default=1000, ge=1, le=10000),
+    feed: str = Query(default="iex", description="Alpaca feed"),
+    adjustment: str = Query(default="raw", description="raw or split or dividend or all"),
 ):
-    """
-    Returns OHLCV bars from Alpaca Data.
-    For most free accounts, use feed=iex.
-    """
-    try:
-        bars = get_bars(symbol=symbol, days=days, timeframe=timeframe, feed=feed)
-        return {"symbol": symbol.upper(), "timeframe": timeframe, "days": days, "bars": bars}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # If user doesn't supply start/end, derive from `days`
+    now = datetime.now(timezone.utc)
+    if end is None:
+        end = iso_z(now)
+    if start is None:
+        start = iso_z(now - timedelta(days=days))
 
-@app.get("/news/{symbol}")
-def news(symbol: str, limit: int = Query(5, ge=1, le=20)):
     try:
-        items = get_news(symbol=symbol, limit=limit)
-        return {"symbol": symbol.upper(), "items": items}
+        return get_bars(
+            symbol=symbol,
+            timeframe=timeframe,
+            start=start,
+            end=end,
+            limit=limit,
+            feed=feed,
+            adjustment=adjustment,
+        )
+    except APIError as e:
+        raise HTTPException(status_code=e.status_code, detail={"message": str(e), **e.details})
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail={"message": "Unexpected server error", "error": str(e)})
 
-@app.get("/predict/{symbol}")
-def predict(
-    symbol: str,
-    budget: float = Query(100.0, gt=0),
-    risk: Literal["low", "medium", "high"] = "medium",
-):
-    """
-    V1 prediction engine:
-    - Uses recent bars to generate a simple trade plan your frontend can display.
-    - Always returns JSON (never None).
-    """
-    try:
-        result = run_predict_engine(symbol=symbol, budget=budget, risk=risk)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/")
+def root():
+    return {
+        "name": "StackIQ API",
+        "version": "1.0.0",
+        "endpoints": ["/health", "/quote/{symbol}", "/candles/{symbol}"],
+        "required_env": ["ALPACA_API_KEY", "ALPACA_SECRET_KEY"],
+    }
+
 
 
 
