@@ -1,51 +1,93 @@
-from fastapi import FastAPI, HTTPException
+ from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import os
-import requests
 
-app = FastAPI()
+# Import your existing functions from data_fetcher.py
+# (Make sure these names match your file exactly.)
+from data_fetcher import (
+    get_quote,
+    get_candles,
+    get_news,
+    run_predict_engine,
+)
 
-# --- Alpaca Environment Variables ---
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
-ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://data.alpaca.markets")
+app = FastAPI(title="StackIQ API", version="1.0")
 
-HEADERS = {
-    "APCA-API-KEY-ID": ALPACA_API_KEY,
-    "APCA-API-SECRET-KEY": ALPACA_API_SECRET
-}
+# CORS (lets your frontend call this API)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # tighten later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# --- Health Check (CRITICAL FOR AZURE) ---
+def _env_check():
+    # Only require keys for endpoints that actually hit Alpaca
+    if not os.getenv("ALPACA_API_KEY") or not os.getenv("ALPACA_API_SECRET"):
+        raise HTTPException(
+            status_code=500,
+            detail="Missing env vars: ALPACA_API_KEY and/or ALPACA_API_SECRET"
+        )
+
+@app.get("/")
+def root():
+    return {
+        "name": "StackIQ API",
+        "status": "running",
+        "endpoints": ["/health", "/quote/{symbol}", "/candles/{symbol}", "/news/{symbol}", "/predict/{symbol}"]
+    }
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# --- Quote Endpoint ---
 @app.get("/quote/{symbol}")
-def get_quote(symbol: str):
-    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
-        raise HTTPException(status_code=500, detail="Alpaca API keys not set")
-
-    url = f"{ALPACA_BASE_URL}/v2/stocks/{symbol.upper()}/quotes/latest"
-
+def quote(symbol: str):
+    _env_check()
     try:
-        r = requests.get(url, headers=HEADERS, timeout=5)
-        r.raise_for_status()
-        data = r.json()
+        return get_quote(symbol)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        quote = data.get("quote")
-        if not quote:
-            raise HTTPException(status_code=404, detail="Quote not found")
+@app.get("/candles/{symbol}")
+def candles(symbol: str, days: int = 30, resolution: str = "D"):
+    """
+    days: how many trading days back (approx)
+    resolution: "D", "60", "15", "5" (your data_fetcher maps these)
+    """
+    _env_check()
+    try:
+        data = get_candles(symbol, days=days, resolution=resolution)
+        return {"symbol": symbol.upper(), "candles": data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-        return {
-            "symbol": symbol.upper(),
-            "bid_price": quote.get("bp"),
-            "ask_price": quote.get("ap"),
-            "bid_size": quote.get("bs"),
-            "ask_size": quote.get("as"),
-            "timestamp": quote.get("t")
-        }
+@app.get("/news/{symbol}")
+def news(symbol: str, limit: int = 5):
+    _env_check()
+    try:
+        return get_news(symbol, limit=limit)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    except requests.exceptions.RequestException as e:
+@app.get("/predict/{symbol}")
+def predict(symbol: str, budget: float = 100.0, risk: str = "medium"):
+    """
+    risk: low | medium | high
+    """
+    _env_check()
+    try:
+        return run_predict_engine(symbol=symbol, budget=budget, risk=risk)
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
