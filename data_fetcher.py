@@ -228,6 +228,51 @@ def get_bars(
         "bars": norm,
         "raw": raw,
     }
+def simple_predict_from_bars(bars: list) -> dict:
+    """
+    Very clean V1 predictor using trend + momentum.
+    """
+    if len(bars) < 10:
+        return {
+            "direction": "neutral",
+            "confidence": 0.0,
+            "reason": "Not enough data"
+        }
+
+    closes = [b["c"] for b in bars if b.get("c") is not None]
+
+    if len(closes) < 10:
+        return {
+            "direction": "neutral",
+            "confidence": 0.0,
+            "reason": "Insufficient closing prices"
+        }
+
+    # Simple moving averages
+    short_ma = sum(closes[-5:]) / 5
+    long_ma = sum(closes[-10:]) / 10
+
+    momentum = closes[-1] - closes[-5]
+
+    if short_ma > long_ma and momentum > 0:
+        return {
+            "direction": "bullish",
+            "confidence": min(abs(momentum) / closes[-1], 1.0),
+            "reason": "Short-term trend above long-term with positive momentum"
+        }
+
+    if short_ma < long_ma and momentum < 0:
+        return {
+            "direction": "bearish",
+            "confidence": min(abs(momentum) / closes[-1], 1.0),
+            "reason": "Short-term trend below long-term with negative momentum"
+        }
+
+    return {
+        "direction": "neutral",
+        "confidence": 0.3,
+        "reason": "Mixed signals"
+    }
 
 
 
