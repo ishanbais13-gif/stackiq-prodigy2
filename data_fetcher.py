@@ -1,80 +1,104 @@
 import os
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
-
+import time
 import requests
+from typing import Any, Dict, Optional, Tuple
 
 
 class AlpacaClient:
     """
-    Alpaca Data API client (stocks).
-    Env vars required:
-      - ALPACA_API_KEY
-      - ALPACA_SECRET_KEY
-
-    Optional:
-      - ALPACA_DATA_BASE_URL (default: https://data.alpaca.markets)
-      - ALPACA_FEED (default: iex)  # iex works for most free accounts; sip requires paid
+    Minimal, stable Alpaca client for:
+    - Latest quote
+    - Historical bars (candles)
+    Uses ONLY environment variables (Azure App Service compatible).
     """
 
     def __init__(self) -> None:
         self.api_key = os.getenv("ALPACA_API_KEY", "").strip()
-        self.secret_key = os.getenv("ALPACA_SECRET_KEY", "").strip()
 
-        if not self.api_key or not self.secret_key:
-            raise ValueError("Missing ALPACA_API_KEY / ALPACA_SECRET_KEY in environment variables")
-
-        self.data_base_url = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets").strip().rstrip("/")
-        self.feed = os.getenv("ALPACA_FEED", "iex").strip()
-
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "APCA-API-KEY-ID": self.api_key,
-                "APCA-API-SECRET-KEY": self.secret_key,
-                "Accept": "application/json",
-            }
+        # Support both names because your env vars have been inconsistent before.
+        # Your Azure screenshot shows ALPACA_API_SECRET and ALPACA_SECRET_KEY.
+        self.secret_key = (
+            os.getenv("ALPACA_SECRET_KEY", "").strip()
+            or os.getenv("ALPACA_API_SECRET", "").strip()
+            or os.getenv("ALPACA_API_SECRET_KEY", "").strip()
         )
 
-    def _get(self, url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        try:
-            resp = self.session.get(url, params=params or {}, timeout=15)
-            resp.raise_for_status()
-            return resp.json()
-        except requests.exceptions.HTTPError as e:
-            # Try to include Alpaca error body if present
-            detail = ""
-            try:
-                detail = resp.text  # type: ignore[name-defined]
-            except Exception:
-                pass
-            raise RuntimeError(f"Alpaca HTTP error: {e}. Body: {detail}") from e
-        except requests.exceptions.RequestException as e:
-            raise RuntimeError(f"Network error calling Alpaca: {e}") from e
-        except ValueError as e:
-            raise RuntimeError(f"Invalid JSON from Alpaca: {e}") from e
+        # You already set these in Azure:
+        self.data_base_url = os.getenv("ALPACA_DATA_BASE_URL", "https://data.alpaca.markets").strip()
+        self.trading_base_url = os.getenv("ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets").strip()
+        self.feed = os.getenv("ALPACA_DATA_FEED", "iex").strip()  # iex recommended for free tiers
 
-    @staticmethod
-    def _iso(dt: datetime) -> str:
-        # Alpaca accepts RFC3339/ISO timestamps
-        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        # Optional knobs
+        self.timeout_s = float(os.getenv("HTTP_TIMEOUT_SECONDS", "15").strip())
+        self.max_retries = int(os.getenv("HTTP_MAX_RETRIES", "2").strip())
+        self.retry_sleep_s = float(os.getenv("HTTP_RETRY_SLEEP_SECONDS", "0.6").strip())
+
+        self._validate()
+
+    def _validate(self) -> None:
+        missing = []
+        if not self.api_key:
+            missing.append("ALPACA_API_KEY")
+        if not self.secret_key:
+            missing.append("ALPACA_SECRET_KEY (or ALPACA_API_SECRET)")
+        if missing:
+            raise RuntimeError(f"Missing Alpaca environment variables: {', '.join(missing)}")
+
+    def _headers(self) -> Dict[str, str]:
+        return {
+            "APCA-API-KEY-ID": self.api_key,
+            "APCA-API-SECRET-KEY": self.secret_key,
+        }
+
+    def _request(self, method: str, url: str, params: Optional[Dict[str, Any]] = None) -> Tuple[int, Dict[str, Any]]:
+        last_err: Optional[Exception] = None
+
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = requests.request(
+                    method=method,
+                    url=url,
+                    headers=self._headers(),
+                    params=params,
+                    timeout=self.timeout_s,
+                )
+                try:
+                    data = resp.json() if resp.content else {}
+                except Exception:
+                    data = {"raw_text": resp.text}
+
+                return resp.status_code, data
+
+            except Exception as e:
+                last_err = e
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_sleep_s)
+
+        raise RuntimeError(f"HTTP request failed after retries: {last_err}")
+
+    # -----------------------
+    # Public API
+    # -----------------------
 
     def get_latest_quote(self, symbol: str) -> Dict[str, Any]:
         symbol = symbol.upper().strip()
         url = f"{self.data_base_url}/v2/stocks/{symbol}/quotes/latest"
-        params = {"feed": self.feed}
-        data = self._get(url, params=params)
+        status, data = self._request("GET", url, params={"feed": self.feed})
+
+        if status >= 400:
+            raise RuntimeError(f"Alpaca error {status}: {data}")
 
         # Alpaca returns {"quote": {...}} for this endpoint
-        q = data.get("quote") or {}
+        quote = data.get("quote") or data
         return {
             "symbol": symbol,
-            "bid": q.get("bp"),
-            "ask": q.get("ap"),
-            "bid_size": q.get("bs"),
-            "ask_size": q.get("as"),
-            "timestamp": q.get("t"),
-            "raw": q,
+            "timestamp": quote.get("t"),
+            "bid": quote.get("bp"),
+            "ask": quote.get("ap"),
+            "bid_size": quote.get("bs"),
+            "ask_size": quote.get("as"),
+            "exchange": quote.get("bx") or quote.get("ax"),
+            "raw": data,
         }
 
     def get_bars(
@@ -83,61 +107,43 @@ class AlpacaClient:
         timeframe: str = "1Day",
         start: Optional[str] = None,
         end: Optional[str] = None,
-        limit: int = 200,
+        limit: int = 1000,
         adjustment: str = "raw",
     ) -> Dict[str, Any]:
         """
         timeframe examples: 1Min, 5Min, 15Min, 1Hour, 1Day
-        start/end: ISO strings (YYYY-MM-DD or full ISO). If missing, defaults to last 30 days.
+        start/end should be ISO8601 strings, e.g. 2025-12-01T00:00:00Z
         """
-
         symbol = symbol.upper().strip()
         url = f"{self.data_base_url}/v2/stocks/{symbol}/bars"
 
-        now = datetime.now(timezone.utc)
-        if not start and not end:
-            start_dt = now - timedelta(days=30)
-            end_dt = now
-            start = self._iso(start_dt)
-            end = self._iso(end_dt)
-
-        params = {
+        params: Dict[str, Any] = {
             "timeframe": timeframe,
-            "start": start,
-            "end": end,
-            "limit": max(1, min(int(limit), 10000)),
+            "limit": int(limit),
             "adjustment": adjustment,
             "feed": self.feed,
         }
+        if start:
+            params["start"] = start
+        if end:
+            params["end"] = end
 
-        data = self._get(url, params=params)
+        status, data = self._request("GET", url, params=params)
+        if status >= 400:
+            raise RuntimeError(f"Alpaca error {status}: {data}")
 
-        bars = data.get("bars") or []
-        # Normalize output to something your frontend can use
-        normalized = [
-            {
-                "t": b.get("t"),
-                "o": b.get("o"),
-                "h": b.get("h"),
-                "l": b.get("l"),
-                "c": b.get("c"),
-                "v": b.get("v"),
-                "n": b.get("n"),
-                "vw": b.get("vw"),
-            }
-            for b in bars
-        ]
-
+        bars = data.get("bars", [])
         return {
             "symbol": symbol,
             "timeframe": timeframe,
             "start": start,
             "end": end,
-            "limit": params["limit"],
-            "feed": self.feed,
-            "bars": normalized,
+            "limit": limit,
+            "count": len(bars),
+            "bars": bars,
             "raw": data,
         }
+
 
 
 
