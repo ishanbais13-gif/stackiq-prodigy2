@@ -203,8 +203,7 @@ def get_bars(
         "feed": cfg.feed,
         "adjustment": "raw",
     }
-
-    raw = _request_json(cfg, "GET", url, params=params)
+raw = _request_json(cfg, "GET", url, params=params)
 
     # Normalize bars into a super predictable format
     bars = raw.get("bars") or []
