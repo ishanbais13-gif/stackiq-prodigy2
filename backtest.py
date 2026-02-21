@@ -279,3 +279,86 @@ def aggregate_metrics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
             agg[k] = round(sum(vals)/len(vals), 4 if isinstance(vals[0], float) else 0)
     agg["symbols"] = [r["symbol"] for r in results if r.get("metrics")]
     return agg
+
+
+# ======================================================================
+# ADDITIVE: V1 BACKTEST HARDENING + UI ALIGNMENT (NO BREAKING CHANGES)
+# ======================================================================
+
+def run_backtest_summary(
+    symbol: str,
+    start: str,
+    end: str,
+    budget: float = 10000.0,
+    hold_days: int = 20,
+    buy_th: float = 65.0,
+    sell_th: float = 35.0,
+) -> Dict[str, Any]:
+    """
+    Lightweight wrapper for UI + confidence justification.
+    Does NOT replace run_backtest().
+    """
+    res = run_backtest(
+        symbol=symbol,
+        start=start,
+        end=end,
+        budget=budget,
+        hold_days=hold_days,
+        buy_th=buy_th,
+        sell_th=sell_th,
+        skip_earnings=False,
+    )
+
+    metrics = res.get("metrics", {})
+    return {
+        "symbol": res.get("symbol"),
+        "date_range": f"{start} → {end}",
+        "win_rate": metrics.get("win_rate"),
+        "avg_return": metrics.get("total_return"),
+        "max_drawdown": metrics.get("max_drawdown"),
+        "sharpe": metrics.get("sharpe"),
+        "trades": metrics.get("trades"),
+        "summary": res.get("summary"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def bucket_confidence(results: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Group backtest results by confidence buckets.
+    Used later by analyze() for confidence justification.
+    """
+    buckets = {
+        "0.80+": [],
+        "0.65–0.79": [],
+        "0.50–0.64": [],
+        "<0.50": [],
+    }
+
+    for r in results:
+        conf = r.get("confidence")
+        if conf is None:
+            continue
+        if conf >= 0.80:
+            buckets["0.80+"].append(r)
+        elif conf >= 0.65:
+            buckets["0.65–0.79"].append(r)
+        elif conf >= 0.50:
+            buckets["0.50–0.64"].append(r)
+        else:
+            buckets["<0.50"].append(r)
+
+    out: Dict[str, Any] = {}
+    for k, vals in buckets.items():
+        if not vals:
+            continue
+        win = len([v for v in vals if v.get("ret", 0) > 0])
+        out[k] = {
+            "count": len(vals),
+            "win_rate": round(win / len(vals), 3) if vals else 0.0,
+        }
+    return out
+
+# ======================================================================
+# END ADDITIVE
+# ======================================================================

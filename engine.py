@@ -484,3 +484,159 @@ def predict_batch(symbols: List[str], budget: float) -> List[Dict[str, Any]]:
     """
     return [predict(sym, budget) for sym in symbols]
 
+
+
+# ======================================================================
+# ADDITIVE: BACKTEST + WEIGHTING HOOKS (NO BEHAVIOR CHANGE)
+# ======================================================================
+
+def predict_as_of(symbol: str, budget: float, as_of: datetime) -> Dict[str, Any]:
+    """
+    Deterministic prediction as-of a historical date.
+    Used for backtesting. Logic mirrors predict() but uses historical candles.
+    """
+    symbol = symbol.upper()
+
+    # Pull historical candles up to as_of date
+    hist = df.get_historical_daily(
+        symbol=symbol,
+        start="",
+        end=as_of.strftime("%Y-%m-%d"),
+        source="alpaca",
+    )
+
+    if not hist or len(hist) < 60:
+        raise ValueError("Insufficient historical data for backtest")
+
+    # Rebuild feature arrays
+    c = [h["close"] for h in hist if h.get("close") is not None]
+    h_vals = [h["high"] for h in hist if h.get("high") is not None]
+    l_vals = [h["low"] for h in hist if h.get("low") is not None]
+
+    feats = {
+        "price": c[-1],
+        "sma20": sma(c, 20),
+        "sma50": sma(c, 50),
+        "sma200": sma(c, 200),
+        "rsi14": rsi(c, 14),
+        "atr14": atr(h_vals, l_vals, c, 14),
+        "macd": macd(c)[0],
+        "macd_sig": macd(c)[1],
+        "macd_hist": macd(c)[2],
+        "bbp": bollinger_percent(c, 20, 2.0),
+        "pdi": dmi_adx(h_vals, l_vals, c, 14)[0],
+        "mdi": dmi_adx(h_vals, l_vals, c, 14)[1],
+        "adx": dmi_adx(h_vals, l_vals, c, 14)[2],
+        "r5": None,
+        "r20": None,
+        "r60": None,
+        "rec_bias": None,
+        "news_bias": None,
+        "upcoming_earnings": False,
+    }
+
+    conf, bullets = _score_from_features(feats)
+    plan = _position_plan(feats, budget)
+
+    if conf >= 65:
+        signal = "BUY"
+    elif conf <= 35:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
+
+    return {
+        "symbol": symbol,
+        "signal": signal,
+        "confidence": conf,
+        "entry": plan["entry"],
+        "target": plan["target"],
+        "stop": plan["stop"],
+        "rationale": bullets,
+        "as_of": as_of.isoformat(),
+    }
+
+# ======================================================================
+# ADDITIVE: SENTIMENT → CONFIDENCE RULES (V1 LOCKED)
+# ======================================================================
+
+def _classify_sentiment(news_bias: Optional[float]) -> Tuple[str, str]:
+    """Classify sentiment and severity from news_bias."""
+    if news_bias is None:
+        return "neutral", "low"
+
+    if news_bias >= 0.3:
+        return "positive", "high"
+    if news_bias > 0.05:
+        return "positive", "low"
+    if news_bias <= -0.3:
+        return "negative", "high"
+    if news_bias < -0.05:
+        return "negative", "low"
+
+    return "neutral", "low"
+
+
+def _sentiment_confidence_adjustment(sentiment: str, severity: str) -> Tuple[float, str]:
+    """Return confidence delta (0–1) and explanation text."""
+    if sentiment == "positive" and severity == "high":
+        return 0.06, "Positive recent news supports the outlook and increases confidence."
+    if sentiment == "positive" and severity == "low":
+        return 0.03, "Recent positive news slightly improves confidence."
+    if sentiment == "negative" and severity == "high":
+        return -0.12, "Confidence reduced due to negative recent news increasing downside risk."
+    if sentiment == "negative" and severity == "low":
+        return -0.05, "Recent news introduces short-term uncertainty, lowering confidence."
+
+    return 0.0, "Confidence reflects current market conditions and available data."
+
+
+# ======================================================================
+# PATCH: override predict() with sentiment-aware wrapper
+# ======================================================================
+
+def predict(symbol: str, budget: float) -> Dict[str, Any]:
+    symbol = symbol.upper()
+    feats = build_features(symbol)
+    base_conf, bullets = _score_from_features(feats)
+    plan = _position_plan(feats, budget)
+
+    sentiment, severity = _classify_sentiment(feats.get("news_bias"))
+    delta, conf_expl = _sentiment_confidence_adjustment(sentiment, severity)
+
+    conf = max(0.0, min(100.0, base_conf + delta * 100.0))
+
+    if conf >= 65:
+        signal = "BUY"
+    elif conf <= 35:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
+
+    if signal == "BUY" and sentiment == "negative" and severity == "high":
+        signal = "HOLD"
+
+    entry = plan["entry"]
+    target = plan["target"]
+    stop = plan["stop"]
+    atr_val = plan["atr"]
+    shares = plan["shares"]
+    budget_used = round(shares * entry, 2)
+
+    return {
+        "symbol": symbol,
+        "price": round(feats["price"], 4),
+        "signal": signal,
+        "confidence": round(conf, 1),
+        "confidence_explanation": conf_expl,
+        "entry": round(entry, 4),
+        "target": round(target, 4),
+        "stop": round(stop, 4),
+        "atr": round(atr_val, 4) if atr_val is not None else None,
+        "shares": shares,
+        "budget_used": budget_used,
+        "rationale": bullets[:8],
+        "features": feats,
+        "sentiment": sentiment,
+        "sentiment_severity": severity,
+    }
