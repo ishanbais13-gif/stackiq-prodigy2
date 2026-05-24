@@ -60,10 +60,23 @@ def _cache_set(cache: Dict[str, Tuple[float, Any]], key: str, value: Any) -> Non
         return
 
 
+# Global delay tracker for Polygon news requests
+_POLYGON_NEWS_LAST_REQUEST_TIME = 0.0
+_POLYGON_NEWS_DELAY_SECONDS = 2.0
+
 def _request_json(path: str, params: Optional[Dict[str, Any]] = None, timeout_s: float = 8.0) -> Optional[Dict[str, Any]]:
     key = _api_key()
     if not key:
         return None
+
+    # Add delay for news requests
+    global _POLYGON_NEWS_LAST_REQUEST_TIME
+    if "/v2/reference/news" in path:
+        now = time.time()
+        time_since_last = now - _POLYGON_NEWS_LAST_REQUEST_TIME
+        if time_since_last < _POLYGON_NEWS_DELAY_SECONDS:
+            time.sleep(_POLYGON_NEWS_DELAY_SECONDS - time_since_last)
+        _POLYGON_NEWS_LAST_REQUEST_TIME = time.time()
 
     url = f"{_POLYGON_BASE_URL}{path}"
     q = dict(params or {})
@@ -82,7 +95,14 @@ def _request_json(path: str, params: Optional[Dict[str, Any]] = None, timeout_s:
     try:
         r = _do()
         if r.status_code == 429:
-            # single short backoff retry
+            # For news requests, immediately return None to trigger Alpaca fallback
+            if "/v2/reference/news" in path:
+                try:
+                    log.warning(f"polygon news 429 rate limit - falling back to Alpaca: {path}")
+                except Exception:
+                    pass
+                return None
+            # For other requests, single short backoff retry
             time.sleep(0.6)
             r = _do()
     except Exception as e:

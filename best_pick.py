@@ -24,6 +24,60 @@ def _clamp_0_100(v: Any) -> float:
     return float(x)
 
 
+def _to_0_10(v: Any) -> Optional[float]:
+    try:
+        f = float(v)
+    except Exception:
+        return None
+    if f < 0.0:
+        f = 0.0
+    if f > 100.0:
+        f = 100.0
+    return float(round(f / 10.0, 1))
+
+
+def _trade_plan_from_last_price(*, last_price: Any, volatility: Any = 50.0) -> Dict[str, Any]:
+    try:
+        lp = float(last_price)
+    except Exception:
+        lp = 0.0
+    if lp <= 0.0:
+        return {
+            "entry": None,
+            "stop": None,
+            "targets": [None, None, None],
+            "gain_pct": None,
+            "risk_reward": None,
+        }
+
+    vol = _clamp_0_100(volatility)
+    risk_pct = 0.012 + (0.00018 * float(vol))  # 1.2% .. 3.0%
+    risk_abs = max(lp * risk_pct, lp * 0.01)
+
+    entry = float(round(lp, 2))
+    stop = float(round(max(0.01, lp - risk_abs), 2))
+    t1 = float(round(lp + (risk_abs * 1.5), 2))
+    t2 = float(round(lp + (risk_abs * 2.5), 2))
+    t3 = float(round(lp + (risk_abs * 3.5), 2))
+
+    try:
+        gain_pct = float(round(((t1 - entry) / entry) * 100.0, 2))
+    except Exception:
+        gain_pct = None
+    try:
+        rr = float(round((t1 - entry) / max(1e-9, (entry - stop)), 2))
+    except Exception:
+        rr = None
+
+    return {
+        "entry": entry,
+        "stop": stop,
+        "targets": [t1, t2, t3],
+        "gain_pct": gain_pct,
+        "risk_reward": rr,
+    }
+
+
 def _sentiment_score_0_100(news_sentiment: Dict[str, Any]) -> float:
     if not isinstance(news_sentiment, dict):
         return 50.0
@@ -54,9 +108,9 @@ def _news_sentiment_from_snapshot(snap: Dict[str, Any]) -> Dict[str, Any]:
         if px is None or pc is None or pc <= 0:
             return {"direction": "NEUTRAL", "summary": "No sentiment signal.", "score_100": 50}
         chg = (px - pc) / pc * 100.0
-        if chg >= 1.0:
+        if chg >= 0.3:
             return {"direction": "BULLISH", "summary": "Bullish tape proxy.", "score_100": _clamp_0_100(55.0 + min(25.0, chg * 5.0))}
-        if chg <= -1.0:
+        if chg <= -0.3:
             return {"direction": "BEARISH", "summary": "Bearish tape proxy.", "score_100": _clamp_0_100(45.0 - min(25.0, abs(chg) * 5.0))}
         return {"direction": "NEUTRAL", "summary": "Neutral tape proxy.", "score_100": 50}
     except Exception:
@@ -419,7 +473,7 @@ async def pick_best_async(*, universe: List[str], tz: Optional[str] = None, allo
     bars_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
     snaps_by_symbol: Dict[str, Any] = {}
     try:
-        bars_by_symbol = await asyncio.to_thread(get_bars_batch, syms, "1Day", 100)
+        bars_by_symbol = await asyncio.to_thread(get_bars_batch, syms, "1Day", 30)
     except Exception:
         bars_by_symbol = {}
     try:
@@ -543,16 +597,20 @@ async def pick_best_async(*, universe: List[str], tz: Optional[str] = None, allo
         conf0 = 0.0
         if lp0 is not None and float(lp0) > 0.0:
             conf0 = 25.0
+        trade_plan0 = _trade_plan_from_last_price(last_price=lp0, volatility=50.0)
         return {
             "symbol": "SPY",
             "classification": "IGNORE",
             "confidence": float(conf0),
+            "confidence_0_10": (_to_0_10(conf0) if conf0 is not None else None),
             "ai_score": 0.0,
+            "ai_score_0_10": 0.0,
             "execution_score": 0.0,
+            "execution_score_0_10": 0.0,
             "technical_analysis": {},
             "news_sentiment": {"direction": "NEUTRAL", "summary": "Unavailable", "score_100": 50},
             "execution_plan": {"strategy": "AVOID", "time_window": "Next session", "session": "Pre-market", "playbook": "Avoid / Next session"},
-            "trade_plan": {},
+            "trade_plan": trade_plan0,
             "why": [],
             "what_confirms": [],
             "what_breaks": [],
@@ -577,23 +635,25 @@ async def pick_best_async(*, universe: List[str], tz: Optional[str] = None, allo
         ns100_best = _sentiment_score_0_100(ns)
     except Exception:
         ns100_best = 50.0
-    confidence = _confidence_adjusted_0_100(
+    confidence_adj = _confidence_adjusted_0_100(
         ai_score=float(ai_score),
         execution_score=float(execution_score),
         data_completeness_0_1=float(best.get("data_completeness") or 0.0),
         news_sentiment_0_100=float(ns100_best),
     )
+    confidence = float(confidence_adj)
 
     try:
-        confidence = _confidence_from_factors_0_100(
+        confidence_factors = _confidence_from_factors_0_100(
             indicators=ind,
             candles=(best.get("candles") if isinstance(best.get("candles"), list) else []),
             snapshot=(best.get("snapshot") if isinstance(best.get("snapshot"), dict) else {}),
             news_sentiment=ns,
         )
+        confidence = _clamp_0_100((0.65 * float(confidence_factors)) + (0.35 * float(confidence_adj)))
     except Exception:
         # keep adjusted composite confidence as fallback
-        confidence = float(confidence)
+        confidence = float(confidence_adj)
 
     blocks = _build_why_blocks(ind, ns)
     if allow_llm:
@@ -612,16 +672,40 @@ async def pick_best_async(*, universe: List[str], tz: Optional[str] = None, allo
     except Exception:
         snap_norm = None
 
+    lp_best = None
+    try:
+        if isinstance(snap_norm, dict) and snap_norm.get("last_price") is not None:
+            lp_best = float(snap_norm.get("last_price"))
+    except Exception:
+        lp_best = None
+    if lp_best is None:
+        try:
+            snap0 = best.get("snapshot") if isinstance(best.get("snapshot"), dict) else {}
+            lt0 = snap0.get("latestTrade") if isinstance(snap0.get("latestTrade"), dict) else {}
+            bar0 = snap0.get("dailyBar") if isinstance(snap0.get("dailyBar"), dict) else {}
+            px0 = lt0.get("p") if lt0.get("p") is not None else bar0.get("c")
+            lp_best = float(px0) if px0 is not None else None
+        except Exception:
+            lp_best = None
+
+    trade_plan = _trade_plan_from_last_price(
+        last_price=lp_best,
+        volatility=ind.get("volatility") if isinstance(ind, dict) else 50.0,
+    )
+
     return {
         "symbol": str(best.get("symbol") or "").strip().upper(),
         "classification": classification,
         "confidence": float(confidence),
-        "ai_score": float(ai_score),
-        "execution_score": float(execution_score),
+        "confidence_0_10": _to_0_10(confidence),
+        "ai_score": _to_0_10(ai_score),
+        "ai_score_0_10": _to_0_10(ai_score),
+        "execution_score": _to_0_10(execution_score),
+        "execution_score_0_10": _to_0_10(execution_score),
         "technical_analysis": ind,
         "news_sentiment": ns,
         "execution_plan": plan,
-        "trade_plan": {},
+        "trade_plan": trade_plan,
         "why": blocks.get("why") if isinstance(blocks.get("why"), list) else [],
         "what_confirms": blocks.get("what_confirms") if isinstance(blocks.get("what_confirms"), list) else [],
         "what_breaks": blocks.get("what_breaks") if isinstance(blocks.get("what_breaks"), list) else [],

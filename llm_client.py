@@ -66,14 +66,20 @@ def init_llm_client() -> bool:
 
         if not LLM_ENABLED:
             msg = "llm_disabled: config_disabled"
-            log.error(msg)
+            if strict:
+                log.error(msg)
+            else:
+                log.warning(msg)
             if strict:
                 raise RuntimeError(msg)
             return False
 
         if not _OPENAI_SDK_AVAILABLE:
             msg = f"llm_disabled: sdk_import_error={(_OPENAI_SDK_IMPORT_ERROR or 'ImportError')}"
-            log.error(msg)
+            if strict:
+                log.error(msg)
+            else:
+                log.warning(msg)
             if strict:
                 raise RuntimeError(msg)
             return False
@@ -81,14 +87,20 @@ def init_llm_client() -> bool:
         api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
         if not api_key:
             msg = "llm_disabled: missing_api_key"
-            log.error(msg)
+            if strict:
+                log.error(msg)
+            else:
+                log.warning(msg)
             if strict:
                 raise RuntimeError(msg)
             return False
 
         if not llm_available():
             msg = "llm_disabled: config_gating"
-            log.error(msg)
+            if strict:
+                log.error(msg)
+            else:
+                log.warning(msg)
             if strict:
                 raise RuntimeError(msg)
             return False
@@ -97,7 +109,10 @@ def init_llm_client() -> bool:
         return True
     except Exception as e:
         try:
-            log.error(f"LLM client initialization failed: {e}")
+            if strict:
+                log.error(f"LLM client initialization failed: {e}")
+            else:
+                log.warning(f"LLM client initialization failed: {e}")
         except Exception:
             pass
         return False
@@ -205,6 +220,16 @@ def call_llm_text(
 
         except Exception as e:
             last_err = e
-            time.sleep(0.25 * (attempt + 1))
+            backoff = min(2 ** (attempt + 1), 8)
+            try:
+                log.warning(f"LLM retry attempt {attempt + 1}/{max(1, OPENAI_RETRIES)}: {type(e).__name__}: {str(e)[:120]} — retrying in {backoff}s")
+            except Exception:
+                pass
+            if attempt < max(0, OPENAI_RETRIES):
+                time.sleep(backoff)
 
+    try:
+        log.error(f"LLM failed after retries: {type(last_err).__name__}: {str(last_err)[:200]}")
+    except Exception:
+        pass
     raise LLMCallError(f"LLM call failed after retries: {last_err}")

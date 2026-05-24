@@ -24,13 +24,19 @@ def score_composite_0_100(*, indicators: Dict[str, Any], news_sentiment_0_100: f
     # 0.30 momentum + 0.25 trend + 0.15 volatility + 0.15 liquidity + 0.15 risk_inverse
     # (sentiment is handled as a confidence adjustment elsewhere; keep arg for compatibility)
     risk_positive = _clamp_0_100(100.0 - rk)
-    return _clamp_0_100(
+    base = (
         (0.30 * mom)
         + (0.25 * tr)
         + (0.15 * vol)
         + (0.15 * liq)
         + (0.15 * risk_positive)
     )
+    if mom > 70.0:
+        base *= 1.2
+    if tr > 60.0:
+        base *= 1.1
+    base = max(45.0, base)
+    return float(min(95.0, max(0.0, base)))
 
 
 def direction_from_indicators(indicators: Dict[str, Any]) -> str:
@@ -51,6 +57,12 @@ def conviction_from_score(score_0_100: Any) -> str:
     if s >= 55.0:
         return "medium"
     return "low"
+
+
+def choppy_signal_boost(signals: List[str]) -> float:
+    """Returns the cumulative final_score boost for CHOPPY-regime signals (0.8 per signal fired)."""
+    choppy_signals = {"RSI_OVERSOLD_BOUNCE", "SUPPORT_RECLAIM", "SECTOR_ROTATION"}
+    return float(sum(0.8 for s in (signals or []) if s in choppy_signals))
 
 
 def score_execution_0_100(*, indicators: Dict[str, Any], execution_factors: Optional[Dict[str, Any]] = None) -> float:

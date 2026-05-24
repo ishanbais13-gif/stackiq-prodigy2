@@ -20,8 +20,8 @@ OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_MAX_OUTPUT_TOKENS: int = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "400"))
 
 # Timeouts / retries (keep conservative so you don’t hang UI)
-OPENAI_TIMEOUT_S: float = float(os.getenv("OPENAI_TIMEOUT_S", "8"))
-OPENAI_RETRIES: int = int(os.getenv("OPENAI_RETRIES", "1"))
+OPENAI_TIMEOUT_S: float = float(os.getenv("OPENAI_TIMEOUT_S", "60"))
+OPENAI_RETRIES: int = int(os.getenv("OPENAI_RETRIES", "3"))
 
 # Optional: hard cap to protect costs if you want it later
 OPENAI_DAILY_CALL_CAP: int = int(os.getenv("OPENAI_DAILY_CALL_CAP", "0"))  # 0 = disabled

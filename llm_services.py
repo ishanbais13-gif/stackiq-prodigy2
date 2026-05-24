@@ -16,6 +16,43 @@ def _safe_json_loads(s: str) -> Dict[str, Any]:
         return json.loads(s2)
 
 
+def normalize_llm_reasoning(llm_data: Any) -> Dict[str, Any]:
+    payload = llm_data if isinstance(llm_data, dict) else {}
+
+    def _as_lines(v: Any) -> List[str]:
+        if not isinstance(v, list):
+            return []
+        return [str(x).strip() for x in v if str(x).strip()]
+
+    return {
+        "bullish_factors": _as_lines(payload.get("bullish_factors", [])),
+        "bearish_factors": _as_lines(payload.get("bearish_factors", [])),
+        "catalysts": _as_lines(payload.get("catalysts", [])),
+        "risks": _as_lines(payload.get("risks", [])),
+        "summary": str(payload.get("summary", "") or "").strip(),
+    }
+
+
+def validate_launch_readiness_llm(response: Any) -> Dict[str, Any]:
+    if not isinstance(response, dict):
+        return {"ok": False, "error": "Invalid response payload"}
+    if "llm_reasoning" not in response:
+        return {"ok": False, "error": "Missing llm_reasoning key"}
+
+    reasoning = response.get("llm_reasoning")
+    if not isinstance(reasoning, dict):
+        return {"ok": False, "error": "Invalid reasoning structure"}
+    if not isinstance(reasoning.get("bullish_factors"), list):
+        return {"ok": False, "error": "Invalid reasoning structure"}
+    if not isinstance(reasoning.get("bearish_factors"), list):
+        return {"ok": False, "error": "Invalid reasoning structure"}
+    if not isinstance(reasoning.get("catalysts"), list):
+        return {"ok": False, "error": "Invalid reasoning structure"}
+    if not isinstance(reasoning.get("risks"), list):
+        return {"ok": False, "error": "Invalid reasoning structure"}
+    return {"ok": True, "error": ""}
+
+
 def llm_news_sentiment(symbol: str, headlines: List[str]) -> Dict[str, Any]:
     """
     Takes raw headlines list, returns:
