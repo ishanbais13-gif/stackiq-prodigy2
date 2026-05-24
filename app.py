@@ -9498,3 +9498,37 @@ def account():
             "updated_at": now_iso(),
             "error": f"Alpaca error: {str(e)}",
         }
+
+
+@app.get("/performance/picks", include_in_schema=True)
+def performance_picks():
+    import sqlite3 as _sq, datetime as _dt, json as _json
+    db_path = os.path.join(os.path.dirname(__file__), "perf_tracker.db")
+    out = []
+    try:
+        con = _sq.connect(db_path)
+        con.row_factory = _sq.Row
+        cur = con.cursor()
+        cur.execute("SELECT symbol, status, entry_price, max_return_pct, edge_signals, recorded_at, hit_target, hit_stop FROM picks ORDER BY recorded_at DESC LIMIT 50")
+        for row in cur.fetchall():
+            try:
+                date_str = _dt.datetime.utcfromtimestamp(row["recorded_at"]).strftime("%Y-%m-%d")
+            except:
+                date_str = ""
+            status = row["status"] or "pending"
+            pct = row["max_return_pct"] or 0.0
+            if status == "lost" or row["hit_stop"]:
+                outcome = "lost"
+            elif status == "won" or row["hit_target"]:
+                outcome = "won"
+            else:
+                outcome = status
+            try:
+                signals = _json.loads(row["edge_signals"] or "[]")
+            except:
+                signals = []
+            out.append({"symbol": row["symbol"], "return_pct": round(pct, 2), "outcome": outcome, "date": date_str, "signals": signals if isinstance(signals, list) else []})
+        con.close()
+    except Exception as e:
+        return {"error": str(e), "picks": []}
+    return {"picks": out}
