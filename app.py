@@ -2349,6 +2349,12 @@ def _startup_init():
             _init_llm_client()
     except Exception:
         pass
+    try:
+        _t = threading.Timer(30, _bg_v2_scan_loop)
+        _t.daemon = True
+        _t.start()
+    except Exception:
+        pass
 
 app.add_middleware(
     CORSMiddleware,
@@ -5908,7 +5914,7 @@ def get_alpaca_symbols(max_symbols: int = 0) -> List[str]:
     Returns all ACTIVE, TRADABLE US equities from Alpaca assets.
     max_symbols=0 means no cap.
     """
-    api = trade_client()  # uses your existing function
+    api = tradeapi.REST(os.getenv("ALPACA_API_KEY",""), os.getenv("ALPACA_SECRET_KEY",""), base_url="https://paper-api.alpaca.markets")  # uses your existing function
     try:
         assets = api.list_assets(status="active")
     except TypeError:
@@ -6614,7 +6620,7 @@ def get_scan_universe(max_scan: int = 0) -> List[str]:
             except Exception:
                 all_assets = list(api_py.get_all_assets() or [])
         else:
-            api = trade_client()
+            api = tradeapi.REST(os.getenv("ALPACA_API_KEY",""), os.getenv("ALPACA_SECRET_KEY",""), base_url="https://paper-api.alpaca.markets")
             try:
                 all_assets = api.list_assets(status="active")
             except TypeError:
@@ -7776,6 +7782,54 @@ _BEST_PICK_PERSIST: Dict[str, Any] = {"ts": 0.0, "resp": None}
 _LAST_V2_WATCHLIST: Dict[str, Any] = {"ts": 0.0, "candidates": []}
 
 
+def _bg_v2_scan_once() -> None:
+    """Run _scan_best_pick_v2 in a fresh event loop and persist watchlist_candidates."""
+    try:
+        import asyncio as _aio
+
+        async def _run() -> None:
+            try:
+                universe = await _aio.to_thread(get_scan_universe, 400)
+            except Exception:
+                universe = []
+            if not universe:
+                universe = ["SPY", "QQQ", "AAPL", "NVDA", "MSFT"]
+
+            def _nf(sym: str) -> Dict[str, Any]:
+                try:
+                    return _news_and_sentiment(str(sym or "").strip().upper(), allow_llm=False)
+                except Exception:
+                    return {}
+
+            out = await _scan_best_pick_v2(
+                universe=universe,
+                news_fetcher=_nf,
+                allow_llm_news=False,
+                max_seconds=30.0,
+                news_top_k=5,
+            )
+            if isinstance(out, dict):
+                cands = out.get("watchlist_candidates") or []
+                if isinstance(cands, list) and cands:
+                    _LAST_V2_WATCHLIST["ts"] = float(time.time())
+                    _LAST_V2_WATCHLIST["candidates"] = list(cands)
+
+        _aio.run(_run())
+    except Exception as _e:
+        try:
+            log.warning(f"Background v2 scan error: {_e}")
+        except Exception:
+            pass
+
+
+def _bg_v2_scan_loop() -> None:
+    """Run once, then reschedule every 4 hours."""
+    _bg_v2_scan_once()
+    _t = threading.Timer(4 * 3600, _bg_v2_scan_loop)
+    _t.daemon = True
+    _t.start()
+
+
 class BestPickResponse(BaseModel):
     status: str = "ok"
     reason: str = ""
@@ -7825,6 +7879,7 @@ class BestPickV2Response(BaseModel):
     catalysts: List[str] = Field(default_factory=list)
     risk_flags: List[str] = Field(default_factory=list)
     pillar_scores_0_10: Dict[str, float] = Field(default_factory=dict)
+    watchlist_candidates: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 def _best_pick_contract(x: Any) -> Dict[str, Any]:
@@ -8421,6 +8476,7 @@ async def best_pick_v2(
     out.setdefault("catalysts", [])
     out.setdefault("risk_flags", [])
     out.setdefault("pillar_scores_0_10", {"technical": 1.0, "catalyst": 1.0, "sentiment": 1.0, "risk_structure": 1.0, "upside": 1.0})
+    out.setdefault("watchlist_candidates", [])
     return out
 
 
@@ -9546,7 +9602,7 @@ def account():
 @app.get("/performance", include_in_schema=True)
 def performance_summary():
     import sqlite3 as _sq
-    db_path = os.path.join(os.path.dirname(__file__), "perf_tracker.db")
+    db_path = os.environ.get("PERF_TRACKER_DB_PATH", os.path.join(os.path.dirname(__file__), "perf_tracker.db"))
     try:
         con = _sq.connect(db_path)
         con.row_factory = _sq.Row
@@ -9578,7 +9634,7 @@ def performance_summary():
 @app.get("/performance/picks", include_in_schema=True)
 def performance_picks():
     import sqlite3 as _sq, datetime as _dt, json as _json
-    db_path = os.path.join(os.path.dirname(__file__), "perf_tracker.db")
+    db_path = os.environ.get("PERF_TRACKER_DB_PATH", os.path.join(os.path.dirname(__file__), "perf_tracker.db"))
     out = []
     try:
         con = _sq.connect(db_path)
