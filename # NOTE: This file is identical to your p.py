@@ -1354,7 +1354,8 @@ def best_pick_phase3():
             dist = abs(price - center) / center
             if dist <= 0.01:
                 score += 6
-            elif dist <=# filepath: /Users/ishanbais/stackiq-prodigy2/app.py
+            elif dist <= 0.02:
+                score += 3
 # NOTE: This file is identical to your provided app.py EXCEPT for
 # FIXES:
 # - Removed broken OpenAI/LLM code and stray misplaced code blocks

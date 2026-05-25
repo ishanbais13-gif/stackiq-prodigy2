@@ -1,0 +1,62 @@
+{
+  "runs": 3,
+  "history": [
+    {
+      "time": "2026-03-22 13:21:03",
+      "health_alive": false,
+      "score": 0,
+      "missing": [
+        "symbol",
+        "entry",
+        "stop",
+        "take_profit",
+        "confidence"
+      ],
+      "issues": [
+        "Backend not running"
+      ]
+    },
+    {
+      "time": "2026-03-22 13:24:26",
+      "health_alive": true,
+      "score": 0,
+      "missing": [
+        "symbol",
+        "entry",
+        "stop",
+        "take_profit",
+        "confidence"
+      ],
+      "issues": [
+        "Command timed out after 20s"
+      ]
+    },
+    {
+      "time": "2026-03-22 13:27:57",
+      "health_alive": false,
+      "score": 0,
+      "missing": [
+        "symbol",
+        "entry",
+        "stop",
+        "take_profit",
+        "confidence"
+      ],
+      "issues": [
+        "Backend not running"
+      ]
+    }
+  ],
+  "last_score": 0,
+  "last_missing": [
+    "symbol",
+    "entry",
+    "stop",
+    "take_profit",
+    "confidence"
+  ],
+  "last_issues": [
+    "Backend not running"
+  ],
+  "last_seen": "2026-03-22 13:27:57"
+}

@@ -1374,4 +1374,4 @@ def best_pick_phase3():
         final_score = int(golden.get("_pre_move_score") or 0)
 
     # Build a simple heatmap (deterministic)
-    reasons =
+    reasons = []

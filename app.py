@@ -7880,6 +7880,12 @@ class BestPickV2Response(BaseModel):
     risk_flags: List[str] = Field(default_factory=list)
     pillar_scores_0_10: Dict[str, float] = Field(default_factory=dict)
     watchlist_candidates: List[Dict[str, Any]] = Field(default_factory=list)
+    market_regime: Optional[str] = None
+    is_trade: Optional[bool] = None
+    trade_decision: Optional[str] = None
+    no_trade_reason: Optional[str] = None
+    edge_signals: List[str] = Field(default_factory=list)
+    position_size_pct: Optional[float] = None
 
 
 def _best_pick_contract(x: Any) -> Dict[str, Any]:

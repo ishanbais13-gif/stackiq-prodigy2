@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Price Alerts Toggle</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .alert-container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .alert-item {
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 15px;
+            margin-bottom: 15px;
+            background: #fafafa;
+        }
+        .alert-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .symbol {
+            font-weight: bold;
+            font-size: 16px;
+            color: #333;
+        }
+        .toggle-switch {
+            position: relative;
+            width: 50px;
+            height: 24px;
+            background-color: #ccc;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .toggle-switch.active {
+            background-color: #4CAF50;
+        }
+        .toggle-slider {
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 20px;
+            height: 20px;
+            background-color: white;
+            border-radius: 50%;
+            transition: transform 0.3s;
+        }
+        .toggle-switch.active .toggle-slider {
+            transform: translateX(26px);
+        }
+        .buy-zone-inputs {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin-top: 10px;
+        }
+        .buy-zone-inputs input {
+            width: 80px;
+            padding: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .buy-zone-inputs label {
+            font-size: 12px;
+            color: #666;
+        }
+        .save-btn {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+        .save-btn:hover {
+            background-color: #0056b3;
+        }
+        .status-message {
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+        .status-success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status-error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .loading {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+        .add-alert-form {
+            border: 2px dashed #ddd;
+            border-radius: 6px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .add-alert-form input {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin: 0 5px;
+        }
+        .add-btn {
+            background-color: #28a745;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .add-btn:hover {
+            background-color: #218838;
+        }
+    </style>
+</head>
+<body>
+    <div class="alert-container">
+        <h2>Price Alerts</h2>
+        
+        <!-- Add new alert form -->
+        <div class="add-alert-form">
+            <input type="text" id="newSymbol" placeholder="Symbol (e.g., AAPL)" maxlength="10">
+            <input type="number" id="newLow" placeholder="Buy Zone Low" step="0.01">
+            <input type="number" id="newHigh" placeholder="Buy Zone High" step="0.01">
+            <button class="add-btn" onclick="addAlert()">Add Alert</button>
+        </div>
+        
+        <!-- Alerts list -->
+        <div id="alertsList"></div>
+    </div>
+
+    <script>
+        const API_BASE = window.location.origin;
+        
+        async function fetchAlertPreferences() {
+            try {
+                const response = await fetch(`${API_BASE}/api/alerts/preferences`);
+                const data = await response.json();
+                return data;
+            } catch (error) {
+                console.error('Failed to fetch alert preferences:', error);
+                return { status: 'error', preferences: [] };
+            }
+        }
+        
+        async function updateAlertPreference(symbol, enabled, buyZoneLow, buyZoneHigh) {
+            try {
+                const response = await fetch(`${API_BASE}/api/alerts/preferences`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        symbol: symbol,
+                        enabled: enabled,
+                        buy_zone_low: buyZoneLow,
+                        buy_zone_high: buyZoneHigh
+                    })
+                });
+                return await response.json();
+            } catch (error) {
+                console.error('Failed to update alert preference:', error);
+                return { status: 'error', message: error.message };
+            }
+        }
+        
+        async function addAlert() {
+            const symbol = document.getElementById('newSymbol').value.trim().toUpperCase();
+            const buyZoneLow = parseFloat(document.getElementById('newLow').value);
+            const buyZoneHigh = parseFloat(document.getElementById('newHigh').value);
+            
+            if (!symbol) {
+                showMessage('Please enter a symbol', 'error');
+                return;
+            }
+            
+            if (isNaN(buyZoneLow) || isNaN(buyZoneHigh) || buyZoneLow >= buyZoneHigh) {
+                showMessage('Please enter valid buy zone values (Low < High)', 'error');
+                return;
+            }
+            
+            const result = await updateAlertPreference(symbol, true, buyZoneLow, buyZoneHigh);
+            
+            if (result.status === 'ok') {
+                // Clear form
+                document.getElementById('newSymbol').value = '';
+                document.getElementById('newLow').value = '';
+                document.getElementById('newHigh').value = '';
+                
+                // Refresh list
+                loadAlerts();
+                showMessage(`Alert added for ${symbol}`, 'success');
+            } else {
+                showMessage(result.message || 'Failed to add alert', 'error');
+            }
+        }
+        
+        async function toggleAlert(symbol, enabled) {
+            const alertItem = document.querySelector(`[data-symbol=\"${symbol}\"]`);
+            const buyZoneLow = parseFloat(alertItem.querySelector('.buy-zone-low').value);
+            const buyZoneHigh = parseFloat(alertItem.querySelector('.buy-zone-high').value);
+            
+            alertItem.classList.add('loading');
+            
+            const result = await updateAlertPreference(symbol, enabled, buyZoneLow, buyZoneHigh);
+            
+            alertItem.classList.remove('loading');
+            
+            if (result.status === 'ok') {
+                const toggle = alertItem.querySelector('.toggle-switch');
+                if (enabled) {
+                    toggle.classList.add('active');
+                } else {
+                    toggle.classList.remove('active');
+                }
+                showMessage(`Alert ${enabled ? 'enabled' : 'disabled'} for ${symbol}`, 'success');
+            } else {
+                // Revert toggle state
+                const toggle = alertItem.querySelector('.toggle-switch');
+                if (enabled) {
+                    toggle.classList.remove('active');
+                } else {
+                    toggle.classList.add('active');
+                }
+                showMessage(result.message || 'Failed to update alert', 'error');
+            }
+        }
+        
+        async function saveBuyZone(symbol) {
+            const alertItem = document.querySelector(`[data-symbol=\"${symbol}\"]`);
+            const toggle = alertItem.querySelector('.toggle-switch');
+            const enabled = toggle.classList.contains('active');
+            const buyZoneLow = parseFloat(alertItem.querySelector('.buy-zone-low').value);
+            const buyZoneHigh = parseFloat(alertItem.querySelector('.buy-zone-high').value);
+            
+            if (isNaN(buyZoneLow) || isNaN(buyZoneHigh) || buyZoneLow >= buyZoneHigh) {
+                showMessage('Please enter valid buy zone values (Low < High)', 'error');
+                return;
+            }
+            
+            alertItem.classList.add('loading');
+            
+            const result = await updateAlertPreference(symbol, enabled, buyZoneLow, buyZoneHigh);
+            
+            alertItem.classList.remove('loading');
+            
+            if (result.status === 'ok') {
+                showMessage(`Buy zone updated for ${symbol}`, 'success');
+            } else {
+                showMessage(result.message || 'Failed to update buy zone', 'error');
+            }
+        }
+        
+        function showMessage(message, type) {
+            // Remove existing messages
+            const existingMessages = document.querySelectorAll('.status-message');
+            existingMessages.forEach(msg => msg.remove());
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `status-message status-${type}`;
+            messageDiv.textContent = message;
+            
+            const container = document.querySelector('.alert-container');
+            container.appendChild(messageDiv);
+            
+            // Auto-remove after 3 seconds
+            setTimeout(() => {
+                messageDiv.remove();
+            }, 3000);
+        }
+        
+        function renderAlerts(alerts) {
+            const alertsList = document.getElementById('alertsList');
+            alertsList.innerHTML = '';
+            
+            if (!alerts || alerts.length === 0) {
+                alertsList.innerHTML = '<p style="text-align: center; color: #666;">No alerts configured</p>';
+                return;
+            }
+            
+            alerts.forEach(alert => {
+                const alertDiv = document.createElement('div');
+                alertDiv.className = 'alert-item';
+                alertDiv.setAttribute('data-symbol', alert.symbol);
+                
+                alertDiv.innerHTML = `
+                    <div class="alert-header">
+                        <span class="symbol">${alert.symbol}</span>
+                        <div class="toggle-switch ${alert.enabled ? 'active' : ''}" 
+                             onclick="toggleAlert('${alert.symbol}', ${!alert.enabled})">
+                            <div class="toggle-slider"></div>
+                        </div>
+                    </div>
+                    <div class="buy-zone-inputs">
+                        <label>Buy Zone:</label>
+                        <input type="number" class="buy-zone-low" value="${alert.buy_zone_low || ''}" 
+                               placeholder="Low" step="0.01">
+                        <span>-</span>
+                        <input type="number" class="buy-zone-high" value="${alert.buy_zone_high || ''}" 
+                               placeholder="High" step="0.01">
+                        <button class="save-btn" onclick="saveBuyZone('${alert.symbol}')">Save</button>
+                    </div>
+                `;
+                
+                alertsList.appendChild(alertDiv);
+            });
+        }
+        
+        async function loadAlerts() {
+            const data = await fetchAlertPreferences();
+            if (data.status === 'ok') {
+                renderAlerts(data.preferences);
+            } else {
+                showMessage('Failed to load alerts', 'error');
+                renderAlerts([]);
+            }
+        }
+        
+        // Load alerts on page load
+        document.addEventListener('DOMContentLoaded', loadAlerts);
+        
+        // Allow Enter key to add new alert
+        document.getElementById('newSymbol').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') addAlert();
+        });
+        document.getElementById('newLow').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') addAlert();
+        });
+        document.getElementById('newHigh').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') addAlert();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+#!/bin/bash
+
+timestamp=$(date +"%Y%m%d_%H%M%S")
+
+mkdir -p snapshots
+
+cp app.py snapshots/app_$timestamp.py
+
+echo "✅ Snapshot saved: $timestamp"

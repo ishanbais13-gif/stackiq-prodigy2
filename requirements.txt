@@ -50,3 +50,11 @@ tenacity==9.0.0
 
 
 
+alpaca-trade-api
+python-jose[cryptography]
+passlib[bcrypt]
+stripe
+email-validator
+email-validator
+email-validator
+bcrypt==4.0.1

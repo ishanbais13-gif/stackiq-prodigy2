@@ -1,0 +1,156 @@
+{
+  "timestamp": "2026-03-22 13:27:57",
+  "health": {
+    "alive": false,
+    "raw": "",
+    "json": null,
+    "error": "Command timed out after 8s"
+  },
+  "best_pick_alive": false,
+  "best_pick_analysis": {
+    "present": [],
+    "missing": [
+      "symbol",
+      "entry",
+      "stop",
+      "take_profit",
+      "confidence"
+    ],
+    "issues": [
+      "Backend not running"
+    ],
+    "score": 0
+  },
+  "best_pick_json": null,
+  "state_before_save": {
+    "runs": 3,
+    "history": [
+      {
+        "time": "2026-03-22 13:21:03",
+        "health_alive": false,
+        "score": 0,
+        "missing": [
+          "symbol",
+          "entry",
+          "stop",
+          "take_profit",
+          "confidence"
+        ],
+        "issues": [
+          "Backend not running"
+        ]
+      },
+      {
+        "time": "2026-03-22 13:24:26",
+        "health_alive": true,
+        "score": 0,
+        "missing": [
+          "symbol",
+          "entry",
+          "stop",
+          "take_profit",
+          "confidence"
+        ],
+        "issues": [
+          "Command timed out after 20s"
+        ]
+      },
+      {
+        "time": "2026-03-22 13:27:57",
+        "health_alive": false,
+        "score": 0,
+        "missing": [
+          "symbol",
+          "entry",
+          "stop",
+          "take_profit",
+          "confidence"
+        ],
+        "issues": [
+          "Backend not running"
+        ]
+      }
+    ],
+    "last_score": 0,
+    "last_missing": [
+      "symbol",
+      "entry",
+      "stop",
+      "take_profit",
+      "confidence"
+    ],
+    "last_issues": [
+      "Backend not running"
+    ],
+    "last_seen": "2026-03-22 13:27:57"
+  },
+  "target_files": [
+    {
+      "file": "app.py",
+      "exists": true,
+      "size": 516327,
+      "modified": "2026-03-22 12:01:47"
+    },
+    {
+      "file": "best_pick_v2.py",
+      "exists": true,
+      "size": 50953,
+      "modified": "2026-03-21 14:54:51"
+    },
+    {
+      "file": "engine.py",
+      "exists": true,
+      "size": 18766,
+      "modified": "2026-01-03 00:43:52"
+    },
+    {
+      "file": "data_fetcher.py",
+      "exists": true,
+      "size": 69269,
+      "modified": "2026-03-16 20:10:53"
+    },
+    {
+      "file": "scoring_engine.py",
+      "exists": true,
+      "size": 2356,
+      "modified": "2026-02-15 21:53:52"
+    },
+    {
+      "file": "execution_engine.py",
+      "exists": true,
+      "size": 2350,
+      "modified": "2026-02-13 20:17:28"
+    },
+    {
+      "file": "indicator_engine.py",
+      "exists": true,
+      "size": 5548,
+      "modified": "2026-02-13 20:17:28"
+    },
+    {
+      "file": "llm_client.py",
+      "exists": true,
+      "size": 7772,
+      "modified": "2026-03-15 22:31:49"
+    },
+    {
+      "file": "llm_config.py",
+      "exists": true,
+      "size": 1115,
+      "modified": "2026-03-15 22:31:33"
+    },
+    {
+      "file": "llm_prompts.py",
+      "exists": true,
+      "size": 1182,
+      "modified": "2026-02-11 19:33:00"
+    },
+    {
+      "file": "llm_services.py",
+      "exists": true,
+      "size": 6912,
+      "modified": "2026-03-04 21:47:26"
+    }
+  ],
+  "patch_suggestion": "Suggested direction:\n- Make sure /best_pick_v2 always returns valid JSON.\n- Catch timeouts/exceptions and still return a structured dict.\n- Never return plain text, None, or malformed output."
+}

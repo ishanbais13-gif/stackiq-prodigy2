@@ -124,7 +124,7 @@ _pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def hash_password(plain: str) -> str:
-    return _pwd_ctx.hash(plain[:72])
+    return _pwd_ctx.hash(plain)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
