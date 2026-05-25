@@ -1310,6 +1310,74 @@ def get_bars(symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
         raise
 
 
+def _last_trading_day_eod() -> "datetime":
+    """Return end-of-day UTC datetime for the most recent completed NYSE trading day.
+
+    Handles weekends, Monday pre-open, and all standard US market holidays.
+    """
+    from datetime import date as _date
+
+    def _nth_weekday(year: int, month: int, weekday: int, n: int) -> "_date":
+        d = _date(year, month, 1)
+        d = d + timedelta(days=(weekday - d.weekday()) % 7)
+        return d + timedelta(weeks=n - 1)
+
+    def _last_weekday_of_month(year: int, month: int, weekday: int) -> "_date":
+        next_month_year = year + 1 if month == 12 else year
+        next_month = 1 if month == 12 else month + 1
+        last = _date(next_month_year, next_month, 1) - timedelta(days=1)
+        return last - timedelta(days=(last.weekday() - weekday) % 7)
+
+    def _observed(d: "_date") -> "_date":
+        if d.weekday() == 5:   # Saturday → Friday
+            return d - timedelta(days=1)
+        if d.weekday() == 6:   # Sunday → Monday
+            return d + timedelta(days=1)
+        return d
+
+    def _good_friday(year: int) -> "_date":
+        # Anonymous Gregorian algorithm for Easter Sunday, then back 2 days.
+        a = year % 19; b = year // 100; c = year % 100
+        d = b // 4; e = b % 4; f = (b + 8) // 25; g = (b - f + 1) // 3
+        h = (19 * a + b - d - g + 15) % 30; i = c // 4; k = c % 4
+        ll = (32 + 2 * e + 2 * i - h - k) % 7; m = (a + 11 * h + 22 * ll) // 451
+        mo = (h + ll - 7 * m + 114) // 31; dy = (h + ll - 7 * m + 114) % 31 + 1
+        return _date(year, mo, dy) - timedelta(days=2)
+
+    def _holidays_for_year(year: int) -> set:
+        return {
+            _observed(_date(year, 1, 1)),            # New Year's Day
+            _nth_weekday(year, 1, 0, 3),             # MLK Day (3rd Mon Jan)
+            _nth_weekday(year, 2, 0, 3),             # Presidents Day (3rd Mon Feb)
+            _good_friday(year),                      # Good Friday
+            _last_weekday_of_month(year, 5, 0),      # Memorial Day (last Mon May)
+            _observed(_date(year, 6, 19)),            # Juneteenth
+            _observed(_date(year, 7, 4)),             # Independence Day
+            _nth_weekday(year, 9, 0, 1),             # Labor Day (1st Mon Sep)
+            _nth_weekday(year, 11, 3, 4),            # Thanksgiving (4th Thu Nov)
+            _observed(_date(year, 12, 25)),           # Christmas
+        }
+
+    now_utc = datetime.now(timezone.utc)
+    d = now_utc.date()
+
+    # Monday before ~9:30 AM ET (14:30 UTC covers both EST and EDT): treat as weekend.
+    if d.weekday() == 0 and (now_utc.hour < 14 or (now_utc.hour == 14 and now_utc.minute < 30)):
+        d -= timedelta(days=1)  # back to Sunday → loop below steps to Friday
+
+    holidays = (
+        _holidays_for_year(d.year - 1)
+        | _holidays_for_year(d.year)
+        | _holidays_for_year(d.year + 1)
+    )
+
+    # Walk back to the most recent weekday that is not a market holiday.
+    while d.weekday() >= 5 or d in holidays:
+        d -= timedelta(days=1)
+
+    return datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
+
+
 def get_bars_batch(symbols: List[str], timeframe: str, limit: int) -> Dict[str, List[Dict[str, Any]]]:
     tf = (timeframe or "1Day").strip() or "1Day"
     lim = int(limit or 30)
@@ -1388,7 +1456,7 @@ def get_bars_batch(symbols: List[str], timeframe: str, limit: int) -> Dict[str, 
     except Exception:
         return out
 
-    end = datetime.now(timezone.utc)
+    end = _last_trading_day_eod()
     start = end - timedelta(days=365)
 
     def _feeds_for(primary: str) -> List[str]:
