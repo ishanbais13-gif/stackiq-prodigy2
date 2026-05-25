@@ -87,7 +87,7 @@ try:
 except Exception:
     _init_llm_client = None
 
-from data_fetcher import get_bars as _alpaca_get_bars, get_snapshot as _alpaca_get_snapshot
+from data_fetcher import get_bars as _alpaca_get_bars, get_snapshot, get_snapshot as _alpaca_get_snapshot
 from data_fetcher import get_bars_batch as _alpaca_get_bars_batch
 from data_fetcher import get_snapshots_batch as _alpaca_get_snapshots_batch
 from data_fetcher import validate_market_env as _validate_market_env
@@ -2332,6 +2332,14 @@ def _no_nulls(obj: Any) -> Any:
 
 
 app = FastAPI(title="StackIQ Prodigy")
+
+try:
+    from auth import auth_router, stripe_router
+    app.include_router(auth_router)
+    app.include_router(stripe_router)
+except Exception as _auth_err:
+    import logging as _lg
+    _lg.getLogger("stackiq").warning(f"Auth module not loaded: {_auth_err}")
 
 
 @app.on_event("startup")
@@ -7765,6 +7773,7 @@ async def scan_market_for_best_pick(max_scan: int = 200) -> Dict[str, Any]:
 
 _BEST_PICK_CACHE: Dict[str, Any] = {"ts": 0.0, "resp": None}
 _BEST_PICK_PERSIST: Dict[str, Any] = {"ts": 0.0, "resp": None}
+_LAST_V2_WATCHLIST: Dict[str, Any] = {"ts": 0.0, "candidates": []}
 
 
 class BestPickResponse(BaseModel):
@@ -8375,6 +8384,13 @@ async def best_pick_v2(
             log.info({"best_pick_v2_elapsed": float(time.time() - start), "max_scan": int(max_scan or 0), "max_seconds": float(max_s)})
         except Exception:
             pass
+        try:
+            wl_cands = out.get("watchlist_candidates") if isinstance(out, dict) else None
+            if isinstance(wl_cands, list) and wl_cands:
+                _LAST_V2_WATCHLIST["ts"] = float(time.time())
+                _LAST_V2_WATCHLIST["candidates"] = list(wl_cands)
+        except Exception:
+            pass
     except Exception:
         out = {
             "symbol": "AAPL",
@@ -8512,6 +8528,14 @@ def top_movers(limit: int = Query(12, ge=1, le=50)) -> Dict[str, Any]:
         if cp is None:
             cp = it.get("change_percent")
 
+        vol_raw = it.get("volume")
+        if vol_raw is None:
+            vol_raw = it.get("v")
+        try:
+            volume_v = int(float(vol_raw)) if vol_raw is not None else 0
+        except Exception:
+            volume_v = 0
+
         movers.append(
             {
                 "symbol": sym,
@@ -8520,6 +8544,7 @@ def top_movers(limit: int = Query(12, ge=1, le=50)) -> Dict[str, Any]:
                 "change": (float(it.get("change")) if it.get("change") is not None else None),
                 "pct_change": (float(cp) if cp is not None else None),
                 "change_percent": (float(cp) if cp is not None else None),
+                "volume": volume_v,
                 "updated_at": now_iso(),
             }
         )
@@ -9224,17 +9249,35 @@ def watchlist():
         if not isinstance(items, list):
             items = []
         symbols: List[str] = []
+        seen: set = set()
         for it in items:
             if not isinstance(it, dict):
                 continue
             s = str(it.get("symbol") or "").strip().upper()
-            if s:
+            if s and s not in seen:
                 symbols.append(s)
+                seen.add(s)
+
+        # Augment with near-threshold candidates from last scan (stale OK up to 4h)
+        try:
+            v2_ts = float(_LAST_V2_WATCHLIST.get("ts") or 0.0)
+            v2_cands = _LAST_V2_WATCHLIST.get("candidates") or []
+            if isinstance(v2_cands, list) and (time.time() - v2_ts) < 4 * 3600:
+                for cand in v2_cands:
+                    if not isinstance(cand, dict):
+                        continue
+                    cs = str(cand.get("symbol") or "").strip().upper()
+                    if cs and cs not in seen:
+                        symbols.append(cs)
+                        seen.add(cs)
+        except Exception:
+            pass
+
         if not symbols:
-            symbols = ["AAPL", "NVDA"]
+            symbols = ["NVDA", "SPY"]
         return _no_nulls({"watchlist": symbols[:50]})
     except Exception:
-        return _no_nulls({"watchlist": ["AAPL", "NVDA"]})
+        return _no_nulls({"watchlist": ["NVDA", "SPY"]})
 
 
 @app.post("/watchlist/add", include_in_schema=True)
@@ -9498,6 +9541,38 @@ def account():
             "updated_at": now_iso(),
             "error": f"Alpaca error: {str(e)}",
         }
+
+
+@app.get("/performance", include_in_schema=True)
+def performance_summary():
+    import sqlite3 as _sq
+    db_path = os.path.join(os.path.dirname(__file__), "perf_tracker.db")
+    try:
+        con = _sq.connect(db_path)
+        con.row_factory = _sq.Row
+        cur = con.cursor()
+        cur.execute(
+            "SELECT status, max_return_pct FROM picks WHERE status != 'pending'"
+        )
+        rows = cur.fetchall() or []
+        con.close()
+    except Exception as e:
+        return {"error": str(e), "total_picks": 0, "wins": 0, "losses": 0, "win_rate": 0.0, "avg_return_pct": 0.0}
+
+    total_picks = len(rows)
+    wins = sum(1 for r in rows if str(r["status"] or "").startswith("won"))
+    losses = sum(1 for r in rows if str(r["status"] or "").startswith("lost") or str(r["status"] or "").startswith("expired"))
+    contested = wins + losses
+    win_rate = round(wins / contested * 100.0, 1) if contested > 0 else 0.0
+    returns = [float(r["max_return_pct"]) for r in rows if r["max_return_pct"] is not None]
+    avg_return_pct = round(sum(returns) / len(returns), 2) if returns else 0.0
+    return {
+        "total_picks": total_picks,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "avg_return_pct": avg_return_pct,
+    }
 
 
 @app.get("/performance/picks", include_in_schema=True)
