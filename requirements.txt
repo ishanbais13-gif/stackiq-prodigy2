@@ -51,6 +51,7 @@ tenacity==9.0.0
 
 
 alpaca-trade-api
+alpaca-py>=0.43.2
 python-jose[cryptography]
 passlib[bcrypt]
 stripe

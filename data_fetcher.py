@@ -254,7 +254,9 @@ def _alpaca_sdk_client() -> Optional[Any]:
     if _HIST_CLIENT_SINGLETON is None:
         try:
             _HIST_CLIENT_SINGLETON = StockHistoricalDataClient(api_key=key, secret_key=secret)
-        except Exception:
+            log.info("alpaca_sdk_client: created StockHistoricalDataClient ok")
+        except Exception as _e:
+            log.warning(f"alpaca_sdk_client: StockHistoricalDataClient init failed: {type(_e).__name__}: {_e}")
             _HIST_CLIENT_SINGLETON = None
     return _HIST_CLIENT_SINGLETON
 
@@ -1446,16 +1448,18 @@ def get_bars_batch(symbols: List[str], timeframe: str, limit: int) -> Dict[str, 
         return out
 
     if not _ALPACA_PY_AVAILABLE or StockBarsRequest is None or TimeFrame is None:
+        log.warning("bars_batch_skip: alpaca-py SDK not available")
         return out
 
     key = (os.getenv("ALPACA_API_KEY") or "").strip()
     secret = (os.getenv("ALPACA_SECRET_KEY") or "").strip()
     if not key or not secret:
+        log.warning("bars_batch_skip: ALPACA_API_KEY or ALPACA_SECRET_KEY not set")
         return out
 
-    try:
-        data_client = StockHistoricalDataClient(api_key=key, secret_key=secret)
-    except Exception:
+    data_client = _alpaca_sdk_client()
+    if data_client is None:
+        log.warning("bars_batch_skip: _alpaca_sdk_client() returned None")
         return out
 
     end = _last_trading_day_eod()
@@ -1629,6 +1633,9 @@ def get_bars_batch(symbols: List[str], timeframe: str, limit: int) -> Dict[str, 
 
                 try:
                     resp = data_client.get_stock_bars(req)
+                    _d = getattr(resp, "data", None)
+                    _keys = list(_d.keys())[:3] if isinstance(_d, dict) else type(_d).__name__
+                    log.info(f"bars_sdk_resp feed={feed} chunk={len(chunk)} data_type={type(_d).__name__} keys_sample={_keys}")
                 except Exception as _sdk_err:
                     log.warning(f"bars_sdk_error feed={feed} chunk={len(chunk)}: {type(_sdk_err).__name__}: {_sdk_err}")
                     resp = None
