@@ -4599,6 +4599,10 @@ async def _warm_market_cache_task() -> None:
                     globals()["_MARKET_WARMER_LAST_RUN_TS"] = float(time.time())
                 except Exception:
                     pass
+                try:
+                    await asyncio.to_thread(get_scan_universe, 400)
+                except Exception:
+                    pass
                 syms = []
                 try:
                     syms = list(get_market_universe() or [])[:50]

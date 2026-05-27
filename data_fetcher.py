@@ -545,7 +545,7 @@ def _polygon_key() -> str:
     return (os.getenv("POLYGON_API_KEY") or "").strip()
 
 
-_POLYGON_RATE_BACKOFF_SECONDS = [30, 60, 120]  # exponential backoff delays for 429s
+_POLYGON_RATE_BACKOFF_SECONDS = [5, 10, 15]  # short backoff for web requests
 
 
 def _polygon_request(path: str, params: Optional[dict] = None) -> dict:
