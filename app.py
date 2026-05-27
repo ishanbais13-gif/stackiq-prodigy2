@@ -7845,6 +7845,27 @@ def _bg_v2_scan_once() -> None:
                     _LAST_V2_WATCHLIST["ts"] = float(time.time())
                     _LAST_V2_WATCHLIST["candidates"] = list(cands)
 
+                # Auto-record the top watchlist candidate into performance picks.
+                # Use the best pick (out) if it's a trade, otherwise fall back to
+                # the #1 watchlist candidate.
+                try:
+                    from performance_tracker import record_pick as _record_pick
+                    if bool(out.get("is_trade")) and str(out.get("symbol") or "").strip():
+                        _record_pick(out)
+                    elif isinstance(cands, list) and cands:
+                        top = cands[0]
+                        _record_pick({
+                            "symbol": top.get("symbol") or "",
+                            "trade_plan": {},
+                            "edge_signals": top.get("edge_signals") or [],
+                            "edge_score_0_10": top.get("premover") or 0.0,
+                            "final_score_0_10": top.get("final_score") or 0.0,
+                            "confidence_0_10": top.get("confidence") or 0.0,
+                            "premover_score_0_10": top.get("premover") or 0.0,
+                        })
+                except Exception as _rp_err:
+                    log.warning(f"bg_scan: record_pick failed: {_rp_err}")
+
         _aio.run(_run())
     except Exception as _e:
         try:
