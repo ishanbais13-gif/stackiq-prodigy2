@@ -2130,6 +2130,25 @@ def get_top_movers(limit: int) -> List[Dict[str, Any]]:
                     out.append(item)
         out.sort(key=lambda x: abs(float(x.get("changePercent") or 0.0)), reverse=True)
         out = out[: int(limit)]
+
+        # Alpaca screener doesn't return volume — fill it in via batch snapshot.
+        if out:
+            try:
+                syms = [m["symbol"] for m in out if m.get("symbol")]
+                snaps = _alpaca_get_snapshots_batch(syms) or {}
+                for m in out:
+                    if m.get("volume", 0) == 0:
+                        snap = snaps.get(m["symbol"]) or {}
+                        db = snap.get("dailyBar") or {}
+                        v = db.get("v")
+                        if v is not None:
+                            try:
+                                m["volume"] = int(float(v))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
         try:
             if out:
                 _top_movers_cache.set(ck, out)
