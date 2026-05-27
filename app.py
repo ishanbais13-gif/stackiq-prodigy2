@@ -7880,10 +7880,10 @@ def _bg_v2_scan_once() -> None:
             out = await _scan_best_pick_v2(
                 universe=universe,
                 news_fetcher=_nf,
-                allow_llm_news=False,
+                allow_llm_news=True,
                 max_seconds=3600.0,
                 scan_all=True,
-                news_top_k=5,
+                news_top_k=500,
             )
             if isinstance(out, dict):
                 cands = out.get("watchlist_candidates") or []
