@@ -6670,6 +6670,23 @@ def get_scan_universe(max_scan: int = 0) -> List[str]:
     except Exception:
         pass
 
+    # Check shared file cache written by whichever worker last did a full fetch.
+    try:
+        import json as _json
+        _uc_path = os.path.join(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/app/data"), "scan_universe_cache.json")
+        with open(_uc_path) as _f:
+            _fc = _json.load(_f)
+        _fc_ts = float(_fc.get("ts") or 0.0)
+        _fc_ranked = _fc.get("ranked") or []
+        if isinstance(_fc_ranked, list) and _fc_ranked and (time.time() - _fc_ts) < cache_ttl_s:
+            _SCAN_UNIVERSE_CACHE["ts"] = _fc_ts
+            _SCAN_UNIVERSE_CACHE["ranked"] = _fc_ranked
+            log.info(f"get_scan_universe: loaded {len(_fc_ranked)} symbols from shared file cache")
+            cap = int(max_scan) if max_scan else 0
+            return _fc_ranked[:cap] if cap else _fc_ranked
+    except Exception:
+        pass
+
     log.info(f"get_scan_universe: cache miss, fetching full Alpaca universe (max_scan={max_scan})")
 
     try:
@@ -6928,6 +6945,15 @@ def get_scan_universe(max_scan: int = 0) -> List[str]:
         _SCAN_UNIVERSE_CACHE["raw"] = list(raw_syms)
         _SCAN_UNIVERSE_CACHE["filtered"] = list(filtered_syms)
         _SCAN_UNIVERSE_CACHE["ranked"] = list(scan_list)
+    except Exception:
+        pass
+
+    # Write to shared file so all gunicorn workers can read the same universe.
+    try:
+        import json as _json
+        _uc_path = os.path.join(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/app/data"), "scan_universe_cache.json")
+        with open(_uc_path, "w") as _f:
+            _json.dump({"ts": float(now_ts), "ranked": list(scan_list)}, _f)
     except Exception:
         pass
 
