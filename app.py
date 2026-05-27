@@ -7865,7 +7865,7 @@ def _bg_v2_scan_once() -> None:
 
         async def _run() -> None:
             try:
-                universe = await _aio.to_thread(get_scan_universe, 4000)
+                universe = await _aio.to_thread(get_scan_universe, 10000)
             except Exception:
                 universe = []
             if not universe:
@@ -7881,7 +7881,7 @@ def _bg_v2_scan_once() -> None:
                 universe=universe,
                 news_fetcher=_nf,
                 allow_llm_news=False,
-                max_seconds=120.0,
+                max_seconds=3600.0,
                 scan_all=True,
                 news_top_k=5,
             )
