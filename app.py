@@ -2381,7 +2381,7 @@ def _startup_init():
     except Exception:
         pass
     try:
-        _t = threading.Timer(30, _bg_v2_scan_loop)
+        _t = threading.Timer(180, _bg_v2_scan_loop)
         _t.daemon = True
         _t.start()
     except Exception:
@@ -4632,7 +4632,7 @@ async def _warm_market_cache_task() -> None:
                     pass
                 syms = []
                 try:
-                    syms = list(get_market_universe() or [])[:50]
+                    syms = [s for s in _SEED_UNIVERSE if s and "." not in s][:200]
                 except Exception:
                     syms = []
                 if syms:
