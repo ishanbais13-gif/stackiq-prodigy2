@@ -7865,6 +7865,9 @@ def _bg_v2_scan_once() -> None:
 
         async def _run() -> None:
             try:
+                # Force a fresh full-universe fetch — expire the cache so get_scan_universe
+                # pulls all assets from Alpaca instead of returning the startup seed.
+                _SCAN_UNIVERSE_CACHE["ts"] = 0.0
                 universe = await _aio.to_thread(get_scan_universe, 10000)
             except Exception:
                 universe = []
