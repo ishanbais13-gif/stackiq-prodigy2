@@ -1627,7 +1627,11 @@ def get_bars_batch(symbols: List[str], timeframe: str, limit: int) -> Dict[str, 
                         limit=req_limit,
                     )
 
-                resp = safe_alpaca_call_sync(data_client.get_stock_bars, req)
+                try:
+                    resp = data_client.get_stock_bars(req)
+                except Exception as _sdk_err:
+                    log.warning(f"bars_sdk_error feed={feed} chunk={len(chunk)}: {type(_sdk_err).__name__}: {_sdk_err}")
+                    resp = None
                 if resp is None:
                     continue
                 sym_map = _extract_symbol_map(resp)
