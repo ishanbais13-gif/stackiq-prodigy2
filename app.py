@@ -7883,7 +7883,7 @@ def _bg_v2_scan_once() -> None:
                 allow_llm_news=True,
                 max_seconds=3600.0,
                 scan_all=True,
-                news_top_k=500,
+                news_top_k=25,
             )
             if isinstance(out, dict):
                 cands = out.get("watchlist_candidates") or []

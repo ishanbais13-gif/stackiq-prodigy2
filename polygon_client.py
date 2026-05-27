@@ -62,7 +62,7 @@ def _cache_set(cache: Dict[str, Tuple[float, Any]], key: str, value: Any) -> Non
 
 # Global delay tracker for Polygon news requests
 _POLYGON_NEWS_LAST_REQUEST_TIME = 0.0
-_POLYGON_NEWS_DELAY_SECONDS = 2.0
+_POLYGON_NEWS_DELAY_SECONDS = 15.0
 
 def _request_json(path: str, params: Optional[Dict[str, Any]] = None, timeout_s: float = 8.0) -> Optional[Dict[str, Any]]:
     key = _api_key()
