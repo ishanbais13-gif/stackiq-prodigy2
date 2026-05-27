@@ -2135,7 +2135,7 @@ def get_top_movers(limit: int) -> List[Dict[str, Any]]:
         if out:
             try:
                 syms = [m["symbol"] for m in out if m.get("symbol")]
-                snaps = _alpaca_get_snapshots_batch(syms) or {}
+                snaps = get_snapshots_batch(syms, force=True) or {}
                 for m in out:
                     if m.get("volume", 0) == 0:
                         snap = snaps.get(m["symbol"]) or {}
