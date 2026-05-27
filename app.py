@@ -6509,15 +6509,15 @@ def get_market_universe() -> List[str]:
     except Exception:
         movers = []
 
-    max_assets = 2500
+    max_assets = 6000
     try:
-        max_assets = int(os.getenv("MARKET_UNIVERSE_MAX_ASSETS", "2500") or 2500)
+        max_assets = int(os.getenv("MARKET_UNIVERSE_MAX_ASSETS", "6000") or 6000)
     except Exception:
-        max_assets = 2500
+        max_assets = 6000
     if max_assets < 500:
         max_assets = 500
-    if max_assets > 6000:
-        max_assets = 6000
+    if max_assets > 10000:
+        max_assets = 10000
 
     universe_all: List[str] = []
     try:
@@ -7865,7 +7865,7 @@ def _bg_v2_scan_once() -> None:
 
         async def _run() -> None:
             try:
-                universe = await _aio.to_thread(get_scan_universe, 1500)
+                universe = await _aio.to_thread(get_scan_universe, 4000)
             except Exception:
                 universe = []
             if not universe:
@@ -8496,7 +8496,7 @@ async def best_pick_alias(max_scan: int = 200, refresh: bool = False, tz: Option
 
 @app.get("/best_pick_v2", response_model=BestPickV2Response)
 async def best_pick_v2(
-    max_scan: int = 800,
+    max_scan: int = 1500,
     refresh: bool = False,
     allow_llm_news: bool = True,
     full_universe: bool = False,
