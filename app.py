@@ -2343,25 +2343,70 @@ except Exception as _auth_err:
 
 
 _SEED_UNIVERSE = [
-    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","BRK.B","JPM","V",
-    "UNH","XOM","JNJ","PG","MA","HD","CVX","MRK","ABBV","LLY",
-    "AVGO","PEP","KO","COST","MCD","WMT","BAC","CRM","ACN","TMO",
-    "ORCL","CSCO","NEE","DHR","ABT","NKE","AMD","INTC","TXN","QCOM",
+    # Mega-cap / S&P 500 core
+    "AAPL","MSFT","NVDA","AMZN","GOOGL","GOOG","META","TSLA","BRK.B","JPM",
+    "V","MA","UNH","XOM","LLY","AVGO","PG","JNJ","HD","MRK",
+    "ABBV","CVX","COST","KO","PEP","WMT","BAC","CRM","ACN","TMO",
+    "ORCL","CSCO","NEE","DHR","ABT","NKE","AMD","TXN","QCOM","INTC",
     "PM","UPS","RTX","HON","BA","CAT","GE","MMM","IBM","GS",
     "MS","C","WFC","AXP","BLK","SPGI","CB","USB","PNC","CME",
-    "AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB",
+    "TJX","LOW","SBUX","MCD","YUM","DPZ","CMG","QSR","DNUT","WING",
+    "ISRG","MDT","SYK","BSX","EW","BDX","HOLX","DGX","LH","IQV",
+    "BMY","AMGN","GILD","REGN","VRTX","BIIB","MRNA","PFE","AZN","NVO",
+    # Financials / Fintech
+    "COF","DFS","SYF","ALLY","LC","SOFI","NU","UPST","AFRM","COIN",
+    "HOOD","PYPL","SQ","FOUR","WEX","FI","FIS","FISV","GPN","NTRS",
+    "SCHW","IBKR","ETSY","MKTX","ICE","CBOE","NDAQ","MUFG","SMFG","DB",
+    # Tech / Software
+    "PLTR","SNOW","DDOG","DATADOG","NET","CRWD","ZS","PANW","FTNT","OKTA",
+    "CYBR","S","TENB","QLYS","RPM","NOW","WDAY","VEEV","TEAM","ATLASSIAN",
+    "HUBS","ZM","DOCU","BOX","DOMO","ASAN","MDB","ESTC","CFLT","GTLB",
+    "MSCI","VRSK","ANSS","CDNS","SNPS","ADSK","DASSAULT","PTC","AZPN","MANH",
+    "INTU","ADBE","CRM","ORCL","SAP","TWLO","TOST","PCTY","PAYC","PAYX",
+    "ANET","SMCI","HPE","HPQ","DELL","WDC","STX","NTAP","PSTG","NTNX",
+    "QCOM","AVGO","MU","MRVL","ON","SWKS","QRVO","MPWR","AMAT","LRCX",
+    "KLAC","ASML","NVMI","ENTG","ONTO","COHU","FORM","ACLS","AXCELIS","ICHR",
+    # Consumer / Retail
+    "AMZN","SHOP","MELI","SE","GRAB","BABA","JD","PDD","BIDU","TEMU",
+    "WMT","TGT","COST","DG","DLTR","FIVE","OLLI","BJ","SFM","KR",
+    "NKE","LULU","RL","PVH","HBI","UA","DECK","ONON","HOKA","CROX",
+    "UBER","LYFT","ABNB","DASH","BKNG","EXPE","TRIP","PCLN","AIRB","VRBO",
+    # Media / Entertainment
+    "DIS","NFLX","CMCSA","T","VZ","TMUS","CHTR","PARA","WBD","FOXA",
+    "EA","TTWO","ATVI","RBLX","U","MSFT","SONY","NTDOY","SQNXF","GMGI",
+    "SPOT","TME","SNAP","PINS","RDDT","MTCH","BMBL","IAC","ZG","OPEN",
+    # Autos / EVs
+    "TSLA","F","GM","RIVN","LCID","STLA","TM","HMC","RACE","MBLY",
+    "NIO","XPEV","LI","BYDDF","KNDI","GOEV","FSR","WKHS","AYRO","SOLO",
+    # Energy / Commodities
+    "XOM","CVX","SLB","HAL","BKR","OXY","MPC","VLO","PSX","COP",
+    "EOG","PXD","DVN","MRO","APA","CTRA","CLR","SM","MTDR","RRC",
+    "BP","SHEL","TTE","ENB","TRP","KMI","WMB","ET","EPD","MPLX",
+    # Materials / Industrials
     "LIN","APD","SHW","ECL","IFF","EMN","CE","FMC","CF","MOS",
-    "CVS","WBA","MCK","ABC","CAH","HUM","ELV","CNC","MOH","DGX",
-    "DIS","NFLX","CMCSA","T","VZ","TMUS","CHTR","EA","TTWO","ATVI",
-    "PYPL","SQ","AFRM","COIN","HOOD","SOFI","NU","UPST","LC","OPEN",
-    "UBER","LYFT","ABNB","DASH","SNAP","PINS","RDDT","RBLX","SPOT","TME",
-    "SHOP","MELI","SE","GRAB","BABA","JD","PDD","BIDU","NIO","XPEV",
+    "NEM","GOLD","AEM","WPM","KGC","AGI","AU","HL","CDE","EXK",
+    "AA","ALB","MP","LTHM","SQM","LAC","PLL","SGML","ALTM","NOVL",
+    # Healthcare
+    "CVS","WBA","MCK","ABC","CAH","HUM","ELV","CNC","MOH","MOH",
+    "HCA","THC","UHS","ACAD","JAZZ","PRGO","ENDP","AMRN","AKRX","IRWD",
+    # REITs / Utilities
+    "AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB",
+    "EXR","CUBE","LSI","NSA","REXR","EGP","FR","LPT","HIW","CIO",
+    "NEE","DUK","SO","AEP","EXC","PCG","PEG","ED","FE","ES",
+    # ETFs (sector/thematic)
     "SPY","QQQ","IWM","DIA","XLK","XLF","XLE","XLV","XLY","XLP",
-    "F","GM","RIVN","LCID","STLA","TM","HMC","RACE","MBLY","MOBILEYE",
-    "SLB","HAL","BKR","OXY","MPC","VLO","PSX","COP","EOG","PXD",
-    "GLD","SLV","USO","UNG","CORN","SOYB","WEAT","PDBC","DJP","CPER",
-    "PLTR","SNOW","DDOG","NET","CRWD","ZS","PANW","FTNT","OKTA","CYBR",
-    "ENPH","SEDG","FSLR","PLUG","BE","NOVA","ARRY","MAXN","CSIQ","SPWR",
+    "XLU","XLI","XLB","XLC","XLRE","SMH","SOXX","IBB","ARKK","ARKG",
+    "GLD","SLV","USO","UNG","CORN","SOYB","WEAT","TLT","HYG","LQD",
+    "VNQ","KBWB","KBWR","IAT","FFIN","HTGM","KIE","ITB","XHB","HOMZ",
+    # High-momentum / high-beta names
+    "CELH","IONQ","QUBT","QBTS","RGTI","ARQQ","BTBT","MSTR","RIOT","MARA",
+    "CLSK","HUT","CIFR","BTDR","WULF","IREN","CORZ","MGNI","APP","APLS",
+    "HOOD","SOFI","LCID","RIVN","NKLA","RIDE","BLNK","CHPT","EVGO","WPRT",
+    "SOUN","AI","BBAI","GFAI","AITX","NVTS","LAZR","LIDR","OUST","VLDR",
+    # Small/mid cap momentum
+    "AXON","MASI","PODD","INSP","NVCR","TGTX","KRTX","RXRX","EXAS","NTRA",
+    "DOCS","PHR","CERT","ACCD","HIMS","RO","TDOC","AMWL","ONEM","SGFY",
+    "GTLB","DOMO","TASK","BRZE","SMAR","FRSH","SPRK","SPRINKLR","FROG","TOST",
 ]
 
 @app.on_event("startup")
@@ -7820,7 +7865,7 @@ def _bg_v2_scan_once() -> None:
 
         async def _run() -> None:
             try:
-                universe = await _aio.to_thread(get_scan_universe, 400)
+                universe = await _aio.to_thread(get_scan_universe, 1500)
             except Exception:
                 universe = []
             if not universe:
@@ -7836,7 +7881,8 @@ def _bg_v2_scan_once() -> None:
                 universe=universe,
                 news_fetcher=_nf,
                 allow_llm_news=False,
-                max_seconds=30.0,
+                max_seconds=120.0,
+                scan_all=True,
                 news_top_k=5,
             )
             if isinstance(out, dict):
@@ -8450,7 +8496,7 @@ async def best_pick_alias(max_scan: int = 200, refresh: bool = False, tz: Option
 
 @app.get("/best_pick_v2", response_model=BestPickV2Response)
 async def best_pick_v2(
-    max_scan: int = 400,
+    max_scan: int = 800,
     refresh: bool = False,
     allow_llm_news: bool = True,
     full_universe: bool = False,
