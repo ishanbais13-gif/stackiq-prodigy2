@@ -6670,6 +6670,8 @@ def get_scan_universe(max_scan: int = 0) -> List[str]:
     except Exception:
         pass
 
+    log.info(f"get_scan_universe: cache miss, fetching full Alpaca universe (max_scan={max_scan})")
+
     try:
         cap0 = int(max_scan) if max_scan is not None else 0
     except Exception:
