@@ -232,6 +232,7 @@ _news_cache = TTLCache(maxsize=256, ttl_seconds=90.0)
 
 # Polygon grouped daily cache: keyed by date + hour so it refreshes hourly during market hours.
 _polygon_full_snapshot_cache = TTLCache(maxsize=4, ttl_seconds=900.0)
+_polygon_grouped_fetch_lock = threading.Lock()
 
 # Product requirement: cache bars for 60 sec to prevent rate spam.
 _bars_cache_daily = TTLCache(maxsize=5000, ttl_seconds=60.0)
@@ -545,7 +546,7 @@ def _polygon_key() -> str:
     return (os.getenv("POLYGON_API_KEY") or "").strip()
 
 
-_POLYGON_RATE_BACKOFF_SECONDS = [5, 10, 15]  # short backoff for web requests
+_POLYGON_RATE_BACKOFF_SECONDS: list = []  # no retries — fail fast and fall back to Alpaca
 
 
 def _polygon_request(path: str, params: Optional[dict] = None) -> dict:
@@ -625,55 +626,56 @@ def _fetch_polygon_snapshots(tickers: Optional[List[str]] = None) -> Dict[str, A
 
     full_cached = _polygon_full_snapshot_cache.get(full_ck)
     if not isinstance(full_cached, dict):
-        # Fetch the full market grouped daily in one call.
-        try:
-            data = _polygon_request(
-                f"/v2/aggs/grouped/locale/us/market/stocks/{date_str}",
-                {"adjusted": "true"},
-            )
-        except Exception as e:
-            log.warning(f"Polygon grouped daily fetch failed: {e}")
-            return {}
+        with _polygon_grouped_fetch_lock:
+            # Re-check after acquiring lock — another thread may have already fetched it.
+            full_cached = _polygon_full_snapshot_cache.get(full_ck)
+            if not isinstance(full_cached, dict):
+                try:
+                    data = _polygon_request(
+                        f"/v2/aggs/grouped/locale/us/market/stocks/{date_str}",
+                        {"adjusted": "true"},
+                    )
+                except Exception as e:
+                    log.warning(f"Polygon grouped daily fetch failed: {e}")
+                    return {}
 
-        results = data.get("results")
-        if not isinstance(results, list):
-            log.warning(f"Polygon grouped daily: unexpected response (keys={list(data.keys())[:5]})")
-            return {}
+                results = data.get("results")
+                if not isinstance(results, list):
+                    log.warning(f"Polygon grouped daily: unexpected response (keys={list(data.keys())[:5]})")
+                    return {}
 
-        full_cached = {}
-        for r in results:
-            if not isinstance(r, dict):
-                continue
-            sym = str(r.get("T") or "").strip().upper()
-            if not sym:
-                continue
-            o = _to_float_or_none(r.get("o"))
-            c = _to_float_or_none(r.get("c"))
-            intraday_pct = None
-            intraday_chg = None
-            if o and o != 0.0 and c is not None:
-                intraday_pct = (c - o) / o * 100.0
-                intraday_chg = c - o
-            full_cached[sym] = {
-                "dailyBar": {
-                    "o": o,
-                    "h": _to_float_or_none(r.get("h")),
-                    "l": _to_float_or_none(r.get("l")),
-                    "c": c,
-                    "v": r.get("v"),
-                    "vw": _to_float_or_none(r.get("vw")),
-                },
-                # prevDailyBar not available from grouped daily (one-day endpoint).
-                # Callers needing prev close should use the Alpaca snapshot path.
-                "prevDailyBar": {"c": None},
-                "latestTrade": {"p": c},
-                "_todaysChangePerc": intraday_pct,
-                "_todaysChange": intraday_chg,
-            }
+                full_cached = {}
+                for r in results:
+                    if not isinstance(r, dict):
+                        continue
+                    sym = str(r.get("T") or "").strip().upper()
+                    if not sym:
+                        continue
+                    o = _to_float_or_none(r.get("o"))
+                    c = _to_float_or_none(r.get("c"))
+                    intraday_pct = None
+                    intraday_chg = None
+                    if o and o != 0.0 and c is not None:
+                        intraday_pct = (c - o) / o * 100.0
+                        intraday_chg = c - o
+                    full_cached[sym] = {
+                        "dailyBar": {
+                            "o": o,
+                            "h": _to_float_or_none(r.get("h")),
+                            "l": _to_float_or_none(r.get("l")),
+                            "c": c,
+                            "v": r.get("v"),
+                            "vw": _to_float_or_none(r.get("vw")),
+                        },
+                        "prevDailyBar": {"c": None},
+                        "latestTrade": {"p": c},
+                        "_todaysChangePerc": intraday_pct,
+                        "_todaysChange": intraday_chg,
+                    }
 
-        if full_cached:
-            _polygon_full_snapshot_cache.set(full_ck, full_cached)
-            log.info(f"Polygon grouped daily: {len(full_cached)} symbols for {date_str}")
+                if full_cached:
+                    _polygon_full_snapshot_cache.set(full_ck, full_cached)
+                    log.info(f"Polygon grouped daily: {len(full_cached)} symbols for {date_str}")
 
     if tickers:
         clean = {str(s).strip().upper() for s in tickers if str(s).strip()}
