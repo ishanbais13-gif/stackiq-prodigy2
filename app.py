@@ -2342,11 +2342,42 @@ except Exception as _auth_err:
     _lg.getLogger("stackiq").warning(f"Auth module not loaded: {_auth_err}")
 
 
+_SEED_UNIVERSE = [
+    "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","BRK.B","JPM","V",
+    "UNH","XOM","JNJ","PG","MA","HD","CVX","MRK","ABBV","LLY",
+    "AVGO","PEP","KO","COST","MCD","WMT","BAC","CRM","ACN","TMO",
+    "ORCL","CSCO","NEE","DHR","ABT","NKE","AMD","INTC","TXN","QCOM",
+    "PM","UPS","RTX","HON","BA","CAT","GE","MMM","IBM","GS",
+    "MS","C","WFC","AXP","BLK","SPGI","CB","USB","PNC","CME",
+    "AMT","PLD","CCI","EQIX","PSA","O","WELL","DLR","SPG","AVB",
+    "LIN","APD","SHW","ECL","IFF","EMN","CE","FMC","CF","MOS",
+    "CVS","WBA","MCK","ABC","CAH","HUM","ELV","CNC","MOH","DGX",
+    "DIS","NFLX","CMCSA","T","VZ","TMUS","CHTR","EA","TTWO","ATVI",
+    "PYPL","SQ","AFRM","COIN","HOOD","SOFI","NU","UPST","LC","OPEN",
+    "UBER","LYFT","ABNB","DASH","SNAP","PINS","RDDT","RBLX","SPOT","TME",
+    "SHOP","MELI","SE","GRAB","BABA","JD","PDD","BIDU","NIO","XPEV",
+    "SPY","QQQ","IWM","DIA","XLK","XLF","XLE","XLV","XLY","XLP",
+    "F","GM","RIVN","LCID","STLA","TM","HMC","RACE","MBLY","MOBILEYE",
+    "SLB","HAL","BKR","OXY","MPC","VLO","PSX","COP","EOG","PXD",
+    "GLD","SLV","USO","UNG","CORN","SOYB","WEAT","PDBC","DJP","CPER",
+    "PLTR","SNOW","DDOG","NET","CRWD","ZS","PANW","FTNT","OKTA","CYBR",
+    "ENPH","SEDG","FSLR","PLUG","BE","NOVA","ARRY","MAXN","CSIQ","SPWR",
+]
+
 @app.on_event("startup")
 def _startup_init():
     try:
         if callable(_init_llm_client):
             _init_llm_client()
+    except Exception:
+        pass
+    # Pre-seed scan universe so first request doesn't hit cold expensive ranking.
+    try:
+        seed = [s for s in _SEED_UNIVERSE if s]
+        if seed and not _SCAN_UNIVERSE_CACHE.get("ranked"):
+            _SCAN_UNIVERSE_CACHE["ts"] = float(time.time())
+            _SCAN_UNIVERSE_CACHE["ranked"] = list(seed)
+            _SCAN_UNIVERSE_CACHE["filtered"] = list(seed)
     except Exception:
         pass
     try:
@@ -4597,10 +4628,6 @@ async def _warm_market_cache_task() -> None:
                     continue
                 try:
                     globals()["_MARKET_WARMER_LAST_RUN_TS"] = float(time.time())
-                except Exception:
-                    pass
-                try:
-                    await asyncio.to_thread(get_scan_universe, 400)
                 except Exception:
                     pass
                 syms = []
