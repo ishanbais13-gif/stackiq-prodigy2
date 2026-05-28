@@ -7896,7 +7896,7 @@ def _bg_v2_scan_once() -> None:
                 # Force a fresh full-universe fetch — expire the cache so get_scan_universe
                 # pulls all assets from Alpaca instead of returning the startup seed.
                 _SCAN_UNIVERSE_CACHE["ts"] = 0.0
-                universe = await _aio.to_thread(get_scan_universe, 10000)
+                universe = await _aio.to_thread(get_scan_universe, 3000)
             except Exception:
                 universe = []
             if not universe:
@@ -7912,8 +7912,7 @@ def _bg_v2_scan_once() -> None:
                 universe=universe,
                 news_fetcher=_nf,
                 allow_llm_news=True,
-                max_seconds=3600.0,
-                scan_all=True,
+                max_seconds=1200.0,
                 news_top_k=25,
             )
             if isinstance(out, dict):
