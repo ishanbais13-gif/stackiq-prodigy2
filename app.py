@@ -2431,6 +2431,13 @@ def _startup_init():
         _t.start()
     except Exception:
         pass
+    try:
+        # Pre-mover scan fires 10 min after startup so main scan gets priority
+        _t2 = threading.Timer(600, _bg_premover_scan_loop)
+        _t2.daemon = True
+        _t2.start()
+    except Exception:
+        pass
 
 app.add_middleware(
     CORSMiddleware,
@@ -7958,6 +7965,53 @@ def _bg_v2_scan_loop() -> None:
     _t.start()
 
 
+# ---------------------------------------------------------------------------
+# Pre-mover background scan
+# ---------------------------------------------------------------------------
+
+def _bg_premover_scan_once() -> None:
+    """Run the small-cap pre-mover scan and persist results to module cache."""
+    try:
+        from pre_mover_scanner import run_premover_scan, set_cached_premover_results
+        from performance_tracker import record_pick as _record_pick
+
+        universe = get_scan_universe(3000)
+        result = run_premover_scan(
+            scan_universe=universe,
+            max_results=25,
+            news_top_k=50,
+            max_seconds=300.0,
+        )
+        if isinstance(result, dict) and result.get("results"):
+            set_cached_premover_results(result)
+
+            # Auto-record the top pick if score > 75
+            top = result["results"][0] if result["results"] else None
+            if top and float(top.get("score") or 0.0) >= 75.0:
+                try:
+                    _record_pick({
+                        "symbol": top.get("symbol") or "",
+                        "trade_plan": {"entry": top.get("entry_zone"), "stop": top.get("invalidation")},
+                        "edge_signals": [k for k in (top.get("signals") or {})],
+                        "edge_score_0_10": float(top.get("score") or 0.0) / 10.0,
+                        "final_score_0_10": float(top.get("score") or 0.0) / 10.0,
+                        "confidence_0_10": float(top.get("score") or 0.0) / 10.0,
+                        "premover_score_0_10": float(top.get("score") or 0.0) / 10.0,
+                    })
+                except Exception as _rp_err:
+                    log.warning(f"bg_premover: record_pick failed: {_rp_err}")
+    except Exception as _e:
+        log.warning(f"bg_premover_scan error: {_e}")
+
+
+def _bg_premover_scan_loop() -> None:
+    """Run once every 2 hours (small-cap setups don't change minute-to-minute)."""
+    _bg_premover_scan_once()
+    _t = threading.Timer(2 * 3600, _bg_premover_scan_loop)
+    _t.daemon = True
+    _t.start()
+
+
 class BestPickResponse(BaseModel):
     status: str = "ok"
     reason: str = ""
@@ -9797,3 +9851,57 @@ def performance_picks():
     except Exception as e:
         return {"error": str(e), "picks": []}
     return {"picks": out}
+
+
+@app.get("/scan/pre_movers", include_in_schema=True)
+async def scan_pre_movers(
+    refresh: bool = Query(False, description="Force a fresh scan instead of returning cached results"),
+    max_results: int = Query(20, ge=1, le=50),
+):
+    """Return top small-cap pre-mover candidates ($1-$20).
+
+    Results are cached for 1 hour. Pass refresh=true to trigger a fresh scan
+    (takes ~2-5 min).
+    """
+    try:
+        from pre_mover_scanner import (
+            get_cached_premover_results,
+            premover_cache_is_fresh,
+            run_premover_scan,
+            set_cached_premover_results,
+        )
+
+        if not refresh and premover_cache_is_fresh():
+            cached = get_cached_premover_results()
+            results = cached.get("results") or []
+            return {
+                "status": "ok",
+                "source": "cache",
+                "scanned": cached.get("scanned") or 0,
+                "results": results[:max_results],
+                "ts": cached.get("ts") or 0.0,
+            }
+
+        # Run fresh scan in background thread to avoid blocking the event loop
+        universe = await asyncio.to_thread(get_scan_universe, 3000)
+        result = await asyncio.to_thread(
+            run_premover_scan,
+            universe,
+            max_results,
+            50,
+            300.0,
+        )
+        if isinstance(result, dict) and result.get("results"):
+            set_cached_premover_results(result)
+
+        return {
+            "status": "ok",
+            "source": "fresh",
+            "scanned": result.get("scanned") or 0,
+            "elapsed": result.get("elapsed") or 0.0,
+            "results": (result.get("results") or [])[:max_results],
+            "ts": result.get("ts") or time.time(),
+        }
+    except Exception as e:
+        log.exception(f"scan_pre_movers error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
