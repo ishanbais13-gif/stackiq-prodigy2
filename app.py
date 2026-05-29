@@ -2426,14 +2426,16 @@ def _startup_init():
     except Exception:
         pass
     try:
-        _t = threading.Timer(180, _bg_v2_scan_loop)
+        # Fire bg scan fast (30s) so fresh 3000-symbol universe is ready before
+        # first user request. Previously 180s, which meant seed-only for 3 min.
+        _t = threading.Timer(30, _bg_v2_scan_loop)
         _t.daemon = True
         _t.start()
     except Exception:
         pass
     try:
-        # Pre-mover scan fires 10 min after startup so main scan gets priority
-        _t2 = threading.Timer(600, _bg_premover_scan_loop)
+        # Pre-mover scan fires 5 min after startup so main scan gets priority
+        _t2 = threading.Timer(300, _bg_premover_scan_loop)
         _t2.daemon = True
         _t2.start()
     except Exception:
@@ -6646,9 +6648,11 @@ def get_alpaca_trading_client():
 
 def get_scan_universe(max_scan: int = 0) -> List[str]:
     try:
-        cache_ttl_s = float(os.getenv("SCAN_UNIVERSE_CACHE_SECONDS", "600") or 600)
+        # Default 4 hours: the bg scan refreshes every 4h so the full Alpaca fetch
+        # only happens via bg thread (never per-request, avoiding Railway 30s timeout).
+        cache_ttl_s = float(os.getenv("SCAN_UNIVERSE_CACHE_SECONDS", "14400") or 14400)
     except Exception:
-        cache_ttl_s = 600.0
+        cache_ttl_s = 14400.0
     if cache_ttl_s < 0:
         cache_ttl_s = 0.0
 
@@ -6662,14 +6666,16 @@ def get_scan_universe(max_scan: int = 0) -> List[str]:
             ranked_cached = _SCAN_UNIVERSE_CACHE.get("ranked") or []
             if isinstance(ranked_cached, list) and ranked_cached:
                 out0 = [str(s or "").strip().upper() for s in ranked_cached if str(s or "").strip()]
-                if max_scan:
-                    try:
-                        cap = int(max_scan)
-                    except Exception:
-                        cap = 0
-                    if cap and cap > 0:
-                        return out0[:cap]
-                return out0
+                # Don't serve a tiny seed cache when a larger universe was requested —
+                # fall through to file cache or full fetch instead.
+                req_cap = int(max_scan) if max_scan else 0
+                min_acceptable = min(req_cap, 500) if req_cap > 500 else 0
+                if min_acceptable and len(out0) < min_acceptable:
+                    pass  # fall through
+                elif req_cap and req_cap > 0:
+                    return out0[:req_cap]
+                else:
+                    return out0
             filtered_cached = _SCAN_UNIVERSE_CACHE.get("filtered") or []
             if isinstance(filtered_cached, list) and filtered_cached:
                 out0 = [str(s or "").strip().upper() for s in filtered_cached if str(s or "").strip()]
