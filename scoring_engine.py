@@ -19,24 +19,27 @@ def score_composite_0_100(*, indicators: Dict[str, Any], news_sentiment_0_100: f
     vol = _clamp_0_100((indicators or {}).get("volatility"))
     liq = _clamp_0_100((indicators or {}).get("liquidity"))
     rk = _clamp_0_100((indicators or {}).get("risk"))
+    news = _clamp_0_100(news_sentiment_0_100)
 
-    # Launch scoring weights:
-    # 0.30 momentum + 0.25 trend + 0.15 volatility + 0.15 liquidity + 0.15 risk_inverse
-    # (sentiment is handled as a confidence adjustment elsewhere; keep arg for compatibility)
+    # Weights: momentum(30) + trend(25) + liquidity(15) + volatility(10) + risk_inverse(10) + news(10)
+    # Risk weight reduced: high-vol breakout stocks shouldn't be penalized for volatility
     risk_positive = _clamp_0_100(100.0 - rk)
     base = (
         (0.30 * mom)
         + (0.25 * tr)
-        + (0.15 * vol)
         + (0.15 * liq)
-        + (0.15 * risk_positive)
+        + (0.10 * vol)
+        + (0.10 * risk_positive)
+        + (0.10 * news)
     )
     if mom > 70.0:
         base *= 1.2
     if tr > 60.0:
         base *= 1.1
-    base = max(45.0, base)
-    return float(min(95.0, max(0.0, base)))
+    if news > 65.0:
+        base *= 1.05
+    base = max(35.0, base)
+    return float(min(100.0, max(0.0, base)))
 
 
 def direction_from_indicators(indicators: Dict[str, Any]) -> str:
@@ -77,4 +80,7 @@ def score_execution_0_100(*, indicators: Dict[str, Any], execution_factors: Opti
     tr = _clamp_0_100((indicators or {}).get("trend"))
     mom = _clamp_0_100((indicators or {}).get("momentum"))
     liq = _clamp_0_100((indicators or {}).get("liquidity"))
-    return _clamp_0_100((0.40 * tr) + (0.30 * mom) + (0.30 * liq))
+    score = (0.40 * tr) + (0.30 * mom) + (0.30 * liq)
+    if mom > 70.0 and tr > 60.0:
+        score *= 1.15
+    return _clamp_0_100(score)
