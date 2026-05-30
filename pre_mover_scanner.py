@@ -172,11 +172,11 @@ def build_smallcap_universe(
                 min_dvol = 50_000 if price < 1.0 else 200_000
                 if dollar_vol < min_dvol:
                     continue
-                # Exclude mid/large-caps: if YESTERDAY's dollar vol was already
-                # >$15M this is a liquid large-cap — high vol days won't produce
-                # the explosive moves we're hunting. INFY, LYFT, HBAN etc. out.
-                prev_vol = _sf(db.get("pv"))
-                if prev_vol and price * prev_vol > 15_000_000:
+                # Exclude mid/large-caps: yesterday's dollar vol > $10M = too big.
+                # prevDailyBar.v is the correct Alpaca field (not dailyBar.pv).
+                prev_db = snap.get("prevDailyBar") or {}
+                prev_vol = _sf(prev_db.get("v"))
+                if prev_vol and price * prev_vol > 10_000_000:
                     continue
                 candidates.append((dollar_vol, sym))
             except Exception:
