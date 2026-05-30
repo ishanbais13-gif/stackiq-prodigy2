@@ -3334,6 +3334,13 @@ def _trade_plan_from_spec(
     if stop >= entry:
         stop = float(entry) - max(0.01, float(atr) * 0.25)
 
+    # Targets must always be above the current price — if the stock has already
+    # run past the entry-anchored targets, rescale from current price instead.
+    if lp > 0 and t3 < lp:
+        t1 = lp * 1.03
+        t2 = lp * 1.07
+        t3 = lp * 1.12
+
     gain_pct = 0.0
     rr = 0.0
     try:
@@ -4414,22 +4421,36 @@ async def analyze(
     open_md = _safe_f(market_data.get("open"))
     prev_close_md = _safe_f(market_data.get("prev_close"))
 
-    # Detect a catalyst gap by comparing the first intraday bar open against
-    # the last daily bar close. Today's open vs yesterday's close misses gaps
-    # that happened earlier in the week (stock already ran, now consolidating).
+    # Detect a real catalyst gap within the intraday bars (last 10 trading days).
+    # We group bars by calendar date, then find the most recent day where the
+    # first bar of the day opened >8% above the previous day's last bar close.
+    # This is an actual overnight gap, not just multi-month price appreciation.
     gap_open_for_fib: Optional[float] = None
     gap_prev_close_for_fib: Optional[float] = None
     try:
-        _daily_bars = market_data.get("daily_bars") or []
         _intra_bars = market_data.get("intraday_bars") or []
-        if _daily_bars and _intra_bars:
-            _last_daily_c = float((_daily_bars[-1] or {}).get("c") or 0)
-            _first_intra_o = float((_intra_bars[0] or {}).get("o") or 0)
-            if _last_daily_c > 0 and _first_intra_o > 0:
-                _gap_pct = (_first_intra_o - _last_daily_c) / _last_daily_c
-                if _gap_pct > 0.05:
-                    gap_open_for_fib = _first_intra_o
-                    gap_prev_close_for_fib = _last_daily_c
+        if len(_intra_bars) >= 2:
+            # Group bars by date (YYYY-MM-DD from timestamp)
+            from collections import defaultdict
+            _days: Dict[str, list] = defaultdict(list)
+            for _b in _intra_bars:
+                _ts = str(_b.get("t") or "")
+                _day = _ts[:10]
+                if _day:
+                    _days[_day].append(_b)
+            _sorted_days = sorted(_days.keys())
+            # Scan most-recent days first; use the largest recent gap found
+            for _i in range(len(_sorted_days) - 1, 0, -1):
+                _prev_day_bars = _days[_sorted_days[_i - 1]]
+                _curr_day_bars = _days[_sorted_days[_i]]
+                _prev_close_bar = float((_prev_day_bars[-1] or {}).get("c") or 0)
+                _curr_open_bar = float((_curr_day_bars[0] or {}).get("o") or 0)
+                if _prev_close_bar > 0 and _curr_open_bar > 0:
+                    _gap_pct = (_curr_open_bar - _prev_close_bar) / _prev_close_bar
+                    if _gap_pct > 0.08:  # 8%+ overnight gap = real catalyst
+                        gap_open_for_fib = _curr_open_bar
+                        gap_prev_close_for_fib = _prev_close_bar
+                        break  # use the most recent catalyst gap
     except Exception:
         pass
 
