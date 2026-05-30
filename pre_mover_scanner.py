@@ -347,17 +347,21 @@ def _score_symbol(
     float_data: Optional[Dict[str, Any]] = None,
     has_8k: bool = False,
 ) -> Dict[str, Any]:
-    """Score a single symbol 0-100+ for pre-mover potential.
+    """Score a single symbol 0-100 for PRE-surge potential (the day BEFORE it runs).
 
-    Scoring breakdown (max ~130 with all signals, normalized to 100):
-      Volume surge vs avg20         20 pts   (raw momentum)
-      Float-adjusted volume         30 pts   (NEW: vol/float — the killer signal)
-      Short squeeze potential       20 pts   (NEW: short% × vol surge)
-      ATR compression               20 pts
-      Close near day high           10 pts
-      Near 20-day high              10 pts
-      8-K catalyst / news           15 pts   (NEW: SEC filing > generic news)
+    Key philosophy: we want volume building WITHOUT price already exploding.
+    A stock up 50% today already ran. We want the setup, not the move.
+
+    Scoring breakdown (max ~150 with all signals, normalized to 100):
+      Quiet accumulation            25 pts   (vol building, price NOT yet moving — the pre-surge signal)
+      Float-adjusted volume         30 pts   (vol/float — coil tightening)
+      Short squeeze potential       20 pts   (short% × vol surge)
+      ATR compression               20 pts   (spring loading)
+      Near breakout level           10 pts   (within 5% of 20d high)
+      8-K catalyst / news           15 pts   (event trigger)
+      Micro-float bonus             10 pts   (sub-$1 + <5M float = math favor)
       RS vs SPY                      5 pts
+      Already-running penalty      -25 pts   (up >15% today = too late, move started)
     """
     signals: Dict[str, Any] = {}
     raw_score = 0.0
@@ -371,6 +375,10 @@ def _score_symbol(
     lt = snap.get("latestTrade") or snap.get("latestQuote") or {}
     price = _sf(db.get("c") or db.get("vw") or lt.get("p") or lt.get("ap"))
 
+    day_open = _sf(db.get("o"))
+    day_close = _sf(db.get("c") or db.get("vw"))
+    prev_close = closes[-2] if len(closes) >= 2 else None
+
     cur_vol: Optional[float] = _sf(db.get("v"))
     if cur_vol is None and vols:
         cur_vol = vols[-1]
@@ -381,12 +389,43 @@ def _score_symbol(
         avg20 = _mean(vols[-21:-1] if len(vols) >= 21 else vols[:-1]) or 1.0
         vol_ratio = cur_vol / max(avg20, 1.0)
 
-    # --- 1) Volume surge vs 20-day avg (20 pts) ---
+    # --- ALREADY-RUNNING PENALTY: if up >15% today, the move already started ---
+    # We're hunting the day BEFORE the explosion. If it's already exploding,
+    # we're late. Penalize hard to push these out of the top results.
+    today_chg_pct: Optional[float] = None
     try:
-        if vol_ratio is not None:
-            vol_pts = _clamp((vol_ratio - 1.0) / 2.0 * 20.0, 0.0, 20.0)
-            raw_score += vol_pts
-            signals["vol_surge"] = {"pts": round(vol_pts, 1), "ratio": round(vol_ratio, 2)}
+        ref = prev_close or day_open
+        if ref and ref > 0 and day_close:
+            today_chg_pct = (day_close - ref) / ref
+            if today_chg_pct > 0.15:
+                # Already running — dock up to 25 pts
+                penalty = _clamp((today_chg_pct - 0.15) / 0.35 * 25.0, 0.0, 25.0)
+                raw_score -= penalty
+                signals["already_running"] = {"penalty": round(-penalty, 1), "today_chg_pct": round(today_chg_pct * 100, 1)}
+    except Exception:
+        pass
+
+    # --- 1) Quiet accumulation (25 pts) — THE PRE-SURGE SIGNAL ---
+    # Volume is 1.5-4x normal BUT price change today is small (<5%).
+    # This is smart money loading before the move. This is what you see
+    # the day before RXT, CLOV, JOBY ran. Volume with no price action = coiling.
+    try:
+        if vol_ratio is not None and today_chg_pct is not None:
+            price_move_abs = abs(today_chg_pct)
+            if vol_ratio >= 1.5 and price_move_abs < 0.05:
+                # Full 25 pts for big vol + flat price (pure accumulation)
+                accum_pts = _clamp((vol_ratio - 1.5) / 3.0 * 25.0, 5.0, 25.0)
+                raw_score += accum_pts
+                signals["quiet_accumulation"] = {
+                    "pts": round(accum_pts, 1),
+                    "vol_ratio": round(vol_ratio, 2),
+                    "price_chg_pct": round(price_move_abs * 100, 1),
+                }
+            elif vol_ratio >= 1.5:
+                # Some vol surge but price is already moving — partial credit
+                partial = _clamp((vol_ratio - 1.5) / 3.0 * 15.0, 0.0, 15.0)
+                raw_score += partial
+                signals["vol_surge"] = {"pts": round(partial, 1), "ratio": round(vol_ratio, 2)}
     except Exception:
         pass
 
@@ -522,8 +561,8 @@ def _score_symbol(
     except Exception:
         pass
 
-    # Renormalize — max raw now 140 with micro-float bonus
-    MAX_RAW = 140.0
+    # Max raw = 25(accum) + 30(float_vol) + 20(squeeze) + 20(atr) + 10(close) + 10(near_high) + 15(catalyst) + 10(micro_float) + 5(rs) = 145
+    MAX_RAW = 145.0
     normalized = _clamp(raw_score / MAX_RAW * 100.0, 0.0, 100.0)
 
     # Squeeze tag: flag high-conviction squeeze setups explicitly
@@ -536,10 +575,17 @@ def _score_symbol(
     )
     is_low_float = bool(float_shares_val and float_shares_val < 10_000_000)
     is_penny = bool(price is not None and price < 1.0)
+    # Pre-surge: volume 2x+ normal but price up <5% today = accumulation phase
+    is_pre_surge = bool(
+        vol_ratio and vol_ratio >= 2.0
+        and today_chg_pct is not None and abs(today_chg_pct) < 0.05
+    )
 
     tags: List[str] = []
     if is_penny:
         tags.append("penny")
+    if is_pre_surge:
+        tags.append("pre_surge")
     if is_squeeze_setup:
         tags.append("squeeze")
     if is_low_float:
