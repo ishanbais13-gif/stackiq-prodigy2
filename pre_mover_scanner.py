@@ -346,7 +346,11 @@ def _score_symbol(
     has_news: bool,
     float_data: Optional[Dict[str, Any]] = None,
     has_8k: bool = False,
+    learned_weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Any]:
+    # learned_weights: multipliers from brain.get_learned_weights()
+    # e.g. {"quiet_accumulation": 1.8, "vol_surge": 0.6, ...}
+    lw = learned_weights or {}
     """Score a single symbol 0-100 for PRE-surge potential (the day BEFORE it runs).
 
     Key philosophy: we want volume building WITHOUT price already exploding.
@@ -415,6 +419,7 @@ def _score_symbol(
             if vol_ratio >= 1.5 and price_move_abs < 0.05:
                 # Full 25 pts for big vol + flat price (pure accumulation)
                 accum_pts = _clamp((vol_ratio - 1.5) / 3.0 * 25.0, 5.0, 25.0)
+                accum_pts *= lw.get("quiet_accumulation", 1.0)
                 raw_score += accum_pts
                 signals["quiet_accumulation"] = {
                     "pts": round(accum_pts, 1),
@@ -424,6 +429,7 @@ def _score_symbol(
             elif vol_ratio >= 1.5:
                 # Some vol surge but price is already moving — partial credit
                 partial = _clamp((vol_ratio - 1.5) / 3.0 * 15.0, 0.0, 15.0)
+                partial *= lw.get("vol_surge", 1.0)
                 raw_score += partial
                 signals["vol_surge"] = {"pts": round(partial, 1), "ratio": round(vol_ratio, 2)}
     except Exception:
@@ -440,6 +446,7 @@ def _score_symbol(
             float_rotation = cur_vol / float_shares  # fraction of float trading today
             # 10% rotation = 10pts, 30% = 20pts, 50%+ = 30pts
             float_pts = _clamp(float_rotation / 0.5 * 30.0, 0.0, 30.0)
+            float_pts *= lw.get("float_rotation", 1.0)
             raw_score += float_pts
             signals["float_rotation"] = {
                 "pts": round(float_pts, 1),
@@ -459,6 +466,7 @@ def _score_symbol(
             # short_pct=30%, vol_ratio=3x → raw = 0.9 → normalized
             squeeze_raw = (short_pct / 100.0) * min(vol_ratio, 5.0) / 1.5
             squeeze_pts = _clamp(squeeze_raw * 20.0, 0.0, 20.0)
+            squeeze_pts *= lw.get("squeeze_potential", 1.0)
             raw_score += squeeze_pts
             signals["squeeze_potential"] = {
                 "pts": round(squeeze_pts, 1),
@@ -476,6 +484,7 @@ def _score_symbol(
             if atr5 and atr20 and atr20 > 0:
                 ratio_atr = atr5 / atr20
                 compress_pts = _clamp((1.25 - ratio_atr) / 0.5 * 20.0, 0.0, 20.0)
+                compress_pts *= lw.get("atr_compression", 1.0)
                 raw_score += compress_pts
                 signals["atr_compression"] = {"pts": round(compress_pts, 1), "atr5_atr20": round(ratio_atr, 3)}
     except Exception:
@@ -491,6 +500,7 @@ def _score_symbol(
             if rng > 0:
                 pos = (day_c - day_l) / rng
                 close_pts = _clamp(pos * 10.0, 0.0, 10.0)
+                close_pts *= lw.get("close_strength", 1.0)
                 raw_score += close_pts
                 signals["close_strength"] = {"pts": round(close_pts, 1), "position_in_range": round(pos, 3)}
     except Exception:
@@ -503,6 +513,7 @@ def _score_symbol(
             if high_20d and high_20d > 0:
                 pct_from_high = (high_20d - price) / high_20d
                 breakout_pts = _clamp((0.10 - pct_from_high) / 0.10 * 10.0, 0.0, 10.0)
+                breakout_pts *= lw.get("near_high", 1.0)
                 raw_score += breakout_pts
                 signals["near_high"] = {"pts": round(breakout_pts, 1), "pct_from_20d_high": round(pct_from_high * 100, 2)}
     except Exception:
@@ -512,11 +523,13 @@ def _score_symbol(
     # 8-K = hard material event → max pts. Generic news → partial credit.
     try:
         if has_8k:
-            raw_score += 15.0
-            signals["catalyst"] = {"pts": 15.0, "type": "sec_8k"}
+            cat_pts = 15.0 * lw.get("catalyst", 1.0)
+            raw_score += cat_pts
+            signals["catalyst"] = {"pts": round(cat_pts, 1), "type": "sec_8k"}
         elif has_news:
-            raw_score += 8.0
-            signals["catalyst"] = {"pts": 8.0, "type": "news"}
+            cat_pts = 8.0 * lw.get("catalyst", 1.0)
+            raw_score += cat_pts
+            signals["catalyst"] = {"pts": round(cat_pts, 1), "type": "news"}
     except Exception:
         pass
 
@@ -527,6 +540,7 @@ def _score_symbol(
             spy_r3 = (spy_closes[-1] - spy_closes[-4]) / max(abs(spy_closes[-4]), 0.01)
             alpha = stock_r3 - spy_r3
             rs_pts = _clamp((alpha + 0.02) / 0.06 * 5.0, 0.0, 5.0)
+            rs_pts *= lw.get("rs_vs_spy", 1.0)
             raw_score += rs_pts
             signals["rs_vs_spy"] = {"pts": round(rs_pts, 1), "alpha_3d_pct": round(alpha * 100, 2)}
     except Exception:
@@ -556,6 +570,7 @@ def _score_symbol(
         if price is not None and price < 1.0 and float_shares_b and float_shares_b < 5_000_000 and cur_vol:
             micro_rotation = cur_vol / float_shares_b
             micro_bonus = _clamp(micro_rotation / 0.3 * 10.0, 0.0, 10.0)
+            micro_bonus *= lw.get("micro_float_bonus", 1.0)
             raw_score += micro_bonus
             signals["micro_float_bonus"] = {"pts": round(micro_bonus, 1), "float_m": round(float_shares_b / 1_000_000, 2)}
     except Exception:
@@ -749,7 +764,17 @@ def run_premover_scan(
         except Exception as e:
             log.warning(f"premover_scan: float/short error: {e}")
 
-    # --- Step 8: Score ---
+    # --- Step 8: Load learned weights from brain ---
+    learned_weights: Dict[str, float] = {}
+    try:
+        from brain import get_learned_weights
+        learned_weights = get_learned_weights()
+        if learned_weights:
+            log.info(f"premover_scan: loaded {len(learned_weights)} learned signal weights from brain")
+    except Exception as e:
+        log.debug(f"premover_scan: brain weights unavailable: {e}")
+
+    # --- Step 9: Score ---
     results: List[Dict[str, Any]] = []
     for sym, snap in top_candidates:
         bars = bars_map.get(sym) or []
@@ -761,11 +786,21 @@ def run_premover_scan(
             has_news=has_news_map.get(sym, False),
             float_data=float_map.get(sym),
             has_8k=(sym in sec_8k_filers),
+            learned_weights=learned_weights,
         )
         if result["score"] >= 15.0:
             results.append(result)
 
     results.sort(key=lambda x: x["score"], reverse=True)
+
+    # --- Step 10: Record picks to brain for outcome tracking ---
+    try:
+        from brain import record_premover_pick
+        for r in results[:max_results]:
+            record_premover_pick(r)
+        log.info(f"premover_scan: recorded {min(len(results), max_results)} picks to brain")
+    except Exception as e:
+        log.debug(f"premover_scan: brain record error: {e}")
 
     # Hot sector detection
     hot_sectors = _detect_hot_sectors(results)

@@ -2440,6 +2440,16 @@ def _startup_init():
         _t2.start()
     except Exception:
         pass
+    try:
+        # Brain DB init — creates tables if they don't exist yet
+        from brain import init_brain_db
+        init_brain_db()
+        # Outcome checker: runs 10 min after startup, then every 6 hours
+        _t3 = threading.Timer(600, _bg_brain_outcome_loop)
+        _t3.daemon = True
+        _t3.start()
+    except Exception as _be:
+        log.warning(f"brain init error: {_be}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -8018,6 +8028,23 @@ def _bg_premover_scan_loop() -> None:
     _t.start()
 
 
+def _bg_brain_outcome_loop() -> None:
+    """
+    Every 6 hours: fetch current prices for pending picks, record outcomes,
+    and trigger weight recalibration so the scanner keeps learning.
+    """
+    try:
+        from brain import run_outcome_checks
+        n = run_outcome_checks()
+        log.info(f"brain_outcome_loop: checked {n} outcomes")
+    except Exception as e:
+        log.warning(f"brain_outcome_loop error: {e}")
+    finally:
+        _t = threading.Timer(6 * 3600, _bg_brain_outcome_loop)
+        _t.daemon = True
+        _t.start()
+
+
 class BestPickResponse(BaseModel):
     status: str = "ok"
     reason: str = ""
@@ -9910,4 +9937,20 @@ async def scan_pre_movers(
         }
     except Exception as e:
         log.exception(f"scan_pre_movers error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/scan/brain_stats", include_in_schema=True)
+async def scan_brain_stats():
+    """
+    Returns the scanner's self-learning brain stats:
+    - Overall win rate across all tracked picks
+    - Per-signal win rates and learned multipliers
+    - Recent picks with outcomes
+    """
+    try:
+        from brain import get_brain_stats
+        return get_brain_stats()
+    except Exception as e:
+        log.warning(f"brain_stats error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
