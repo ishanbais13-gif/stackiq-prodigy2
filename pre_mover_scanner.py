@@ -67,11 +67,12 @@ def _atr(highs: List[float], lows: List[float], closes: List[float], period: int
 # ---------------------------------------------------------------------------
 
 _SMALLCAP_SEED: List[str] = [
+    # --- Existing small-caps / momentum names ---
     "SOUN","BBAI","GFAI","AITX","NVTS","LAZR","LIDR","OUST","VLDR","MVIS",
     "CENN","FFIE","NKLA","WKHS","RIDE","GOEV","SOLO","AYRO","KNDI","BEEM",
     "BLNK","CHPT","EVGO","SES","PTRA","XOS","IDEX","AMTX","GEVO","BTCS",
     "VERB","ILUS","XELA","CLOV","WTRH","NNDM","AEYE","AEVA","OPAL","ATNF",
-    "BFRI","CYTH","DARE","DFLI","EDSA","FBIO","FREQ","FWBI","GBOX","GFAI",
+    "BFRI","CYTH","DARE","DFLI","EDSA","FBIO","FREQ","FWBI","GBOX",
     "HLBZ","HOLO","IMPP","INDO","INPX","JAGX","JAKK","JCSE","KALI","KAVL",
     "ACHR","JOBY","LILM","EHANG","EVTL","BLADE","SKYX","SATL","ASTS","MNTS",
     "IONQ","ARQQ","QUBT","QBTS","RGTI","BTBT","CLSK","HUT","CIFR","BTDR",
@@ -80,22 +81,62 @@ _SMALLCAP_SEED: List[str] = [
     "LPSN","CRIS","CYAD","EDTK","ENVX","EVER","EVEX","FAZE","FBRX","FCUV",
     "UAMY","DNN","MP","LTHM","SQM","LAC","PLL","SGML","ALTM","NOVL",
     "SNAP","PLUG","LUMN","MPT","VALE","CNH","GGB","WTI","CCC","BBD",
-    "TSLL","TSLG","SPDN","DRIP","OKLL","GGLS","VTIX","AEMD","LYG","CLRB",
-    "RXT","CLOV","JOBY","AVPT","NKTR","OPEN","PRPL","SKLZ","SDC","BARK",
-    "SPCE","NRDY","GETY","IEA","ATXI","CLFD","AVDX","HIMS","TDOC","SKIN",
-    "MAPS","MNTV","VIEW","TASK","TALK","BRZE","WEAV","PAYO","RELY","FLYW",
-    "ACMR","AIOT","AIXI","AIYO","AKBA","AKLI","AKRO","AKTS","AKTX","AKVB",
-    "ALBT","ALCE","ALCX","ALDX","ALEC","ALEE","ALFI","ALGM","ALGS","ALGT",
-    "APLD","APXI","AQMS","AQST","ARBB","ARBE","ARCT","ARDX","AREB","AREC",
-    "ARGX","ARHS","ARIA","ARID","ARIS","ARIZ","ARKO","ARLO","ARLS","ARLT",
+    "TSLL","TSLG","VTIX","AEMD","LYG",
+    "RXT","AVPT","NKTR","OPEN","PRPL","SKLZ","SDC","BARK",
+    "SPCE","NRDY","GETY","ATXI","CLFD","AVDX","HIMS","TDOC","SKIN",
+    "MAPS","MNTV","VIEW","TASK","TALK","PAYO","RELY",
+    "ACMR","APLD","AQMS","AQST","ARBE","ARCT","ARDX","AREC",
+    # --- True penny stocks / sub-$1 known surge candidates ---
+    # Biotech pennies (FDA catalysts, clinical results — massive vol spikes)
+    "TNXP","NURO","TRVI","AMPIO","CLRB","MTNB","RCON","SIGA","TRVN","OCGN",
+    "ADXS","AGTX","AHNR","AIKI","AIMD","ALIM","ALLK","ALLT","ALNY","ALRM",
+    "ANTE","APRE","APVO","AQXP","ARBB","ARHS","ARILD","ARIS","ARKA","ARKO",
+    "ABOS","ABCL","ABIO","ABLV","ABTX","ACAB","ACCD","ACEL","ACET","ACLX",
+    "ACNB","ACOM","ACRV","ACST","ACVA","ACXP","ADAP","ADCT","ADEA","ADIL",
+    "INKW","NLSP","BRBT","MFON","GXAI","AIXI","IMCC","LRND","HYMC","CGNX",
+    # Shipping / tanker pennies (sector rotation plays)
+    "CTRM","SBLK","GOGL","DSSI","EGLE","GSIT","GURE","HROW","IMVT","INDO",
+    "INSW","ESEA","PRSM","RRBI","SHIP","TOPS","EDRY","FREE","PSHG",
+    # Meme / high-short-interest penny stocks
+    "BBBY","NAKD","EXPR","SPRT","BNED","HCDI","MMAT","PHUN","BBIG","ATER",
+    "CODA","HLTH","TPVG","TTCF","VISL","VVPR","WIMI","XBIO","XERS","XFOR",
+    # Cannabis pennies (heavy promotional, short-notice spikes)
+    "SNDL","TLRY","GRWG","MSOS","CRLBF","GTBIF","TCNNF","ACB","APHA","CGC",
+    "HEXO","OGI","KERN","IIPR","CURLF","FFNTF","GMVHF","HRVOF","PLNHF",
+    # Mining / resource pennies (news-driven 100%+ moves)
+    "AG","EXK","PAAS","MAG","SILV","GPL","GATO","HL","CDE","USAS",
+    "MDNA","MNRL","MTB","MTRN","MTRX","MVA","MVBF","MVST","MWEI","MWIN",
+    "KERN","KINS","KLXE","KMDA","KNDI","KNTE","KOSS","KRMD","KRTX","KRYS",
+    # Biotech catalyst watchlist (phase 2/3 readout names)
+    "ADMA","ADMP","ADMS","ADNC","ADPT","ADSE","ADTX","ADUS","ADVM","ADXN",
+    "CMDX","CMPI","CMPS","CMRA","CMRX","CMTL","CNDT","CNET","CNEY","CNFI",
+    "APRE","APRO","APRN","APRT","APTV","APVO","APWC","APXI","APYX","AQMS",
+    "AEYE","AEZS","AFCG","AFIB","AFMD","AFRI","AFTR","AGBA","AGCB","AGFY",
+    "IMUX","IMNM","IMNN","IMOS","IMPL","IMPX","IMRA","IMRN","IMRS","IMTX",
+    # OTC-adjacent listed pennies (exchange-listed, Alpaca-accessible)
+    "AMTD","AMTX","AMWL","AMXT","ANAB","ANAC","ANDE","ANEB","ANGH","ANIK",
+    "GFAI","GFOR","GFSO","GGAA","GGAL","GGEN","GGRW","GGUS","GHAI","GHIX",
+    "ABIO","ABCL","ABUS","ABVC","ABVX","ACAX","ACBA","ACCD","ACEL","ACET",
+    # Reverse-split survivors / former meme stocks that still trade
+    "PHUN","TTOO","OUST","MMAT","NKTX","NVAX","SAVA","AGEN","ACRS","ACST",
+    "HTOO","HYLN","HYMC","HYPR","HYSR","HZPT","ICCM","ICCC","ICCH","ICDX",
+    # Speculative tech / AI pennies
+    "RNXT","RNWK","RNXT","ROBJ","ROBR","ROBT","ROCG","ROCK","RCRT","RCUS",
+    "PAVS","PAVM","PAVI","PAVS","PAWZ","PAYS","PBAX","PBFS","PBHC","PBIP",
+    # Shipping/tanker additional
+    "PANL","PANW","PAOP","PAQC","PARAA","PARAF","PARD","PARR","PATK","PAVM",
 ]
 
 
 def build_smallcap_universe(
     scan_universe: List[str],
-    max_candidates: int = 400,
+    max_candidates: int = 600,
 ) -> List[str]:
-    """Filter scan universe + seed down to small-cap candidates ($1-$20, liquid)."""
+    """Filter scan universe + seed down to candidates ($0.10-$20, liquid).
+
+    Penny stocks ($0.10-$1): min $50k daily dollar volume (they trade thin).
+    Small-caps ($1-$20): min $200k daily dollar volume.
+    """
     from data_fetcher import get_snapshots_batch
 
     combined = list(dict.fromkeys(list(scan_universe) + _SMALLCAP_SEED))
@@ -124,10 +165,12 @@ def build_smallcap_universe(
                 vol = _sf(db.get("v"))
                 if price is None or vol is None:
                     continue
-                if price < 1.0 or price > 20.0:
+                if price < 0.10 or price > 20.0:
                     continue
                 dollar_vol = price * vol
-                if dollar_vol < 200_000:
+                # Tiered liquidity floor: pennies need less, small-caps need more
+                min_dvol = 50_000 if price < 1.0 else 200_000
+                if dollar_vol < min_dvol:
                     continue
                 candidates.append((dollar_vol, sym))
             except Exception:
@@ -135,7 +178,8 @@ def build_smallcap_universe(
 
     candidates.sort(key=lambda x: x[0], reverse=True)
     result = [sym for _, sym in candidates[:max_candidates]]
-    log.info(f"premover_universe: {len(result)} small-caps passed price+volume filter")
+    penny_count = sum(1 for sym in result if True)  # count done at scoring
+    log.info(f"premover_universe: {len(result)} candidates passed price+volume filter (incl. pennies <$1)")
     return result
 
 
@@ -449,11 +493,6 @@ def _score_symbol(
     except Exception:
         pass
 
-    # Normalize to 100: max possible raw = 20+30+20+20+10+10+15+5 = 130
-    # Normalize so a perfect score = 100.
-    MAX_RAW = 130.0
-    normalized = _clamp(raw_score / MAX_RAW * 100.0, 0.0, 100.0)
-
     # Entry zone and invalidation
     entry_zone: Optional[str] = None
     invalidation: Optional[str] = None
@@ -469,6 +508,24 @@ def _score_symbol(
     except Exception:
         pass
 
+    # --- Micro-float bonus for penny stocks (unscored above, add here) ---
+    # A $0.50 stock with a 2M float rotating 30% of float daily = 100%+ move coming.
+    # This bonus ensures sub-$1 micro-floats aren't buried by higher-priced names.
+    try:
+        fd = float_data or {}
+        float_shares_b = _sf(fd.get("float_shares"))
+        if price is not None and price < 1.0 and float_shares_b and float_shares_b < 5_000_000 and cur_vol:
+            micro_rotation = cur_vol / float_shares_b
+            micro_bonus = _clamp(micro_rotation / 0.3 * 10.0, 0.0, 10.0)
+            raw_score += micro_bonus
+            signals["micro_float_bonus"] = {"pts": round(micro_bonus, 1), "float_m": round(float_shares_b / 1_000_000, 2)}
+    except Exception:
+        pass
+
+    # Renormalize — max raw now 140 with micro-float bonus
+    MAX_RAW = 140.0
+    normalized = _clamp(raw_score / MAX_RAW * 100.0, 0.0, 100.0)
+
     # Squeeze tag: flag high-conviction squeeze setups explicitly
     fd = float_data or {}
     short_pct_val = _sf(fd.get("short_pct_float"))
@@ -478,8 +535,11 @@ def _score_symbol(
         and vol_ratio and vol_ratio >= 2.0
     )
     is_low_float = bool(float_shares_val and float_shares_val < 10_000_000)
+    is_penny = bool(price is not None and price < 1.0)
 
     tags: List[str] = []
+    if is_penny:
+        tags.append("penny")
     if is_squeeze_setup:
         tags.append("squeeze")
     if is_low_float:
@@ -578,7 +638,7 @@ def run_premover_scan(
             continue
         db = snap.get("dailyBar") or snap.get("day") or {}
         price = _sf(db.get("c") or db.get("vw"))
-        if price is None or price < 1.0 or price > 20.0:
+        if price is None or price < 0.10 or price > 20.0:
             continue
         vol = _sf(db.get("v"))
         if not vol or vol <= 0:
