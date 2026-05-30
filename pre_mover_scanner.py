@@ -66,6 +66,21 @@ def _atr(highs: List[float], lows: List[float], closes: List[float], period: int
 # Universe builder
 # ---------------------------------------------------------------------------
 
+# Stable mid/large-caps that flood the results on high-vol days but will never
+# produce 50%+ explosive moves. Excluded regardless of volume.
+_LARGECAP_STABLE_EXCLUDE: Set[str] = {
+    "LYFT", "UBER", "DASH", "ABNB",           # ride-share / gig economy
+    "HBAN", "FNB", "RKT", "OWL", "MUFG",      # banks / financials
+    "FITB", "KEY", "CFG", "ZION", "MTB",       # regional banks
+    "PCG", "AES", "RUN", "NRG", "VST",         # utilities / solar infra
+    "COLD",                                     # REIT
+    "INFY", "WIT", "CTSH",                     # large IT services
+    "KVUE", "ABEV", "DEO",                      # consumer staples
+    "LUMN", "T", "VZ",                          # telecom
+    "F", "GM", "STLA",                          # legacy auto (big floats)
+    "OWL", "BXSL", "ARCC", "MAIN",             # BDCs / asset managers
+}
+
 _SMALLCAP_SEED: List[str] = [
     # --- Existing small-caps / momentum names ---
     "SOUN","BBAI","GFAI","AITX","NVTS","LAZR","LIDR","OUST","VLDR","MVIS",
@@ -159,6 +174,9 @@ def build_smallcap_universe(
             if not isinstance(snap, dict):
                 continue
             try:
+                # Hard exclusion: known stable mid/large-caps
+                if sym in _LARGECAP_STABLE_EXCLUDE:
+                    continue
                 db = snap.get("dailyBar") or snap.get("day") or {}
                 lt = snap.get("latestTrade") or snap.get("latestQuote") or {}
                 price = _sf(db.get("c") or db.get("vw") or lt.get("p") or lt.get("ap"))
@@ -172,11 +190,13 @@ def build_smallcap_universe(
                 min_dvol = 50_000 if price < 1.0 else 200_000
                 if dollar_vol < min_dvol:
                     continue
-                # Exclude mid/large-caps: yesterday's dollar vol > $10M = too big.
-                # prevDailyBar.v is the correct Alpaca field (not dailyBar.pv).
+                # Normal-vol filter: prevDailyBar.v (Alpaca) or dailyBar.v (Polygon)
+                # both represent a complete trading day's volume — use as proxy for
+                # "normal" size. Stocks with >$30M normal dollar vol are large-caps.
                 prev_db = snap.get("prevDailyBar") or {}
                 prev_vol = _sf(prev_db.get("v"))
-                if prev_vol and price * prev_vol > 10_000_000:
+                normal_vol = prev_vol if prev_vol is not None else vol
+                if normal_vol and price * normal_vol > 30_000_000:
                     continue
                 candidates.append((dollar_vol, sym))
             except Exception:
