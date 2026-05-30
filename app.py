@@ -830,26 +830,33 @@ async def get_analyst_targets(symbol: str, *, last_price: Optional[float]) -> Di
     except Exception:
         out["implied_upside_pct"] = None
 
-    # Blend price-target upside (40%) with buy/hold/sell rating (60%).
-    # Rating matters more — stale targets mislead after big gap-ups.
+    # Score from buy/hold/sell ratings (primary) + price target upside (secondary).
+    # Free Finnhub tier has recommendations but not price targets — handle both cases.
     try:
-        upside_score = _analyst_score_from_upside(out.get("implied_upside_pct"))
         buy_score = _buy_pct_score(rec_data)
+        has_upside = out.get("implied_upside_pct") is not None
+        upside_score = _analyst_score_from_upside(out.get("implied_upside_pct")) if has_upside else None
+
+        if buy_score is not None and upside_score is not None:
+            # Both available: weight ratings 60%, price target 40%
+            blended = int(round(0.6 * buy_score + 0.4 * upside_score))
+        elif buy_score is not None:
+            # Only ratings available (free tier): use directly
+            blended = buy_score
+        elif upside_score is not None:
+            blended = upside_score
+        else:
+            blended = 50
+
+        out["score_0_100"] = max(0, min(100, blended))
         if buy_score is not None:
-            blended = int(round(0.4 * upside_score + 0.6 * buy_score))
-            out["score_0_100"] = max(0, min(100, blended))
             out["buy_pct"] = buy_score
-        else:
-            out["score_0_100"] = upside_score
-        if out.get("implied_upside_pct") is None and buy_score is None:
-            out["rating_bias"] = "NEUTRAL"
-        else:
-            out["rating_bias"] = "BULLISH" if out["score_0_100"] >= 60 else "BEARISH" if out["score_0_100"] <= 40 else "NEUTRAL"
+        out["rating_bias"] = "BULLISH" if out["score_0_100"] >= 60 else "BEARISH" if out["score_0_100"] <= 40 else "NEUTRAL"
     except Exception:
         out["score_0_100"] = 50
         out["rating_bias"] = "NEUTRAL"
 
-    out["status"] = "ok" if (out.get("implied_upside_pct") is not None or rec_data is not None) else "unavailable"
+    out["status"] = "ok" if (rec_data is not None or out.get("implied_upside_pct") is not None) else "unavailable"
     _ANALYST_TARGETS_CACHE.set(ck, out)
     return out
 
