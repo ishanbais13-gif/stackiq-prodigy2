@@ -617,6 +617,8 @@ def _score_symbol(
         tags.append("low_float")
     if has_8k:
         tags.append("8K_catalyst")
+    elif has_news:
+        tags.append("news")
 
     return {
         "symbol": symbol,
