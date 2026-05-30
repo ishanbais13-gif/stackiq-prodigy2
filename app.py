@@ -3241,17 +3241,31 @@ def _market_data_from_snapshot_and_bars(
     return out
 
 
-def _trade_plan_from_spec(*, last_price: float, atr14: float, vwap: float, resistance: float) -> Dict[str, Any]:
+def _trade_plan_from_spec(
+    *,
+    last_price: float,
+    atr14: float,
+    vwap: float,
+    resistance: float,
+    open_price: Optional[float] = None,
+    prev_close: Optional[float] = None,
+) -> Dict[str, Any]:
     lp = float(last_price or 0.0)
     atr = float(atr14 or 0.0)
     vw = float(vwap or 0.0)
     res = float(resistance or 0.0)
+    op = float(open_price or 0.0)
+    pc = float(prev_close or 0.0)
 
-    # Must generate even if bars/ATR missing, as long as snapshot/price exists.
-    # If volatility unknown, use % band model:
-    # Low vol → 3–6%, Mid vol → 6–12%, High vol → 12–25%
     if lp <= 0.0:
         return {"entry": None, "stop": None, "targets": [None, None, None], "gain_pct": None, "risk_reward": None}
+
+    # --- Detect gap day (earnings / catalyst) ---
+    # A gap >5% means we use Fibonacci extensions off the gap as targets.
+    # These are real technical levels traders actually use, not just ATR multiples.
+    gap_pct = ((op - pc) / pc) if (op > 0 and pc > 0) else 0.0
+    is_gap_day = gap_pct > 0.05
+
     if atr <= 0.0:
         pct = 0.09
         try:
@@ -3265,8 +3279,7 @@ def _trade_plan_from_spec(*, last_price: float, atr14: float, vwap: float, resis
             pct = 0.09
         atr = float(lp) * float(pct)
 
-    # ATR floor: historical ATR can be stale after a large gap (e.g. earnings +70%).
-    # Enforce a minimum of 5% of current price so targets aren't absurdly tight.
+    # ATR floor so targets are never absurdly tight on stale historical data.
     atr_floor_pct = 0.05 if lp < 20.0 else (0.03 if lp < 60.0 else 0.02)
     atr = max(atr, lp * atr_floor_pct)
 
@@ -3275,9 +3288,6 @@ def _trade_plan_from_spec(*, last_price: float, atr14: float, vwap: float, resis
         if vw > 0 and lp < vw:
             entry = float(vw) * 1.001
         elif res > 0 and res >= lp * 0.90:
-            # Only use resistance as entry anchor when stock is near/below it.
-            # If stock has already gapped far above resistance (earnings catalyst etc.),
-            # resistance is irrelevant and we anchor to current price instead.
             entry = float(res) * 1.001
         else:
             entry = float(lp) * 1.005
@@ -3288,15 +3298,32 @@ def _trade_plan_from_spec(*, last_price: float, atr14: float, vwap: float, resis
         if entry > float(lp) * 1.25:
             entry = float(lp) * 1.05
         elif entry < float(lp) * 0.90:
-            # Entry below current price means stock blew past it — use current price.
             entry = float(lp) * 1.005
     except Exception:
         pass
 
-    stop = float(entry) - float(atr)
-    t1 = float(entry) + float(atr)
-    t2 = float(entry) + float(atr) * 2.0
-    t3 = float(entry) + float(atr) * 3.0
+    if is_gap_day:
+        # Fibonacci extensions off the gap impulse (open - prev_close).
+        # These are the actual levels traders target on catalyst gap plays:
+        #   T1 = gap open + 0.618 × gap  (first extension — take-partial)
+        #   T2 = gap open + 1.0  × gap  (measured move — standard target)
+        #   T3 = gap open + 1.618 × gap (golden ratio extension — runner)
+        gap = op - pc
+        t1 = op + 0.618 * gap
+        t2 = op + 1.0 * gap
+        t3 = op + 1.618 * gap
+        # Stop: gap open level — if it falls back below the gap, thesis is broken.
+        stop = op * 0.99
+        # Clamp: never let stop be above entry or targets be below current price.
+        stop = min(stop, entry * 0.985)
+        t1 = max(t1, lp * 1.02)
+        t2 = max(t2, t1 * 1.01)
+        t3 = max(t3, t2 * 1.01)
+    else:
+        stop = float(entry) - float(atr)
+        t1 = float(entry) + float(atr)
+        t2 = float(entry) + float(atr) * 2.0
+        t3 = float(entry) + float(atr) * 3.0
 
     if t1 < entry:
         t1 = entry
@@ -4384,11 +4411,35 @@ async def analyze(
     if resistance is None and last_px_md is not None:
         resistance = float(last_px_md)
 
+    open_md = _safe_f(market_data.get("open"))
+    prev_close_md = _safe_f(market_data.get("prev_close"))
+
+    # Detect a catalyst gap by comparing the first intraday bar open against
+    # the last daily bar close. Today's open vs yesterday's close misses gaps
+    # that happened earlier in the week (stock already ran, now consolidating).
+    gap_open_for_fib: Optional[float] = None
+    gap_prev_close_for_fib: Optional[float] = None
+    try:
+        _daily_bars = market_data.get("daily_bars") or []
+        _intra_bars = market_data.get("intraday_bars") or []
+        if _daily_bars and _intra_bars:
+            _last_daily_c = float((_daily_bars[-1] or {}).get("c") or 0)
+            _first_intra_o = float((_intra_bars[0] or {}).get("o") or 0)
+            if _last_daily_c > 0 and _first_intra_o > 0:
+                _gap_pct = (_first_intra_o - _last_daily_c) / _last_daily_c
+                if _gap_pct > 0.05:
+                    gap_open_for_fib = _first_intra_o
+                    gap_prev_close_for_fib = _last_daily_c
+    except Exception:
+        pass
+
     trade_plan_spec = _trade_plan_from_spec(
         last_price=float(last_px_md or 0.0),
         atr14=float(atr14_md or 0.0),
         vwap=float(vwap_md or 0.0),
         resistance=float(resistance or 0.0),
+        open_price=float(gap_open_for_fib or open_md or 0.0),
+        prev_close=float(gap_prev_close_for_fib or prev_close_md or 0.0),
     )
 
     execution_factors = _execution_factors_from_market_data(
