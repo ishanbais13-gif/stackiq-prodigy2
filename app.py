@@ -3270,7 +3270,10 @@ def _trade_plan_from_spec(*, last_price: float, atr14: float, vwap: float, resis
     try:
         if vw > 0 and lp < vw:
             entry = float(vw) * 1.001
-        elif res > 0:
+        elif res > 0 and res >= lp * 0.90:
+            # Only use resistance as entry anchor when stock is near/below it.
+            # If stock has already gapped far above resistance (earnings catalyst etc.),
+            # resistance is irrelevant and we anchor to current price instead.
             entry = float(res) * 1.001
         else:
             entry = float(lp) * 1.005
@@ -3280,6 +3283,9 @@ def _trade_plan_from_spec(*, last_price: float, atr14: float, vwap: float, resis
     try:
         if entry > float(lp) * 1.25:
             entry = float(lp) * 1.05
+        elif entry < float(lp) * 0.90:
+            # Entry below current price means stock blew past it — use current price.
+            entry = float(lp) * 1.005
     except Exception:
         pass
 
@@ -4662,7 +4668,11 @@ async def analyze(
     # Trade plan sanity checks (never invent; return null plan if invalid)
     errors: List[str] = []
     try:
-        lp = float(current_px)
+        # Prefer last_px_md (today's actual price) over current_px which may be yesterday's close
+        # when snap_px is None (e.g., Polygon cache format). A stock that gapped up 70% overnight
+        # would otherwise falsely trigger the entry_far_from_last check.
+        _sanity_lp = last_px_md if (last_px_md is not None and float(last_px_md) > 0) else current_px
+        lp = float(_sanity_lp)
     except Exception:
         lp = 0.0
     try:
