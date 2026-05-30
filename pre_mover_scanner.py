@@ -607,18 +607,10 @@ def _score_symbol(
     )
     is_low_float = bool(float_shares_val and float_shares_val < 10_000_000)
     is_penny = bool(price is not None and price < 1.0)
-    # Pre-surge: volume 5x+ normal but intraday move < 2% (open vs close, same snapshot)
-    # Uses intraday_chg (not today_chg_pct) to avoid bars/snapshot data mismatch.
-    is_pre_surge = bool(
-        vol_ratio and vol_ratio >= 5.0
-        and intraday_chg is not None and abs(intraday_chg) < 0.02
-    )
 
     tags: List[str] = []
     if is_penny:
         tags.append("penny")
-    if is_pre_surge:
-        tags.append("pre_surge")
     if is_squeeze_setup:
         tags.append("squeeze")
     if is_low_float:
