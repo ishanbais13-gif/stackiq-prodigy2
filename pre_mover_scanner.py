@@ -576,8 +576,15 @@ def _score_symbol(
     except Exception:
         pass
 
-    # Max raw = 25(accum) + 30(float_vol) + 20(squeeze) + 20(atr) + 10(close) + 10(near_high) + 15(catalyst) + 10(micro_float) + 5(rs) = 145
-    MAX_RAW = 145.0
+    # Normalize against what this stock could actually score, not the theoretical max.
+    # If float data wasn't available, the float-dependent signals (30+20+10=60 pts)
+    # could never fire — normalizing against 145 makes every stock look like a 40/100.
+    # Instead, score against what was achievable given available data.
+    has_float_data = bool(float_data and (float_data.get("float_shares") or float_data.get("short_pct_float")))
+    is_penny_stock = bool(price is not None and price < 1.0)
+    MAX_RAW = 145.0 if has_float_data else (135.0 if is_penny_stock else 85.0)
+    # 85 = 25+20+10+10+15+5 (no float signals)
+    # 135 = adds micro_float_bonus potential for pennies even without Yahoo data
     normalized = _clamp(raw_score / MAX_RAW * 100.0, 0.0, 100.0)
 
     # Squeeze tag: flag high-conviction squeeze setups explicitly
