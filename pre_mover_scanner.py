@@ -590,10 +590,12 @@ def _score_symbol(
     )
     is_low_float = bool(float_shares_val and float_shares_val < 10_000_000)
     is_penny = bool(price is not None and price < 1.0)
-    # Pre-surge: volume 2x+ normal but price up <5% today = accumulation phase
+    # Pre-surge: volume 5x+ normal but price flat (<3% move) = stealth accumulation
+    # Threshold is intentionally high — pre-filter already requires 2x, so 5x here
+    # means genuinely unusual loading before a move. Rare tag, not a default.
     is_pre_surge = bool(
-        vol_ratio and vol_ratio >= 2.0
-        and today_chg_pct is not None and abs(today_chg_pct) < 0.05
+        vol_ratio and vol_ratio >= 5.0
+        and today_chg_pct is not None and abs(today_chg_pct) < 0.03
     )
 
     tags: List[str] = []
