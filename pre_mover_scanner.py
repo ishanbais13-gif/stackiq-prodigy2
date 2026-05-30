@@ -393,19 +393,29 @@ def _score_symbol(
         avg20 = _mean(vols[-21:-1] if len(vols) >= 21 else vols[:-1]) or 1.0
         vol_ratio = cur_vol / max(avg20, 1.0)
 
-    # --- ALREADY-RUNNING PENALTY: if up >15% today, the move already started ---
-    # We're hunting the day BEFORE the explosion. If it's already exploding,
-    # we're late. Penalize hard to push these out of the top results.
+    # Intraday move: open→close from the SAME snapshot (avoids bars/snapshot mismatch)
+    intraday_chg: Optional[float] = None
+    try:
+        if day_open and day_open > 0 and day_close:
+            intraday_chg = (day_close - day_open) / day_open
+    except Exception:
+        pass
+
+    # Day-over-day change: today's close vs yesterday's close from bars
     today_chg_pct: Optional[float] = None
     try:
-        ref = prev_close or day_open
-        if ref and ref > 0 and day_close:
-            today_chg_pct = (day_close - ref) / ref
-            if today_chg_pct > 0.15:
-                # Already running — dock up to 25 pts
-                penalty = _clamp((today_chg_pct - 0.15) / 0.35 * 25.0, 0.0, 25.0)
-                raw_score -= penalty
-                signals["already_running"] = {"penalty": round(-penalty, 1), "today_chg_pct": round(today_chg_pct * 100, 1)}
+        if prev_close and prev_close > 0 and day_close:
+            today_chg_pct = (day_close - prev_close) / prev_close
+    except Exception:
+        pass
+
+    # --- ALREADY-RUNNING PENALTY: if up >15% today, the move already started ---
+    try:
+        chg = today_chg_pct if today_chg_pct is not None else intraday_chg
+        if chg is not None and chg > 0.15:
+            penalty = _clamp((chg - 0.15) / 0.35 * 25.0, 0.0, 25.0)
+            raw_score -= penalty
+            signals["already_running"] = {"penalty": round(-penalty, 1), "today_chg_pct": round(chg * 100, 1)}
     except Exception:
         pass
 
@@ -597,12 +607,11 @@ def _score_symbol(
     )
     is_low_float = bool(float_shares_val and float_shares_val < 10_000_000)
     is_penny = bool(price is not None and price < 1.0)
-    # Pre-surge: volume 5x+ normal but price flat (<3% move) = stealth accumulation
-    # Threshold is intentionally high — pre-filter already requires 2x, so 5x here
-    # means genuinely unusual loading before a move. Rare tag, not a default.
+    # Pre-surge: volume 5x+ normal but intraday move < 2% (open vs close, same snapshot)
+    # Uses intraday_chg (not today_chg_pct) to avoid bars/snapshot data mismatch.
     is_pre_surge = bool(
         vol_ratio and vol_ratio >= 5.0
-        and today_chg_pct is not None and abs(today_chg_pct) < 0.03
+        and intraday_chg is not None and abs(intraday_chg) < 0.02
     )
 
     tags: List[str] = []
