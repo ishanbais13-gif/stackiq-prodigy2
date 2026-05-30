@@ -4432,6 +4432,19 @@ async def analyze(
     if atr_px is None:
         atr_px = _safe_f(det_tp.get("atr14"))
 
+    # Fallback: if trade_plan_spec failed to compute, derive from market data directly
+    if (entry_px is None or entry_px <= 0) and last_px_md and float(last_px_md) > 0:
+        _lp = float(last_px_md)
+        _atr = float(atr_px or _lp * 0.05)
+        entry_px = round(_lp * 1.005, 2)
+        trade_plan_spec = {
+            "entry": entry_px,
+            "stop": round(entry_px - _atr, 2),
+            "targets": [round(entry_px + _atr, 2), round(entry_px + _atr * 2, 2), round(entry_px + _atr * 3, 2)],
+            "gain_pct": round((_atr * 3 / entry_px) * 100, 2),
+            "risk_reward": 2.0,
+        }
+
     execution_plan_modeled = generate_execution_plan(sym, volatility=vol_score_for_model, trend_strength=trend_strength_for_model)
     try:
         if entry_px is not None and float(entry_px) > 0:
