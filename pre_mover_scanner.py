@@ -612,9 +612,36 @@ def _score_symbol(
     is_low_float = bool(float_shares_val and float_shares_val < 10_000_000)
     is_penny = bool(price is not None and price < 1.0)
 
+    # --- Data-driven tags (no external API needed) ---
+    # HIGH VOL: volume 20x+ normal = genuinely unusual activity
+    is_high_vol = bool(vol_ratio and vol_ratio >= 20.0)
+    # COILED: ATR5/ATR20 < 0.70 = very tight compression, spring loaded
+    atr_ratio_val: Optional[float] = None
+    try:
+        if len(closes) >= 25:
+            atr5_t = _atr(highs, lows, closes, 5)
+            atr20_t = _atr(highs, lows, closes, 20)
+            if atr5_t and atr20_t and atr20_t > 0:
+                atr_ratio_val = atr5_t / atr20_t
+    except Exception:
+        pass
+    is_coiled = bool(atr_ratio_val and atr_ratio_val < 0.70)
+    # BREAKOUT: within 3% of 20-day high
+    is_near_breakout = bool(
+        len(highs) >= 20 and price is not None and
+        max(highs[-20:]) > 0 and
+        (max(highs[-20:]) - price) / max(highs[-20:]) <= 0.03
+    )
+
     tags: List[str] = []
     if is_penny:
         tags.append("penny")
+    if is_high_vol:
+        tags.append("high_vol")
+    if is_coiled:
+        tags.append("coiled")
+    if is_near_breakout:
+        tags.append("breakout")
     if is_squeeze_setup:
         tags.append("squeeze")
     if is_low_float:
