@@ -427,8 +427,11 @@ def _score_symbol(
         if vol_ratio is not None and today_chg_pct is not None:
             price_move_abs = abs(today_chg_pct)
             if vol_ratio >= 1.5 and price_move_abs < 0.05:
-                # Full 25 pts for big vol + flat price (pure accumulation)
-                accum_pts = _clamp((vol_ratio - 1.5) / 3.0 * 25.0, 5.0, 25.0)
+                # Log-scale so 5x vol ≠ 50x vol. 20x+ gets full credit, 5x gets ~60%.
+                # log(vol+1)/log(21) maps: 1.5x→0, 5x→0.60, 10x→0.80, 20x→1.0, 50x→1.0
+                import math as _math
+                log_factor = min(_math.log(vol_ratio + 1) / _math.log(21), 1.0)
+                accum_pts = log_factor * 25.0
                 accum_pts *= lw.get("quiet_accumulation", 1.0)
                 raw_score += accum_pts
                 signals["quiet_accumulation"] = {
@@ -437,8 +440,9 @@ def _score_symbol(
                     "price_chg_pct": round(price_move_abs * 100, 1),
                 }
             elif vol_ratio >= 1.5:
-                # Some vol surge but price is already moving — partial credit
-                partial = _clamp((vol_ratio - 1.5) / 3.0 * 15.0, 0.0, 15.0)
+                import math as _math
+                log_factor = min(_math.log(vol_ratio + 1) / _math.log(21), 1.0)
+                partial = log_factor * 15.0
                 partial *= lw.get("vol_surge", 1.0)
                 raw_score += partial
                 signals["vol_surge"] = {"pts": round(partial, 1), "ratio": round(vol_ratio, 2)}
@@ -592,9 +596,9 @@ def _score_symbol(
     # Instead, score against what was achievable given available data.
     has_float_data = bool(float_data and (float_data.get("float_shares") or float_data.get("short_pct_float")))
     is_penny_stock = bool(price is not None and price < 1.0)
-    MAX_RAW = 145.0 if has_float_data else (135.0 if is_penny_stock else 85.0)
-    # 85 = 25+20+10+10+15+5 (no float signals)
-    # 135 = adds micro_float_bonus potential for pennies even without Yahoo data
+    # No float data: max achievable = 25(accum)+20(atr)+10(close)+10(near_high)+15(catalyst)+5(rs) = 85
+    # But in practice stocks rarely fire all — use 70 as practical max so good setups score 80+
+    MAX_RAW = 145.0 if has_float_data else (130.0 if is_penny_stock else 70.0)
     normalized = _clamp(raw_score / MAX_RAW * 100.0, 0.0, 100.0)
 
     # Squeeze tag: flag high-conviction squeeze setups explicitly
