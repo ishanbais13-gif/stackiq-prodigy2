@@ -3255,7 +3255,6 @@ def _trade_plan_from_spec(*, last_price: float, atr14: float, vwap: float, resis
     if atr <= 0.0:
         pct = 0.09
         try:
-            # crude proxy: low-priced names typically move more
             if float(lp) < 20.0:
                 pct = 0.18
             elif float(lp) < 60.0:
@@ -3265,6 +3264,11 @@ def _trade_plan_from_spec(*, last_price: float, atr14: float, vwap: float, resis
         except Exception:
             pct = 0.09
         atr = float(lp) * float(pct)
+
+    # ATR floor: historical ATR can be stale after a large gap (e.g. earnings +70%).
+    # Enforce a minimum of 5% of current price so targets aren't absurdly tight.
+    atr_floor_pct = 0.05 if lp < 20.0 else (0.03 if lp < 60.0 else 0.02)
+    atr = max(atr, lp * atr_floor_pct)
 
     entry = 0.0
     try:
