@@ -3333,16 +3333,27 @@ def _execution_factors_from_market_data(*, last_price: float, vwap: float, resis
     breakout = 50.0
     try:
         if res > 0 and lp > 0:
-            d = abs(float(res) - float(lp)) / float(res)
-            breakout = 100.0 - min(100.0, float(d) * 500.0)
+            if lp >= res:
+                # Stock has broken above resistance — best possible setup; reward it.
+                overshoot = (lp - res) / res
+                breakout = min(100.0, 80.0 + overshoot * 100.0)
+            else:
+                # Below resistance — reward proximity (closer = more actionable).
+                d = (res - lp) / res
+                breakout = 100.0 - min(100.0, d * 500.0)
     except Exception:
         breakout = 50.0
 
     vwap_align = 50.0
     try:
         if vw > 0 and lp > 0:
-            d = abs(float(lp) - float(vw)) / float(vw)
-            vwap_align = 100.0 - min(100.0, float(d) * 800.0)
+            d = (lp - vw) / vw  # positive = above VWAP (bullish), negative = below
+            if d >= 0:
+                # Above VWAP: bullish confirmation; mild premium is ideal.
+                vwap_align = min(100.0, 65.0 + d * 200.0)
+            else:
+                # Below VWAP: bearish; penalise the further below it gets.
+                vwap_align = max(0.0, 50.0 + d * 500.0)
     except Exception:
         vwap_align = 50.0
 
