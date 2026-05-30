@@ -4250,18 +4250,26 @@ async def analyze(
     # --- New AI score weighting (institutional stack) ---
     technical_score = float(_score_composite_0_100(indicators=indicators, news_sentiment_0_100=ns100) or 0.0)
     news_sentiment_score = float(_clamp_0_100(ns100) if callable(globals().get("_clamp_0_100")) else max(0.0, min(100.0, float(ns100 or 0.0))))
+    # Use 50 (neutral) as default for missing signals — 0 unfairly drags down
+    # strong setups where secondary data simply hasn't loaded yet.
     try:
-        social_sentiment_score = float((social_sent or {}).get("hype_score") or 0.0)
+        social_sentiment_score = float((social_sent or {}).get("hype_score") or 50.0)
+        if social_sentiment_score == 0.0:
+            social_sentiment_score = 50.0
     except Exception:
-        social_sentiment_score = 0.0
+        social_sentiment_score = 50.0
     try:
         earnings_ai_score = float(_tone_to_score_0_100((earnings_ai or {}).get("tone")))
+        if earnings_ai_score == 0.0:
+            earnings_ai_score = 50.0
     except Exception:
-        earnings_ai_score = 0.0
+        earnings_ai_score = 50.0
     try:
-        analyst_target_score = float((analyst_targets or {}).get("score_0_100") or 0.0)
+        analyst_target_score = float((analyst_targets or {}).get("score_0_100") or 50.0)
+        if analyst_target_score == 0.0:
+            analyst_target_score = 50.0
     except Exception:
-        analyst_target_score = 0.0
+        analyst_target_score = 50.0
 
     # Options activity is fetched later (Polygon). Use neutral until fetched.
     options_activity_score = 50.0
