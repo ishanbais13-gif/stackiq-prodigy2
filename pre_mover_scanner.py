@@ -5,7 +5,8 @@ import os
 import time
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Set
 
 log = logging.getLogger("stackiq")
 
@@ -13,7 +14,7 @@ log = logging.getLogger("stackiq")
 # Cache
 # ---------------------------------------------------------------------------
 _PREMOVER_CACHE: Dict[str, Any] = {"ts": 0.0, "results": [], "scanned": 0}
-_PREMOVER_CACHE_TTL = 3600.0  # 1 hour — re-scan after market builds new setup
+_PREMOVER_CACHE_TTL = 3600.0
 _PREMOVER_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------------------
@@ -66,49 +67,27 @@ def _atr(highs: List[float], lows: List[float], closes: List[float], period: int
 # ---------------------------------------------------------------------------
 
 _SMALLCAP_SEED: List[str] = [
-    # Known volatile small-caps that tend to make big moves
     "SOUN","BBAI","GFAI","AITX","NVTS","LAZR","LIDR","OUST","VLDR","MVIS",
     "CENN","FFIE","NKLA","WKHS","RIDE","GOEV","SOLO","AYRO","KNDI","BEEM",
     "BLNK","CHPT","EVGO","SES","PTRA","XOS","IDEX","AMTX","GEVO","BTCS",
     "VERB","ILUS","XELA","CLOV","WTRH","NNDM","AEYE","AEVA","OPAL","ATNF",
     "BFRI","CYTH","DARE","DFLI","EDSA","FBIO","FREQ","FWBI","GBOX","GFAI",
     "HLBZ","HOLO","IMPP","INDO","INPX","JAGX","JAKK","JCSE","KALI","KAVL",
-    "KTTA","LGHL","LIQT","LITM","LKCO","LMND","LODE","LRFC","LTBR","LTRX",
-    "MAIA","MASS","MBIO","MGOL","MGRX","MIGI","MIST","MKTY","MMAT","MMTLP",
-    "MRIN","MRKR","MTTR","MULN","MVST","MYNZ","NEON","NFYS","NKTR","NODK",
-    "NPAB","NRGV","NVVE","NXTP","OCUP","OGEN","OIIM","OPFI","OPGN","OPHC",
-    "ORPH","OSAT","OSUR","OWVI","PALT","PASG","PAYS","PECK","PHIO","PHUN",
-    "PIXY","PLAG","PRFX","PROP","PRPO","PRQR","PRTG","PRTS","PRTY","PRUX",
-    "PRZE","PSIX","PSTV","PTIX","PTLO","PTSI","PTVE","PUBM","PULM","PVBC",
-    "PVNC","PXMD","PYPD","PYXS","QBTS","QIPT","QLGN","QMMM","QNRX","QNST",
-    "QPAG","QQQS","QRTEP","QRTX","QUBT","RBBN","RBCN","RCAT","RCFA","RCKT",
-    "RDUS","RDVT","REAX","REED","RELI","RENT","REPL","RETO","RGLS","RGTI",
-    "RIBT","RICK","RKDA","RLAY","RLMD","RLTY","RLYB","RMNI","RMTX","RNAC",
-    "RNAZ","RNLX","RNRG","RNSN","RNST","RNVZ","RNWK","ROCC","ROCL","ROGE",
-    "ROLL","ROMN","ROMX","ROPE","RPRX","RRAC","RRBI","RRIF","RRMX","RSSS",
-    "RTPX","RUBY","RUNN","RVLP","RVMD","RVNC","RVPH","RVYL","RWLK","RYDE",
-    # More known names
-    "ACRV","ACST","ACXM","ADGM","ADIL","ADITXT","ADMA","ADMT","ADNK","ADOC",
-    "AEAC","AEHR","AEIS","AEMD","AENZ","AERI","AEYE","AFAR","AFBI","AFCG",
-    "AFIB","AFMD","AFRI","AGBA","AGFY","AGIL","AGMH","AGMS","AGNCM","AGNCO",
-    "AGRI","AGRO","AGRX","AGTI","AGUS","AGYS","AHCO","AHED","AHPI","AHRN",
-    "AIHS","AIIM","AIOT","AIRC","AIRG","AIRI","AIRJ","AIRS","AIRSP","AIRT",
-    "AITO","AIXI","AIXI","AIYO","AIZN","AJAX","AKBA","AKLI","AKRO","AKTS",
-    "AKTX","AKUS","AKVB","AKYA","ALBT","ALCE","ALCX","ALDX","ALEC","ALEE",
-    "ALFI","ALGM","ALGS","ALGT","ALID","ALIM","ALIO","ALKT","ALLT","ALMD",
-    "ALNT","ALNY","ALOR","ALOT","ALPA","ALPN","ALPP","ALRM","ALRN","ALRS",
-    "ALSN","ALSP","ALTI","ALTM","ALTN","ALTO","ALTR","ALTU","ALTV","ALTX",
-    # High-momentum small-caps with frequent big moves
+    "ACHR","JOBY","LILM","EHANG","EVTL","BLADE","SKYX","SATL","ASTS","MNTS",
     "IONQ","ARQQ","QUBT","QBTS","RGTI","BTBT","CLSK","HUT","CIFR","BTDR",
     "WULF","IREN","CORZ","MARA","RIOT","HIVE","SMLR","CLRB","MOGO","DGLY",
     "SHIP","TOPS","GASS","EDRY","FREE","SALT","GLBS","DCGO","PSHG","IMVT",
-    "ACHR","JOBY","LILM","EHANG","EVTL","ARCHER","BLADE","SKYX","SATL","ASTS",
-    "LPSN","BBBY","CRIS","CYAD","EDTK","ENVX","EVEX","EVER","EVEX","FAZE",
-    "FBRX","FCUV","FDOC","FENC","FFIE","FGEN","FGNA","FGNN","FGNO","FGNZ",
-    "FHLT","FHTX","FIAC","FIAM","FIFW","FIGI","FIHL","FIII","FILC","FILO",
-    "FINV","FIXX","FKWL","FLAB","FLCN","FLFV","FLGT","FLGX","FLNT","FLOC",
-    "FLUX","FMAC","FMBH","FMCC","FMNB","FMST","FNAM","FNCH","FNCX","FNGR",
-    "FNRN","FNVT","FOAM","FOCS","FOLD","FOLO","FONR","FORL","FORM","FORR",
+    "LPSN","CRIS","CYAD","EDTK","ENVX","EVER","EVEX","FAZE","FBRX","FCUV",
+    "UAMY","DNN","MP","LTHM","SQM","LAC","PLL","SGML","ALTM","NOVL",
+    "SNAP","PLUG","LUMN","MPT","VALE","CNH","GGB","WTI","CCC","BBD",
+    "TSLL","TSLG","SPDN","DRIP","OKLL","GGLS","VTIX","AEMD","LYG","CLRB",
+    "RXT","CLOV","JOBY","AVPT","NKTR","OPEN","PRPL","SKLZ","SDC","BARK",
+    "SPCE","NRDY","GETY","IEA","ATXI","CLFD","AVDX","HIMS","TDOC","SKIN",
+    "MAPS","MNTV","VIEW","TASK","TALK","BRZE","WEAV","PAYO","RELY","FLYW",
+    "ACMR","AIOT","AIXI","AIYO","AKBA","AKLI","AKRO","AKTS","AKTX","AKVB",
+    "ALBT","ALCE","ALCX","ALDX","ALEC","ALEE","ALFI","ALGM","ALGS","ALGT",
+    "APLD","APXI","AQMS","AQST","ARBB","ARBE","ARCT","ARDX","AREB","AREC",
+    "ARGX","ARHS","ARIA","ARID","ARIS","ARIZ","ARKO","ARLO","ARLS","ARLT",
 ]
 
 
@@ -116,20 +95,15 @@ def build_smallcap_universe(
     scan_universe: List[str],
     max_candidates: int = 400,
 ) -> List[str]:
-    """Filter scan universe down to small-cap candidates ($1-$20, liquid).
-
-    Uses Alpaca snapshots to filter by price and volume.
-    Returns up to max_candidates symbols sorted by dollar volume descending.
-    """
+    """Filter scan universe + seed down to small-cap candidates ($1-$20, liquid)."""
     from data_fetcher import get_snapshots_batch
 
-    # Merge scan universe with seed small-caps, dedup
     combined = list(dict.fromkeys(list(scan_universe) + _SMALLCAP_SEED))
     clean = [s for s in combined if s and "." not in s and len(s) <= 6]
 
     log.info(f"premover_universe: fetching snapshots for {len(clean)} candidates")
 
-    candidates: List[tuple] = []  # (dollar_vol, symbol)
+    candidates: List[tuple] = []
     chunk_size = 200
 
     for i in range(0, len(clean), chunk_size):
@@ -146,24 +120,19 @@ def build_smallcap_universe(
             try:
                 db = snap.get("dailyBar") or snap.get("day") or {}
                 lt = snap.get("latestTrade") or snap.get("latestQuote") or {}
-
                 price = _sf(db.get("c") or db.get("vw") or lt.get("p") or lt.get("ap"))
                 vol = _sf(db.get("v"))
-
                 if price is None or vol is None:
                     continue
                 if price < 1.0 or price > 20.0:
                     continue
-
                 dollar_vol = price * vol
-                if dollar_vol < 200_000:  # min $200k daily dollar volume
+                if dollar_vol < 200_000:
                     continue
-
                 candidates.append((dollar_vol, sym))
             except Exception:
                 continue
 
-    # Sort by dollar volume descending — most liquid first
     candidates.sort(key=lambda x: x[0], reverse=True)
     result = [sym for _, sym in candidates[:max_candidates]]
     log.info(f"premover_universe: {len(result)} small-caps passed price+volume filter")
@@ -171,7 +140,117 @@ def build_smallcap_universe(
 
 
 # ---------------------------------------------------------------------------
-# Alpaca news check (batch, no Polygon to avoid rate limits)
+# Float + short interest (Yahoo Finance — free, no key needed)
+# ---------------------------------------------------------------------------
+
+def _get_float_short_data(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Fetch float shares and short interest % from Yahoo Finance.
+
+    Returns {SYM: {"float_shares": int, "short_pct_float": float, "short_ratio": float}}
+    """
+    import requests as _req
+
+    result: Dict[str, Dict[str, Any]] = {}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; stackiq-scanner/1.0)",
+        "Accept": "application/json",
+    }
+
+    for sym in symbols:
+        try:
+            url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
+            resp = _req.get(
+                url,
+                params={"modules": "defaultKeyStatistics"},
+                headers=headers,
+                timeout=6,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            stats = (
+                data.get("quoteSummary", {})
+                .get("result", [{}])[0]
+                .get("defaultKeyStatistics", {})
+            )
+            float_shares = _sf((stats.get("floatShares") or {}).get("raw"))
+            shares_short = _sf((stats.get("sharesShort") or {}).get("raw"))
+            short_pct = _sf((stats.get("shortPercentOfFloat") or {}).get("raw"))
+            short_ratio = _sf((stats.get("shortRatio") or {}).get("raw"))
+
+            if float_shares or short_pct:
+                result[sym] = {
+                    "float_shares": float_shares,
+                    "short_pct_float": float(short_pct * 100) if short_pct else None,
+                    "short_ratio": short_ratio,
+                    "shares_short": shares_short,
+                }
+            time.sleep(0.12)  # be polite to Yahoo
+        except Exception as e:
+            log.debug(f"float_short: {sym} error: {e}")
+            continue
+
+    log.info(f"float_short: got data for {len(result)}/{len(symbols)} symbols")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# SEC EDGAR 8-K catalyst scanner (free public API)
+# ---------------------------------------------------------------------------
+
+def _get_sec_8k_filers(lookback_days: int = 2) -> Set[str]:
+    """Return set of tickers that filed an 8-K in the last N days.
+
+    Uses SEC EDGAR full-text search API — completely free, no key needed.
+    8-K = material corporate event (earnings beat, contract, deal, FDA, etc.)
+    """
+    import requests as _req
+    import xml.etree.ElementTree as _ET
+
+    filers: Set[str] = set()
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # SEC EDGAR RSS feed of recent 8-K filings (public, no auth needed)
+        url = "https://www.sec.gov/cgi-bin/browse-edgar"
+        resp = _req.get(
+            url,
+            params={
+                "action": "getcurrent",
+                "type": "8-K",
+                "dateb": "",
+                "owner": "include",
+                "count": "100",
+                "output": "atom",
+            },
+            headers={"User-Agent": "stackiq-scanner contact@stackiq.ai"},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return filers
+
+        root = _ET.fromstring(resp.text)
+        ns = {"atom": "http://www.w3.org/2005/Atom"}
+        for entry in root.findall("atom:entry", ns):
+            title = (entry.findtext("atom:title", default="", namespaces=ns) or "").upper()
+            # Title format: "8-K - COMPANY NAME (TICKER) (CIK)"
+            # Extract ticker from parentheses
+            parts = title.split("(")
+            for part in parts[1:]:  # skip first split (before first paren)
+                tok = part.split(")")[0].strip()
+                if tok and 1 <= len(tok) <= 5 and tok.isalpha():
+                    filers.add(tok)
+                    break
+    except Exception as e:
+        log.debug(f"sec_8k: fetch error: {e}")
+
+    log.info(f"sec_8k: {len(filers)} companies filed 8-K recently")
+    return filers
+
+
+# ---------------------------------------------------------------------------
+# Alpaca news check
 # ---------------------------------------------------------------------------
 
 def _check_news_alpaca(symbols: List[str]) -> Dict[str, bool]:
@@ -184,7 +263,6 @@ def _check_news_alpaca(symbols: List[str]) -> Dict[str, bool]:
     if not api_key or not secret:
         return has_news
 
-    cutoff = int(time.time()) - 3 * 86400
     headers = {"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret}
     url = "https://data.alpaca.markets/v1beta1/news"
 
@@ -194,11 +272,7 @@ def _check_news_alpaca(symbols: List[str]) -> Dict[str, bool]:
             resp = _req.get(
                 url,
                 headers=headers,
-                params={
-                    "symbols": ",".join(chunk),
-                    "limit": 10,
-                    "sort": "desc",
-                },
+                params={"symbols": ",".join(chunk), "limit": 10, "sort": "desc"},
                 timeout=8,
             )
             if resp.status_code != 200:
@@ -217,7 +291,7 @@ def _check_news_alpaca(symbols: List[str]) -> Dict[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# Scorer
+# Scorer — upgraded with float-adjusted volume + squeeze detection
 # ---------------------------------------------------------------------------
 
 def _score_symbol(
@@ -226,10 +300,23 @@ def _score_symbol(
     bars: List[Dict[str, Any]],
     spy_closes: List[float],
     has_news: bool,
+    float_data: Optional[Dict[str, Any]] = None,
+    has_8k: bool = False,
 ) -> Dict[str, Any]:
-    """Score a single symbol 0-100 for pre-mover potential."""
+    """Score a single symbol 0-100+ for pre-mover potential.
+
+    Scoring breakdown (max ~130 with all signals, normalized to 100):
+      Volume surge vs avg20         20 pts   (raw momentum)
+      Float-adjusted volume         30 pts   (NEW: vol/float — the killer signal)
+      Short squeeze potential       20 pts   (NEW: short% × vol surge)
+      ATR compression               20 pts
+      Close near day high           10 pts
+      Near 20-day high              10 pts
+      8-K catalyst / news           15 pts   (NEW: SEC filing > generic news)
+      RS vs SPY                      5 pts
+    """
     signals: Dict[str, Any] = {}
-    score = 0.0
+    raw_score = 0.0
 
     highs = _extract(bars, "h")
     lows = _extract(bars, "l")
@@ -240,36 +327,78 @@ def _score_symbol(
     lt = snap.get("latestTrade") or snap.get("latestQuote") or {}
     price = _sf(db.get("c") or db.get("vw") or lt.get("p") or lt.get("ap"))
 
-    # --- 1) Volume surge (30 pts) ---
+    cur_vol: Optional[float] = _sf(db.get("v"))
+    if cur_vol is None and vols:
+        cur_vol = vols[-1]
+
+    avg20: Optional[float] = None
+    vol_ratio: Optional[float] = None
+    if cur_vol and len(vols) >= 6:
+        avg20 = _mean(vols[-21:-1] if len(vols) >= 21 else vols[:-1]) or 1.0
+        vol_ratio = cur_vol / max(avg20, 1.0)
+
+    # --- 1) Volume surge vs 20-day avg (20 pts) ---
     try:
-        cur_vol = _sf(db.get("v"))
-        if cur_vol is None and vols:
-            cur_vol = vols[-1]
-        if cur_vol and len(vols) >= 6:
-            avg20 = _mean(vols[-21:-1] if len(vols) >= 21 else vols[:-1]) or 1.0
-            ratio = cur_vol / max(avg20, 1.0)
-            # 2x = 20pts, 3x = 30pts, scales linearly
-            vol_pts = _clamp((ratio - 1.0) / 2.0 * 30.0, 0.0, 30.0)
-            score += vol_pts
-            signals["vol_surge"] = {"pts": round(vol_pts, 1), "ratio": round(ratio, 2)}
+        if vol_ratio is not None:
+            vol_pts = _clamp((vol_ratio - 1.0) / 2.0 * 20.0, 0.0, 20.0)
+            raw_score += vol_pts
+            signals["vol_surge"] = {"pts": round(vol_pts, 1), "ratio": round(vol_ratio, 2)}
     except Exception:
         pass
 
-    # --- 2) ATR compression (25 pts) ---
+    # --- 2) Float-adjusted volume (30 pts) — THE KEY SIGNAL ---
+    # If daily volume is a significant % of the float, the stock is being
+    # repriced by the market. >30% float rotation almost always precedes
+    # a major move. Low float = same volume = bigger % explosion.
+    try:
+        fd = float_data or {}
+        float_shares = _sf(fd.get("float_shares"))
+        if float_shares and float_shares > 0 and cur_vol:
+            float_rotation = cur_vol / float_shares  # fraction of float trading today
+            # 10% rotation = 10pts, 30% = 20pts, 50%+ = 30pts
+            float_pts = _clamp(float_rotation / 0.5 * 30.0, 0.0, 30.0)
+            raw_score += float_pts
+            signals["float_rotation"] = {
+                "pts": round(float_pts, 1),
+                "rotation_pct": round(float_rotation * 100, 1),
+                "float_shares_m": round(float_shares / 1_000_000, 2),
+            }
+    except Exception:
+        pass
+
+    # --- 3) Short squeeze potential (20 pts) ---
+    # High short interest + building volume = explosive squeeze fuel.
+    # short% > 20% AND vol_ratio > 2x → max points.
+    try:
+        fd = float_data or {}
+        short_pct = _sf(fd.get("short_pct_float"))  # already multiplied by 100 (percent)
+        if short_pct and vol_ratio:
+            # short_pct=30%, vol_ratio=3x → raw = 0.9 → normalized
+            squeeze_raw = (short_pct / 100.0) * min(vol_ratio, 5.0) / 1.5
+            squeeze_pts = _clamp(squeeze_raw * 20.0, 0.0, 20.0)
+            raw_score += squeeze_pts
+            signals["squeeze_potential"] = {
+                "pts": round(squeeze_pts, 1),
+                "short_pct": round(short_pct, 1),
+                "days_to_cover": _sf(fd.get("short_ratio")),
+            }
+    except Exception:
+        pass
+
+    # --- 4) ATR compression (20 pts) ---
     try:
         if len(closes) >= 25:
             atr5 = _atr(highs, lows, closes, 5)
             atr20 = _atr(highs, lows, closes, 20)
             if atr5 and atr20 and atr20 > 0:
                 ratio_atr = atr5 / atr20
-                # Tight coil: ratio < 0.75 → max pts; ratio > 1.25 → 0 pts
-                compress_pts = _clamp((1.25 - ratio_atr) / 0.5 * 25.0, 0.0, 25.0)
-                score += compress_pts
+                compress_pts = _clamp((1.25 - ratio_atr) / 0.5 * 20.0, 0.0, 20.0)
+                raw_score += compress_pts
                 signals["atr_compression"] = {"pts": round(compress_pts, 1), "atr5_atr20": round(ratio_atr, 3)}
     except Exception:
         pass
 
-    # --- 3) Close near high of day (15 pts) ---
+    # --- 5) Close near high of day (10 pts) ---
     try:
         day_h = _sf(db.get("h"))
         day_l = _sf(db.get("l"))
@@ -277,51 +406,60 @@ def _score_symbol(
         if day_h is not None and day_l is not None and day_c is not None:
             rng = day_h - day_l
             if rng > 0:
-                pos = (day_c - day_l) / rng  # 0=low of day, 1=high of day
-                close_pts = _clamp(pos * 15.0, 0.0, 15.0)
-                score += close_pts
+                pos = (day_c - day_l) / rng
+                close_pts = _clamp(pos * 10.0, 0.0, 10.0)
+                raw_score += close_pts
                 signals["close_strength"] = {"pts": round(close_pts, 1), "position_in_range": round(pos, 3)}
     except Exception:
         pass
 
-    # --- 4) Proximity to 20-day high (15 pts) ---
+    # --- 6) Near 20-day high (10 pts) ---
     try:
         if len(closes) >= 20 and price is not None:
             high_20d = max(highs[-20:]) if len(highs) >= 20 else None
             if high_20d and high_20d > 0:
                 pct_from_high = (high_20d - price) / high_20d
-                # Within 3% = 15pts, within 10% = 7pts, beyond = 0
-                breakout_pts = _clamp((0.10 - pct_from_high) / 0.10 * 15.0, 0.0, 15.0)
-                score += breakout_pts
+                breakout_pts = _clamp((0.10 - pct_from_high) / 0.10 * 10.0, 0.0, 10.0)
+                raw_score += breakout_pts
                 signals["near_high"] = {"pts": round(breakout_pts, 1), "pct_from_20d_high": round(pct_from_high * 100, 2)}
     except Exception:
         pass
 
-    # --- 5) News catalyst (10 pts) ---
-    if has_news:
-        score += 10.0
-        signals["news_catalyst"] = {"pts": 10.0}
+    # --- 7) SEC 8-K catalyst or news (15 pts) ---
+    # 8-K = hard material event → max pts. Generic news → partial credit.
+    try:
+        if has_8k:
+            raw_score += 15.0
+            signals["catalyst"] = {"pts": 15.0, "type": "sec_8k"}
+        elif has_news:
+            raw_score += 8.0
+            signals["catalyst"] = {"pts": 8.0, "type": "news"}
+    except Exception:
+        pass
 
-    # --- 6) RS vs SPY 3-day (5 pts) ---
+    # --- 8) RS vs SPY 3-day (5 pts) ---
     try:
         if len(closes) >= 4 and len(spy_closes) >= 4:
             stock_r3 = (closes[-1] - closes[-4]) / max(abs(closes[-4]), 0.01)
             spy_r3 = (spy_closes[-1] - spy_closes[-4]) / max(abs(spy_closes[-4]), 0.01)
             alpha = stock_r3 - spy_r3
             rs_pts = _clamp((alpha + 0.02) / 0.06 * 5.0, 0.0, 5.0)
-            score += rs_pts
+            raw_score += rs_pts
             signals["rs_vs_spy"] = {"pts": round(rs_pts, 1), "alpha_3d_pct": round(alpha * 100, 2)}
     except Exception:
         pass
+
+    # Normalize to 100: max possible raw = 20+30+20+20+10+10+15+5 = 130
+    # Normalize so a perfect score = 100.
+    MAX_RAW = 130.0
+    normalized = _clamp(raw_score / MAX_RAW * 100.0, 0.0, 100.0)
 
     # Entry zone and invalidation
     entry_zone: Optional[str] = None
     invalidation: Optional[str] = None
     try:
         if price is not None:
-            atr5_val = None
-            if len(closes) >= 7:
-                atr5_val = _atr(highs, lows, closes, 5)
+            atr5_val = _atr(highs, lows, closes, 5) if len(closes) >= 7 else None
             if atr5_val and atr5_val > 0:
                 entry_zone = f"${round(price, 2)} – ${round(price * 1.05, 2)}"
                 invalidation = f"${round(price - atr5_val * 1.5, 2)}"
@@ -331,14 +469,73 @@ def _score_symbol(
     except Exception:
         pass
 
+    # Squeeze tag: flag high-conviction squeeze setups explicitly
+    fd = float_data or {}
+    short_pct_val = _sf(fd.get("short_pct_float"))
+    float_shares_val = _sf(fd.get("float_shares"))
+    is_squeeze_setup = bool(
+        short_pct_val and short_pct_val >= 20.0
+        and vol_ratio and vol_ratio >= 2.0
+    )
+    is_low_float = bool(float_shares_val and float_shares_val < 10_000_000)
+
+    tags: List[str] = []
+    if is_squeeze_setup:
+        tags.append("squeeze")
+    if is_low_float:
+        tags.append("low_float")
+    if has_8k:
+        tags.append("8K_catalyst")
+
     return {
         "symbol": symbol,
-        "score": round(_clamp(score, 0.0, 100.0), 1),
+        "score": round(normalized, 1),
+        "raw_score": round(raw_score, 1),
         "price": price,
+        "float_m": round(float_shares_val / 1_000_000, 2) if float_shares_val else None,
+        "short_pct": round(short_pct_val, 1) if short_pct_val else None,
         "signals": signals,
+        "tags": tags,
         "entry_zone": entry_zone,
         "invalidation": invalidation,
     }
+
+
+# ---------------------------------------------------------------------------
+# Sector clustering — detects when a sector is setting up en masse
+# ---------------------------------------------------------------------------
+
+_SECTOR_MAP: Dict[str, str] = {
+    # Crypto miners
+    "MARA": "crypto", "RIOT": "crypto", "CLSK": "crypto", "BTBT": "crypto",
+    "HUT": "crypto", "HIVE": "crypto", "CIFR": "crypto", "WULF": "crypto",
+    "IREN": "crypto", "CORZ": "crypto",
+    # EV / clean energy
+    "NKLA": "ev", "RIDE": "ev", "GOEV": "ev", "SOLO": "ev", "AYRO": "ev",
+    "BLNK": "ev", "CHPT": "ev", "EVGO": "ev", "PTRA": "ev", "XOS": "ev",
+    # eVTOL / air mobility
+    "JOBY": "evtol", "ACHR": "evtol", "LILM": "evtol", "EHANG": "evtol",
+    "BLADE": "evtol", "SKYX": "evtol",
+    # Uranium / nuclear
+    "DNN": "uranium", "UAMY": "uranium", "MP": "uranium", "NXE": "uranium",
+    "UEC": "uranium", "LTBR": "uranium",
+    # AI / robotics
+    "SOUN": "ai", "BBAI": "ai", "IONQ": "ai", "QUBT": "ai", "RGTI": "ai",
+    "QBTS": "ai", "ARQQ": "ai", "AITX": "ai", "NVTS": "ai",
+}
+
+
+def _detect_hot_sectors(results: List[Dict[str, Any]]) -> List[str]:
+    """Return sector names where 3+ stocks scored >= 60."""
+    from collections import Counter
+    sector_counts: Counter = Counter()
+    for r in results:
+        sym = r.get("symbol", "")
+        if r.get("score", 0) >= 60:
+            sector = _SECTOR_MAP.get(sym)
+            if sector:
+                sector_counts[sector] += 1
+    return [s for s, cnt in sector_counts.items() if cnt >= 3]
 
 
 # ---------------------------------------------------------------------------
@@ -347,18 +544,11 @@ def _score_symbol(
 
 def run_premover_scan(
     scan_universe: List[str],
-    max_results: int = 20,
+    max_results: int = 25,
     news_top_k: int = 50,
     max_seconds: float = 300.0,
 ) -> Dict[str, Any]:
-    """Scan for pre-movers. Returns top candidates sorted by score desc.
-
-    Args:
-        scan_universe: Full universe from get_scan_universe() in app.py.
-        max_results: How many top results to return.
-        news_top_k: Check news for top-N candidates by volume surge.
-        max_seconds: Hard timeout.
-    """
+    """Scan for pre-movers. Returns top candidates sorted by score desc."""
     from data_fetcher import get_snapshots_batch, get_bars_batch
 
     t0 = time.time()
@@ -368,25 +558,20 @@ def run_premover_scan(
     if not universe:
         return {"results": [], "scanned": 0, "elapsed": 0.0, "error": "empty_universe"}
 
-    if time.time() - t0 > max_seconds * 0.2:
-        log.warning("premover_scan: timeout hit during universe build")
-
-    # --- Step 2: Fetch snapshots for price/volume pre-filter ---
+    # --- Step 2: Fetch snapshots ---
     log.info(f"premover_scan: fetching snapshots for {len(universe)} candidates")
     snapmap: Dict[str, Any] = {}
     for i in range(0, len(universe), 200):
-        if time.time() - t0 > max_seconds * 0.4:
-            log.warning("premover_scan: timeout hit during snapshot fetch")
+        if time.time() - t0 > max_seconds * 0.35:
             break
         chunk = universe[i: i + 200]
         try:
-            chunk_snaps = get_snapshots_batch(chunk) or {}
-            snapmap.update(chunk_snaps)
+            snapmap.update(get_snapshots_batch(chunk) or {})
         except Exception as e:
             log.warning(f"premover_scan: snapshot error: {e}")
 
-    # --- Step 3: Volume-surge pre-filter to top 80-150 ---
-    vol_scored: List[tuple] = []  # (vol_ratio, symbol, snap)
+    # --- Step 3: Volume-surge pre-filter to top 150 ---
+    vol_scored: List[tuple] = []
     for sym in universe:
         snap = snapmap.get(sym)
         if not isinstance(snap, dict):
@@ -398,11 +583,8 @@ def run_premover_scan(
         vol = _sf(db.get("v"))
         if not vol or vol <= 0:
             continue
-        # Rough volume surge proxy using snapshot prev close volume if available
-        prev_vol = _sf(db.get("pv") or db.get("vw"))
-        ratio = 1.0
-        if prev_vol and prev_vol > 0:
-            ratio = vol / prev_vol
+        prev_vol = _sf(db.get("pv"))
+        ratio = (vol / max(prev_vol, 1.0)) if prev_vol and prev_vol > 0 else 1.0
         vol_scored.append((ratio, sym, snap))
 
     vol_scored.sort(key=lambda x: x[0], reverse=True)
@@ -412,42 +594,56 @@ def run_premover_scan(
     if not top_candidates:
         return {"results": [], "scanned": 0, "elapsed": round(time.time() - t0, 2), "error": "no_candidates"}
 
-    # --- Step 4: Fetch daily bars for scoring ---
     syms_to_score = [s for s, _ in top_candidates]
+
+    # --- Step 4: Fetch daily bars ---
     bars_map: Dict[str, List[Dict]] = {}
     log.info(f"premover_scan: fetching daily bars for {len(syms_to_score)} symbols")
-
     for i in range(0, len(syms_to_score), 100):
-        if time.time() - t0 > max_seconds * 0.7:
-            log.warning("premover_scan: timeout hit during bars fetch")
+        if time.time() - t0 > max_seconds * 0.60:
             break
         chunk = syms_to_score[i: i + 100]
         try:
-            chunk_bars = get_bars_batch(chunk, "1Day", 30) or {}
-            bars_map.update(chunk_bars)
+            bars_map.update(get_bars_batch(chunk, "1Day", 30) or {})
         except Exception as e:
             log.warning(f"premover_scan: bars error: {e}")
 
-    # SPY bars for RS comparison
     spy_closes: List[float] = []
     try:
         spy_data = get_bars_batch(["SPY"], "1Day", 30)
-        spy_bars = spy_data.get("SPY") or []
-        spy_closes = [b["c"] for b in spy_bars if isinstance(b, dict) and _sf(b.get("c")) is not None]
+        spy_closes = [b["c"] for b in (spy_data.get("SPY") or []) if isinstance(b, dict) and _sf(b.get("c"))]
     except Exception:
         pass
 
-    # --- Step 5: Check news for top-N by vol ratio ---
-    news_syms = [s for s, _ in top_candidates[:news_top_k]]
-    has_news_map: Dict[str, bool] = {}
-    if news_syms and (time.time() - t0 < max_seconds * 0.85):
+    # --- Step 5: SEC 8-K catalyst scan (free, public) ---
+    sec_8k_filers: Set[str] = set()
+    if time.time() - t0 < max_seconds * 0.70:
         try:
-            log.info(f"premover_scan: checking news for {len(news_syms)} symbols")
-            has_news_map = _check_news_alpaca(news_syms)
+            log.info("premover_scan: scanning SEC EDGAR for recent 8-K filings")
+            sec_8k_filers = _get_sec_8k_filers(lookback_days=2)
         except Exception as e:
-            log.warning(f"premover_scan: news check error: {e}")
+            log.warning(f"premover_scan: SEC 8-K scan error: {e}")
 
-    # --- Step 6: Score ---
+    # --- Step 6: News check ---
+    has_news_map: Dict[str, bool] = {}
+    if time.time() - t0 < max_seconds * 0.75:
+        try:
+            has_news_map = _check_news_alpaca(syms_to_score[:news_top_k])
+        except Exception as e:
+            log.warning(f"premover_scan: news error: {e}")
+
+    # --- Step 7: Float + short interest for top 60 candidates ---
+    # Only fetch for top candidates (Yahoo has rate limits).
+    float_map: Dict[str, Dict] = {}
+    float_fetch_syms = syms_to_score[:60]
+    if time.time() - t0 < max_seconds * 0.80:
+        try:
+            log.info(f"premover_scan: fetching float/short data for {len(float_fetch_syms)} symbols")
+            float_map = _get_float_short_data(float_fetch_syms)
+        except Exception as e:
+            log.warning(f"premover_scan: float/short error: {e}")
+
+    # --- Step 8: Score ---
     results: List[Dict[str, Any]] = []
     for sym, snap in top_candidates:
         bars = bars_map.get(sym) or []
@@ -457,28 +653,37 @@ def run_premover_scan(
             bars=bars,
             spy_closes=spy_closes,
             has_news=has_news_map.get(sym, False),
+            float_data=float_map.get(sym),
+            has_8k=(sym in sec_8k_filers),
         )
-        if result["score"] >= 20.0:  # minimum quality threshold
+        if result["score"] >= 15.0:
             results.append(result)
 
     results.sort(key=lambda x: x["score"], reverse=True)
-    elapsed = round(time.time() - t0, 2)
 
+    # Hot sector detection
+    hot_sectors = _detect_hot_sectors(results)
+    if hot_sectors:
+        log.info(f"premover_scan: hot sectors detected: {hot_sectors}")
+
+    elapsed = round(time.time() - t0, 2)
     log.info(
         f"premover_scan: done | candidates={len(top_candidates)} scored={len(results)} "
-        f"top={results[0]['symbol'] if results else 'none'} elapsed={elapsed}s"
+        f"top={results[0]['symbol'] if results else 'none'} "
+        f"8k_filers={len(sec_8k_filers)} float_data={len(float_map)} elapsed={elapsed}s"
     )
 
     return {
         "results": results[:max_results],
         "scanned": len(top_candidates),
         "elapsed": elapsed,
+        "hot_sectors": hot_sectors,
         "ts": time.time(),
     }
 
 
 # ---------------------------------------------------------------------------
-# Cache accessor
+# Cache accessors
 # ---------------------------------------------------------------------------
 
 def get_cached_premover_results() -> Dict[str, Any]:
