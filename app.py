@@ -108,6 +108,7 @@ except Exception:
 
 
 _BEST_PICK_FALLBACK_CACHE: Dict[str, Any] = {"ts": 0.0, "resp": None}
+_YF_52W_CACHE: Dict[str, Any] = {}
 
 
 class TTLCache:
@@ -3241,6 +3242,65 @@ def _market_data_from_snapshot_and_bars(
     return out
 
 
+def _fetch_yf_52week(symbol: str) -> Dict[str, Any]:
+    """Returns 52-week high/low from Yahoo Finance. Cached 1 hr."""
+    key = symbol.upper()
+    cached = _YF_52W_CACHE.get(key, {})
+    if cached and time.time() - cached.get("_ts", 0) < 3600:
+        return cached
+    try:
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{symbol}"
+        r = requests.get(url, params={"interval": "1d", "range": "1d"},
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        meta = (r.json().get("chart") or {}).get("result", [{}])[0].get("meta") or {}
+        hi = float(meta.get("fiftyTwoWeekHigh") or 0)
+        lo = float(meta.get("fiftyTwoWeekLow") or 0)
+        if hi > 0 and lo > 0 and hi > lo:
+            result = {"high": hi, "low": lo, "_ts": time.time()}
+            _YF_52W_CACHE[key] = result
+            return result
+    except Exception:
+        pass
+    return {}
+
+
+def _fib_targets_and_stop(
+    *, current_price: float, w52_low: float, w52_high: float,
+    entry_price: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Compute Fibonacci price levels from the 52-week range.
+    Returns the 3 nearest levels above max(current_price, entry_price) as targets,
+    and the nearest level below current_price as the stop.
+    These are the levels traders and technicians actually watch.
+    """
+    lp = float(current_price)
+    lo = float(w52_low)
+    hi = float(w52_high)
+    if lp <= 0 or lo <= 0 or hi <= lo:
+        return {}
+
+    # Targets must be above the entry (could be a breakout entry above current price)
+    floor = max(lp, float(entry_price or 0)) * 1.005
+
+    rng = hi - lo
+    fracs = [0.236, 0.382, 0.500, 0.618, 0.786, 1.000,
+             1.236, 1.382, 1.618, 2.000, 2.618]
+    levels = sorted(set(round(lo + f * rng, 2) for f in fracs))
+
+    above = [x for x in levels if x > floor]
+    # Stop must be below both current price and entry to avoid stop > entry errors
+    stop_ceiling = min(lp, float(entry_price or lp)) * 0.995
+    below = [x for x in reversed(levels) if x < stop_ceiling]
+
+    targets = above[:3]
+    stop = below[0] if below else round(lo, 2)
+
+    if len(targets) < 3:
+        return {}
+    return {"targets": targets, "stop": stop}
+
+
 def _trade_plan_from_spec(
     *,
     last_price: float,
@@ -4462,6 +4522,26 @@ async def analyze(
         open_price=float(gap_open_for_fib or open_md or 0.0),
         prev_close=float(gap_prev_close_for_fib or prev_close_md or 0.0),
     )
+
+    # Override targets/stop with real Fibonacci levels from the 52-week range.
+    # These are the actual price levels the market cares about — retrace levels
+    # from the 52w low/high, plus extensions beyond the 52w high for breakout stocks.
+    try:
+        _w52 = await asyncio.to_thread(_fetch_yf_52week, sym)
+        if _w52 and last_px_md:
+            _entry_anchor = float(trade_plan_spec.get("entry") or last_px_md or 0)
+            _fib = _fib_targets_and_stop(
+                current_price=float(last_px_md),
+                w52_low=_w52["low"],
+                w52_high=_w52["high"],
+                entry_price=_entry_anchor,
+            )
+            if _fib.get("targets") and len(_fib["targets"]) >= 3:
+                trade_plan_spec = dict(trade_plan_spec)
+                trade_plan_spec["targets"] = _fib["targets"]
+                trade_plan_spec["stop"] = _fib["stop"]
+    except Exception:
+        pass
 
     execution_factors = _execution_factors_from_market_data(
         last_price=float(last_px_md or 0.0),
