@@ -729,6 +729,46 @@ def _fetch_finnhub_price_target(symbol: str) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+def _fetch_finnhub_recommendations(symbol: str) -> Optional[Dict[str, Any]]:
+    """Fetch analyst buy/hold/sell rating distribution from Finnhub."""
+    key = _finnhub_key()
+    sym = str(symbol or "").strip().upper()
+    if not key or not sym:
+        return None
+    url = "https://finnhub.io/api/v1/stock/recommendation"
+    params = {"symbol": sym, "token": key}
+    try:
+        r = requests.get(url, params=params, timeout=8)
+        if r.status_code != 200:
+            return None
+        data = r.json()
+        if isinstance(data, list) and data:
+            return data[0]  # most recent period
+        return None
+    except Exception:
+        return None
+
+
+def _buy_pct_score(rec: Optional[Dict[str, Any]]) -> Optional[int]:
+    """Convert buy/hold/sell counts to 0-100 score. 90% buy → ~95 score."""
+    if not isinstance(rec, dict):
+        return None
+    try:
+        strong_buy = int(rec.get("strongBuy") or 0)
+        buy = int(rec.get("buy") or 0)
+        hold = int(rec.get("hold") or 0)
+        sell = int(rec.get("sell") or 0)
+        strong_sell = int(rec.get("strongSell") or 0)
+        total = strong_buy + buy + hold + sell + strong_sell
+        if total == 0:
+            return None
+        buy_pct = (strong_buy + buy) / total
+        # Map 0%→0, 50%→50, 90%→95, 100%→100
+        return int(min(100, round(buy_pct * 105)))
+    except Exception:
+        return None
+
+
 def _analyst_score_from_upside(upside_pct: Any) -> int:
     # Map -20%..+40% to 0..100 with caps.
     try:
@@ -760,12 +800,17 @@ async def get_analyst_targets(symbol: str, *, last_price: Optional[float]) -> Di
         pass
 
     data = None
+    rec_data = None
     try:
-        data = await asyncio.to_thread(_fetch_finnhub_price_target, sym)
+        data, rec_data = await asyncio.gather(
+            asyncio.to_thread(_fetch_finnhub_price_target, sym),
+            asyncio.to_thread(_fetch_finnhub_recommendations, sym),
+        )
         if isinstance(data, dict):
             out["source"] = "finnhub"
     except Exception:
         data = None
+        rec_data = None
 
     try:
         if isinstance(data, dict):
@@ -785,17 +830,26 @@ async def get_analyst_targets(symbol: str, *, last_price: Optional[float]) -> Di
     except Exception:
         out["implied_upside_pct"] = None
 
+    # Blend price-target upside (40%) with buy/hold/sell rating (60%).
+    # Rating matters more — stale targets mislead after big gap-ups.
     try:
-        out["score_0_100"] = _analyst_score_from_upside(out.get("implied_upside_pct"))
-        if out.get("implied_upside_pct") is None:
+        upside_score = _analyst_score_from_upside(out.get("implied_upside_pct"))
+        buy_score = _buy_pct_score(rec_data)
+        if buy_score is not None:
+            blended = int(round(0.4 * upside_score + 0.6 * buy_score))
+            out["score_0_100"] = max(0, min(100, blended))
+            out["buy_pct"] = buy_score
+        else:
+            out["score_0_100"] = upside_score
+        if out.get("implied_upside_pct") is None and buy_score is None:
             out["rating_bias"] = "NEUTRAL"
         else:
             out["rating_bias"] = "BULLISH" if out["score_0_100"] >= 60 else "BEARISH" if out["score_0_100"] <= 40 else "NEUTRAL"
     except Exception:
-        out["score_0_100"] = 0
+        out["score_0_100"] = 50
         out["rating_bias"] = "NEUTRAL"
 
-    out["status"] = "ok" if out.get("implied_upside_pct") is not None else "unavailable"
+    out["status"] = "ok" if (out.get("implied_upside_pct") is not None or rec_data is not None) else "unavailable"
     _ANALYST_TARGETS_CACHE.set(ck, out)
     return out
 
