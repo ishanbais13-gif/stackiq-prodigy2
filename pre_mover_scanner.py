@@ -17,6 +17,35 @@ _PREMOVER_CACHE: Dict[str, Any] = {"ts": 0.0, "results": [], "scanned": 0}
 _PREMOVER_CACHE_TTL = 3600.0
 _PREMOVER_LOCK = threading.Lock()
 
+# Persistent float/short cache — survives across scans (24h TTL)
+# Keyed by symbol, value: {"float_shares": float, "short_pct_float": float, ..., "_ts": float}
+_FLOAT_CACHE: Dict[str, Dict[str, Any]] = {}
+_FLOAT_CACHE_TTL = 86400.0  # 24 hours — float doesn't change intraday
+_FLOAT_CACHE_LOCK = threading.Lock()
+
+# Scan mutex — only one full scan at a time so concurrent API/bg calls don't double-fetch
+_SCAN_RUNNING = threading.Lock()
+
+# Options flow cache (30 min — changes intraday)
+_OPTIONS_CACHE: Dict[str, Dict[str, Any]] = {}
+_OPTIONS_CACHE_TTL = 1800.0
+_OPTIONS_CACHE_LOCK = threading.Lock()
+
+# Social sentiment cache (1 hour)
+_SOCIAL_CACHE: Dict[str, Dict[str, Any]] = {}
+_SOCIAL_CACHE_TTL = 3600.0
+_SOCIAL_CACHE_LOCK = threading.Lock()
+
+# Short borrow rate cache (24 hours)
+_BORROW_CACHE: Dict[str, Dict[str, Any]] = {}
+_BORROW_CACHE_TTL = 86400.0
+_BORROW_CACHE_LOCK = threading.Lock()
+
+# Insider buying cache (24 hours)
+_INSIDER_CACHE: Dict[str, Dict[str, Any]] = {}
+_INSIDER_CACHE_TTL = 86400.0
+_INSIDER_CACHE_LOCK = threading.Lock()
+
 # ---------------------------------------------------------------------------
 # Math helpers
 # ---------------------------------------------------------------------------
@@ -210,57 +239,299 @@ def build_smallcap_universe(
 
 
 # ---------------------------------------------------------------------------
-# Float + short interest (Yahoo Finance — free, no key needed)
+# Float + short interest (yfinance — handles auth automatically)
 # ---------------------------------------------------------------------------
 
 def _get_float_short_data(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-    """Fetch float shares and short interest % from Yahoo Finance.
+    """Fetch float + short interest with a 24h persistent cache.
 
-    Returns {SYM: {"float_shares": int, "short_pct_float": float, "short_ratio": float}}
+    Uses yfinance which handles Yahoo's crumb/session auth automatically.
+    Returns {SYM: {"float_shares": float, "short_pct_float": float, "short_ratio": float}}
     """
-    import requests as _req
+    now = time.time()
 
+    # Serve from cache for any symbol with fresh data
     result: Dict[str, Dict[str, Any]] = {}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; stackiq-scanner/1.0)",
-        "Accept": "application/json",
-    }
+    with _FLOAT_CACHE_LOCK:
+        for sym in symbols:
+            cached = _FLOAT_CACHE.get(sym)
+            if cached and now - cached.get("_ts", 0) < _FLOAT_CACHE_TTL:
+                result[sym] = {k: v for k, v in cached.items() if k != "_ts"}
 
-    for sym in symbols:
+    need_fetch = [s for s in symbols if s not in result]
+    if not need_fetch:
+        log.info(f"float_short: all {len(symbols)} from cache")
+        return result
+
+    log.info(f"float_short: fetching {len(need_fetch)} via yfinance (cache has {len(result)})")
+
+    try:
+        import yfinance as _yf
+    except ImportError:
+        log.warning("float_short: yfinance not installed, skipping float/short fetch")
+        return result
+
+    fresh: Dict[str, Dict[str, Any]] = {}
+    etf_set: set = set()  # symbols confirmed as ETF/fund — excluded from scanner
+    for sym in need_fetch:
         try:
-            url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
-            resp = _req.get(
-                url,
-                params={"modules": "defaultKeyStatistics"},
-                headers=headers,
-                timeout=6,
-            )
-            if resp.status_code != 200:
+            info = _yf.Ticker(sym).info
+            quote_type = (info.get("quoteType") or "").upper()
+            # ETFs and funds: exclude from scanner, cache the exclusion marker
+            if quote_type in ("ETF", "MUTUALFUND", "INDEX", "FUTURE", "CURRENCY"):
+                etf_set.add(sym)
+                fresh[sym] = {"_is_etf": True, "float_shares": None, "short_pct_float": None,
+                              "short_ratio": None, "shares_short": None}
+                time.sleep(0.10)
                 continue
-            data = resp.json()
-            stats = (
-                data.get("quoteSummary", {})
-                .get("result", [{}])[0]
-                .get("defaultKeyStatistics", {})
-            )
-            float_shares = _sf((stats.get("floatShares") or {}).get("raw"))
-            shares_short = _sf((stats.get("sharesShort") or {}).get("raw"))
-            short_pct = _sf((stats.get("shortPercentOfFloat") or {}).get("raw"))
-            short_ratio = _sf((stats.get("shortRatio") or {}).get("raw"))
+            float_shares = _sf(info.get("floatShares"))
+            short_pct_raw = _sf(info.get("shortPercentOfFloat"))
+            short_ratio = _sf(info.get("shortRatio"))
+            shares_short = _sf(info.get("sharesShort"))
 
-            if float_shares or short_pct:
-                result[sym] = {
+            if float_shares or short_pct_raw:
+                fresh[sym] = {
                     "float_shares": float_shares,
-                    "short_pct_float": float(short_pct * 100) if short_pct else None,
+                    "short_pct_float": float(short_pct_raw * 100) if short_pct_raw else None,
                     "short_ratio": short_ratio,
                     "shares_short": shares_short,
                 }
-            time.sleep(0.12)  # be polite to Yahoo
+            time.sleep(0.10)
         except Exception as e:
-            log.debug(f"float_short: {sym} error: {e}")
+            log.debug(f"float_short yf: {sym} error: {e}")
             continue
 
-    log.info(f"float_short: got data for {len(result)}/{len(symbols)} symbols")
+    with _FLOAT_CACHE_LOCK:
+        for sym, data in fresh.items():
+            _FLOAT_CACHE[sym] = {**data, "_ts": now}
+
+    result.update(fresh)
+    log.info(f"float_short: total {len(result)}/{len(symbols)} (fetched={len(fresh)} cache_hit={len(symbols)-len(need_fetch)})")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Options unusual activity — yfinance options chain
+# ---------------------------------------------------------------------------
+
+def _get_options_flow(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Detect unusual call sweeps via yfinance options chain (30 min cache).
+
+    Returns {sym: {"call_put_ratio": float, "unusual_calls": bool, "total_call_vol": int}}
+    """
+    now = time.time()
+    result: Dict[str, Dict[str, Any]] = {}
+    with _OPTIONS_CACHE_LOCK:
+        for sym in symbols:
+            cached = _OPTIONS_CACHE.get(sym)
+            if cached and now - cached.get("_ts", 0) < _OPTIONS_CACHE_TTL:
+                result[sym] = {k: v for k, v in cached.items() if k != "_ts"}
+    need_fetch = [s for s in symbols if s not in result]
+    if not need_fetch:
+        return result
+    try:
+        import yfinance as _yf
+    except ImportError:
+        return result
+    fresh: Dict[str, Dict[str, Any]] = {}
+    for sym in need_fetch:
+        try:
+            t = _yf.Ticker(sym)
+            exps = t.options
+            if not exps:
+                fresh[sym] = {"call_put_ratio": None, "unusual_calls": False, "total_call_vol": 0, "max_call_oi_ratio": 0.0}
+                continue
+            chain = t.option_chain(exps[0])
+            calls = chain.calls
+            puts = chain.puts
+            total_call_vol = int(calls["volume"].fillna(0).sum())
+            total_put_vol = int(puts["volume"].fillna(0).sum())
+            call_put_ratio = round(total_call_vol / max(total_put_vol, 1), 2)
+            max_oi_ratio = 0.0
+            unusual_calls = False
+            calls_with_oi = calls[calls["openInterest"] > 0]
+            if not calls_with_oi.empty:
+                ratios = calls_with_oi["volume"].fillna(0) / calls_with_oi["openInterest"]
+                max_oi_ratio = float(ratios.max())
+                unusual_calls = max_oi_ratio >= 5.0
+            fresh[sym] = {
+                "call_put_ratio": call_put_ratio,
+                "unusual_calls": unusual_calls,
+                "total_call_vol": total_call_vol,
+                "max_call_oi_ratio": round(max_oi_ratio, 2),
+            }
+            time.sleep(0.15)
+        except Exception as e:
+            log.debug(f"options_flow: {sym} error: {e}")
+            fresh[sym] = {"call_put_ratio": None, "unusual_calls": False, "total_call_vol": 0, "max_call_oi_ratio": 0.0}
+    with _OPTIONS_CACHE_LOCK:
+        for sym, data in fresh.items():
+            _OPTIONS_CACHE[sym] = {**data, "_ts": now}
+    result.update(fresh)
+    log.info(f"options_flow: fetched {len(fresh)}/{len(need_fetch)} symbols")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Social sentiment — Reddit + StockTwits (free public APIs)
+# ---------------------------------------------------------------------------
+
+def _get_social_sentiment(symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Reddit WSB mention count + StockTwits bullish ratio (1 hour cache).
+
+    Returns {sym: {"reddit_mentions": int, "stocktwits_bullish": float, "stocktwits_msgs": int}}
+    """
+    import requests as _req
+    now = time.time()
+    result: Dict[str, Dict[str, Any]] = {}
+    with _SOCIAL_CACHE_LOCK:
+        for sym in symbols:
+            cached = _SOCIAL_CACHE.get(sym)
+            if cached and now - cached.get("_ts", 0) < _SOCIAL_CACHE_TTL:
+                result[sym] = {k: v for k, v in cached.items() if k != "_ts"}
+    need_fetch = [s for s in symbols if s not in result]
+    if not need_fetch:
+        return result
+    headers = {"User-Agent": "stackiq-scanner/1.0 (research tool)"}
+    fresh: Dict[str, Dict[str, Any]] = {}
+    for sym in need_fetch:
+        reddit_mentions = 0
+        stocktwits_bullish = 0.5
+        stocktwits_msgs = 0
+        try:
+            resp = _req.get(
+                "https://www.reddit.com/search.json",
+                params={"q": sym, "sort": "new", "t": "day", "limit": 25},
+                headers=headers,
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                reddit_mentions = int(resp.json().get("data", {}).get("dist", 0))
+        except Exception as e:
+            log.debug(f"social: reddit {sym}: {e}")
+        try:
+            resp = _req.get(
+                f"https://api.stocktwits.com/api/2/streams/symbol/{sym}.json",
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                messages = resp.json().get("messages") or []
+                stocktwits_msgs = len(messages)
+                bull = sum(1 for m in messages if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bullish")
+                bear = sum(1 for m in messages if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bearish")
+                if bull + bear > 0:
+                    stocktwits_bullish = round(bull / (bull + bear), 2)
+        except Exception as e:
+            log.debug(f"social: stocktwits {sym}: {e}")
+        fresh[sym] = {
+            "reddit_mentions": reddit_mentions,
+            "stocktwits_bullish": stocktwits_bullish,
+            "stocktwits_msgs": stocktwits_msgs,
+        }
+        time.sleep(0.2)
+    with _SOCIAL_CACHE_LOCK:
+        for sym, data in fresh.items():
+            _SOCIAL_CACHE[sym] = {**data, "_ts": now}
+    result.update(fresh)
+    log.info(f"social: fetched {len(fresh)}/{len(need_fetch)} symbols")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Short borrow rate — iborrowdesk (free, no key)
+# ---------------------------------------------------------------------------
+
+def _get_short_borrow_rates(symbols: List[str]) -> Dict[str, float]:
+    """Annual short borrow rate from iborrowdesk (24h cache).
+
+    High borrow rate (>50% annualized) = shorts paying dearly, cover pressure imminent.
+    Returns {sym: annual_borrow_rate_pct}
+    """
+    import requests as _req
+    now = time.time()
+    result: Dict[str, float] = {}
+    with _BORROW_CACHE_LOCK:
+        for sym in symbols:
+            cached = _BORROW_CACHE.get(sym)
+            if cached and now - cached.get("_ts", 0) < _BORROW_CACHE_TTL:
+                rate = cached.get("rate")
+                if rate is not None:
+                    result[sym] = rate
+    need_fetch = [s for s in symbols if s not in result]
+    if not need_fetch:
+        return result
+    headers = {"User-Agent": "stackiq-scanner/1.0"}
+    fresh: Dict[str, float] = {}
+    for sym in need_fetch:
+        try:
+            resp = _req.get(
+                f"https://iborrowdesk.com/api/ticker/{sym}",
+                headers=headers,
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    fee = _sf(data[-1].get("fee"))
+                    if fee is not None:
+                        fresh[sym] = fee
+            time.sleep(0.15)
+        except Exception as e:
+            log.debug(f"borrow_rate: {sym}: {e}")
+    with _BORROW_CACHE_LOCK:
+        for sym, rate in fresh.items():
+            _BORROW_CACHE[sym] = {"rate": rate, "_ts": now}
+    result.update(fresh)
+    log.info(f"borrow_rate: fetched {len(fresh)}/{len(need_fetch)} symbols")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Insider buying — Finnhub API
+# ---------------------------------------------------------------------------
+
+def _get_insider_buying(symbols: List[str]) -> Dict[str, bool]:
+    """Check Finnhub for net insider purchases in last 90 days (24h cache).
+
+    Returns {sym: True} if insider buys >= insider sales recently.
+    """
+    import requests as _req
+    api_key = (os.getenv("FINNHUB_API_KEY") or "").strip()
+    if not api_key:
+        return {}
+    now = time.time()
+    result: Dict[str, bool] = {}
+    with _INSIDER_CACHE_LOCK:
+        for sym in symbols:
+            cached = _INSIDER_CACHE.get(sym)
+            if cached and now - cached.get("_ts", 0) < _INSIDER_CACHE_TTL:
+                result[sym] = cached.get("buying", False)
+    need_fetch = [s for s in symbols if s not in result]
+    if not need_fetch:
+        return result
+    since = (datetime.now(timezone.utc) - timedelta(days=90)).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    fresh: Dict[str, bool] = {}
+    for sym in need_fetch:
+        try:
+            resp = _req.get(
+                "https://finnhub.io/api/v1/stock/insider-transactions",
+                params={"symbol": sym, "from": since, "to": today, "token": api_key},
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                transactions = resp.json().get("data") or []
+                buys = sum(1 for t in transactions if t.get("transactionType") == "P")
+                sells = sum(1 for t in transactions if t.get("transactionType") == "S")
+                fresh[sym] = buys > 0 and buys >= sells
+            time.sleep(0.12)
+        except Exception as e:
+            log.debug(f"insider: {sym}: {e}")
+    with _INSIDER_CACHE_LOCK:
+        for sym, buying in fresh.items():
+            _INSIDER_CACHE[sym] = {"buying": buying, "_ts": now}
+    result.update(fresh)
+    log.info(f"insider: fetched {len(fresh)}/{len(need_fetch)} symbols")
     return result
 
 
@@ -616,15 +887,13 @@ def _score_symbol(
     except Exception:
         pass
 
-    # Normalize against what this stock could actually score, not the theoretical max.
-    # If float data wasn't available, the float-dependent signals (30+20+10=60 pts)
-    # could never fire — normalizing against 145 makes every stock look like a 40/100.
-    # Instead, score against what was achievable given available data.
+    # Normalize: always use 75 as the base max (non-float signals).
+    # Float signals (float_rotation=30, squeeze=20, micro_float=10) add BONUS pts on top —
+    # they don't change the denominator. This keeps scores consistent whether or not
+    # float data was available, and lets float signals push exceptional setups above 100 (capped).
     has_float_data = bool(float_data and (float_data.get("float_shares") or float_data.get("short_pct_float")))
     is_penny_stock = bool(price is not None and price < 1.0)
-    # No float data: max achievable = 25(accum)+20(atr)+10(close)+10(near_high)+15(catalyst)+5(rs) = 85
-    # But in practice stocks rarely fire all — use 70 as practical max so good setups score 80+
-    MAX_RAW = 145.0 if has_float_data else (130.0 if is_penny_stock else 70.0)
+    MAX_RAW = 80.0 if is_penny_stock else 75.0
     normalized = _clamp(raw_score / MAX_RAW * 100.0, 0.0, 100.0)
 
     # Squeeze tag: flag high-conviction squeeze setups explicitly
@@ -739,6 +1008,28 @@ def run_premover_scan(
     max_seconds: float = 300.0,
 ) -> Dict[str, Any]:
     """Scan for pre-movers. Returns top candidates sorted by score desc."""
+    # Prevent concurrent scans from double-fetching yfinance data and polluting results
+    if not _SCAN_RUNNING.acquire(blocking=False):
+        log.info("premover_scan: scan already running, returning cached results")
+        from pre_mover_scanner import get_cached_premover_results
+        cached = get_cached_premover_results()
+        if cached.get("results"):
+            return cached
+        _SCAN_RUNNING.acquire(blocking=True)  # wait for running scan to finish
+
+    try:
+        return _run_premover_scan_inner(scan_universe, max_results, news_top_k, max_seconds)
+    finally:
+        _SCAN_RUNNING.release()
+
+
+def _run_premover_scan_inner(
+    scan_universe: List[str],
+    max_results: int = 25,
+    news_top_k: int = 50,
+    max_seconds: float = 300.0,
+) -> Dict[str, Any]:
+    """Inner scan implementation (called with scan lock held)."""
     from data_fetcher import get_snapshots_batch, get_bars_batch
 
     t0 = time.time()
@@ -822,18 +1113,7 @@ def run_premover_scan(
         except Exception as e:
             log.warning(f"premover_scan: news error: {e}")
 
-    # --- Step 7: Float + short interest for top 60 candidates ---
-    # Only fetch for top candidates (Yahoo has rate limits).
-    float_map: Dict[str, Dict] = {}
-    float_fetch_syms = syms_to_score[:60]
-    if time.time() - t0 < max_seconds * 0.80:
-        try:
-            log.info(f"premover_scan: fetching float/short data for {len(float_fetch_syms)} symbols")
-            float_map = _get_float_short_data(float_fetch_syms)
-        except Exception as e:
-            log.warning(f"premover_scan: float/short error: {e}")
-
-    # --- Step 8: Load learned weights from brain ---
+    # --- Step 7: Load learned weights from brain ---
     learned_weights: Dict[str, float] = {}
     try:
         from brain import get_learned_weights
@@ -843,7 +1123,7 @@ def run_premover_scan(
     except Exception as e:
         log.debug(f"premover_scan: brain weights unavailable: {e}")
 
-    # --- Step 9: Score ---
+    # --- Step 8: First-pass score (no float data yet) to find top candidates ---
     results: List[Dict[str, Any]] = []
     for sym, snap in top_candidates:
         bars = bars_map.get(sym) or []
@@ -853,7 +1133,7 @@ def run_premover_scan(
             bars=bars,
             spy_closes=spy_closes,
             has_news=has_news_map.get(sym, False),
-            float_data=float_map.get(sym),
+            float_data=None,
             has_8k=(sym in sec_8k_filers),
             learned_weights=learned_weights,
         )
@@ -862,7 +1142,182 @@ def run_premover_scan(
 
     results.sort(key=lambda x: x["score"], reverse=True)
 
-    # --- Step 10: Record picks to brain for outcome tracking ---
+    # --- Step 9: Fetch float + short interest for actual top 60 results ---
+    # Done AFTER first-pass scoring so we fetch for the right symbols, not
+    # the pre-filter's unreliable pv-ratio order.
+    float_map: Dict[str, Dict] = {}
+    float_fetch_syms = [r["symbol"] for r in results[:60]]
+    if time.time() - t0 < max_seconds * 0.85:
+        try:
+            log.info(f"premover_scan: fetching float/short for top {len(float_fetch_syms)} results")
+            float_map = _get_float_short_data(float_fetch_syms)
+        except Exception as e:
+            log.warning(f"premover_scan: float/short error: {e}")
+
+    # Re-enrich top results with float data; drop confirmed ETFs/funds
+    snap_lookup = {sym: snap for sym, snap in top_candidates}
+    bars_lookup = {sym: bars_map.get(sym) or [] for sym, _ in top_candidates}
+    enriched_count = 0
+    etf_drop: set = set()
+    for i, r in enumerate(results[:60]):
+        sym = r["symbol"]
+        fd = float_map.get(sym)
+        if fd:
+            if fd.get("_is_etf"):
+                etf_drop.add(sym)
+                continue
+            try:
+                enriched = _score_symbol(
+                    symbol=sym,
+                    snap=snap_lookup[sym],
+                    bars=bars_lookup[sym],
+                    spy_closes=spy_closes,
+                    has_news=has_news_map.get(sym, False),
+                    float_data=fd,
+                    has_8k=(sym in sec_8k_filers),
+                    learned_weights=learned_weights,
+                )
+                results[i] = enriched
+                enriched_count += 1
+            except Exception as _enrich_err:
+                log.debug(f"premover_scan: re-enrich {sym} error: {_enrich_err}")
+
+    if etf_drop:
+        results = [r for r in results if r["symbol"] not in etf_drop]
+        log.info(f"premover_scan: dropped {len(etf_drop)} ETFs/funds: {sorted(etf_drop)[:5]}")
+
+    # Second pass: any top-30 result still lacking float data — enrich from float_map
+    # (covers symbols that were at position 60+ in first-pass and weren't enriched initially)
+    for i, r in enumerate(results[:30]):
+        if r.get("float_m") is not None:
+            continue  # already enriched
+        sym = r["symbol"]
+        fd2 = float_map.get(sym)
+        if fd2 and not fd2.get("_is_etf"):
+            try:
+                enriched2 = _score_symbol(
+                    symbol=sym, snap=snap_lookup[sym], bars=bars_lookup[sym],
+                    spy_closes=spy_closes, has_news=has_news_map.get(sym, False),
+                    float_data=fd2, has_8k=(sym in sec_8k_filers),
+                    learned_weights=learned_weights,
+                )
+                results[i] = enriched2
+                enriched_count += 1
+            except Exception as _e2:
+                log.debug(f"premover_scan: second-pass re-enrich {sym}: {_e2}")
+        elif not fd2 and time.time() - t0 < max_seconds * 0.93:
+            # Not in float_map at all — fetch now
+            try:
+                second_float = _get_float_short_data([sym])
+                float_map.update(second_float)
+                fd3 = second_float.get(sym)
+                if fd3 and not fd3.get("_is_etf"):
+                    enriched3 = _score_symbol(
+                        symbol=sym, snap=snap_lookup[sym], bars=bars_lookup[sym],
+                        spy_closes=spy_closes, has_news=has_news_map.get(sym, False),
+                        float_data=fd3, has_8k=(sym in sec_8k_filers),
+                        learned_weights=learned_weights,
+                    )
+                    results[i] = enriched3
+                    enriched_count += 1
+            except Exception as _e3:
+                log.debug(f"premover_scan: on-demand float {sym}: {_e3}")
+
+    log.info(f"premover_scan: re-enriched {enriched_count}/{min(len(results)+len(etf_drop), 60)} with float; etf_dropped={len(etf_drop)}")
+    results.sort(key=lambda x: x["score"], reverse=True)
+
+    # --- Step 10: Options unusual activity for top 20 ---
+    options_map: Dict[str, Dict] = {}
+    if time.time() - t0 < max_seconds * 0.88:
+        try:
+            opts_syms = [r["symbol"] for r in results[:20]]
+            log.info(f"premover_scan: fetching options flow for {len(opts_syms)} symbols")
+            options_map = _get_options_flow(opts_syms)
+        except Exception as e:
+            log.warning(f"premover_scan: options flow error: {e}")
+
+    # --- Step 11: Social sentiment (Reddit + StockTwits) for top 25 ---
+    social_map: Dict[str, Dict] = {}
+    if time.time() - t0 < max_seconds * 0.91:
+        try:
+            soc_syms = [r["symbol"] for r in results[:25]]
+            log.info(f"premover_scan: fetching social sentiment for {len(soc_syms)} symbols")
+            social_map = _get_social_sentiment(soc_syms)
+        except Exception as e:
+            log.warning(f"premover_scan: social sentiment error: {e}")
+
+    # --- Step 12: Short borrow rates for top 30 ---
+    borrow_map: Dict[str, float] = {}
+    if time.time() - t0 < max_seconds * 0.94:
+        try:
+            borrow_syms = [r["symbol"] for r in results[:30]]
+            log.info(f"premover_scan: fetching borrow rates for {len(borrow_syms)} symbols")
+            borrow_map = _get_short_borrow_rates(borrow_syms)
+        except Exception as e:
+            log.warning(f"premover_scan: borrow rates error: {e}")
+
+    # --- Step 13: Insider buying via Finnhub for top 30 ---
+    insider_map: Dict[str, bool] = {}
+    if time.time() - t0 < max_seconds * 0.96:
+        try:
+            ins_syms = [r["symbol"] for r in results[:30]]
+            log.info(f"premover_scan: fetching insider transactions for {len(ins_syms)} symbols")
+            insider_map = _get_insider_buying(ins_syms)
+        except Exception as e:
+            log.warning(f"premover_scan: insider buying error: {e}")
+
+    # --- Step 14: Enrich results with all elite signals + score boosts ---
+    for i, r in enumerate(results[:max_results]):
+        sym = r["symbol"]
+        enriched = dict(r)
+        score_boost = 0.0
+
+        opts = options_map.get(sym)
+        if opts:
+            enriched["options_flow"] = opts
+            if opts.get("unusual_calls"):
+                score_boost += 8.0
+                if "opt_sweep" not in enriched.get("tags", []):
+                    enriched["tags"] = list(enriched.get("tags", [])) + ["opt_sweep"]
+            elif opts.get("call_put_ratio") and opts["call_put_ratio"] > 2.0:
+                score_boost += 3.0
+
+        soc = social_map.get(sym)
+        if soc:
+            enriched["reddit_mentions"] = soc.get("reddit_mentions", 0)
+            enriched["stocktwits_bullish"] = soc.get("stocktwits_bullish", 0.5)
+            reddit_ct = soc.get("reddit_mentions", 0)
+            st_bull = soc.get("stocktwits_bullish", 0.5)
+            if reddit_ct >= 10:
+                score_boost += min(reddit_ct / 50.0 * 6.0, 6.0)
+                if "viral" not in enriched.get("tags", []):
+                    enriched["tags"] = list(enriched.get("tags", [])) + ["viral"]
+            if st_bull and st_bull > 0.65 and soc.get("stocktwits_msgs", 0) >= 5:
+                score_boost += 3.0
+
+        borrow = borrow_map.get(sym)
+        if borrow is not None:
+            enriched["borrow_rate"] = round(borrow, 1)
+            if borrow > 50.0:
+                score_boost += min((borrow - 50.0) / 50.0 * 5.0, 5.0)
+                if "hot_borrow" not in enriched.get("tags", []):
+                    enriched["tags"] = list(enriched.get("tags", [])) + ["hot_borrow"]
+
+        insider = insider_map.get(sym, False)
+        if insider:
+            enriched["insider_buying"] = True
+            score_boost += 8.0
+            if "insider_buy" not in enriched.get("tags", []):
+                enriched["tags"] = list(enriched.get("tags", [])) + ["insider_buy"]
+
+        if score_boost > 0:
+            enriched["score"] = round(min(100.0, r["score"] + score_boost), 1)
+
+        results[i] = enriched
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+
+    # --- Step 16: Record picks to brain for outcome tracking ---
     try:
         from brain import record_premover_pick
         for r in results[:max_results]:
