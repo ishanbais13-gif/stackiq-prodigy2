@@ -194,7 +194,7 @@ def build_smallcap_universe(
     for i in range(0, len(clean), chunk_size):
         chunk = clean[i: i + chunk_size]
         try:
-            snaps = get_snapshots_batch(chunk) or {}
+            snaps = get_snapshots_batch(chunk, force=True) or {}
         except Exception as e:
             log.warning(f"premover_universe: snapshot fetch error: {e}")
             continue
@@ -1047,7 +1047,7 @@ def _run_premover_scan_inner(
             break
         chunk = universe[i: i + 200]
         try:
-            snapmap.update(get_snapshots_batch(chunk) or {})
+            snapmap.update(get_snapshots_batch(chunk, force=True) or {})
         except Exception as e:
             log.warning(f"premover_scan: snapshot error: {e}")
 

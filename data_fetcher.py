@@ -550,6 +550,24 @@ def _polygon_key() -> str:
 
 _POLYGON_RATE_BACKOFF_SECONDS: list = []  # no retries — fail fast and fall back to Alpaca
 
+_POLYGON_RATE_COOLDOWN_UNTIL = 0.0
+_LAST_POLYGON_RATE_WARN_TS = 0.0
+
+
+def _polygon_rate_in_cooldown() -> bool:
+    try:
+        return time.time() < float(_POLYGON_RATE_COOLDOWN_UNTIL or 0.0)
+    except Exception:
+        return False
+
+
+def _polygon_set_rate_cooldown(seconds: int = 90) -> None:
+    global _POLYGON_RATE_COOLDOWN_UNTIL
+    try:
+        _POLYGON_RATE_COOLDOWN_UNTIL = max(float(_POLYGON_RATE_COOLDOWN_UNTIL or 0.0), time.time() + float(seconds))
+    except Exception:
+        pass
+
 
 def _polygon_request(path: str, params: Optional[dict] = None) -> dict:
     """GET request to Polygon.io REST API. Raises on auth/rate/network errors.
@@ -577,6 +595,7 @@ def _polygon_request(path: str, params: Optional[dict] = None) -> dict:
         if r.status_code in (401, 403):
             raise AlpacaAuthError(f"Polygon auth failed ({r.status_code}) — check POLYGON_API_KEY")
         if r.status_code == 429:
+            _polygon_set_rate_cooldown(90)  # back off 90s before retrying Polygon
             if attempt < len(_POLYGON_RATE_BACKOFF_SECONDS):
                 wait_s = _POLYGON_RATE_BACKOFF_SECONDS[attempt]
                 log.warning(
@@ -621,6 +640,10 @@ def _fetch_polygon_snapshots(tickers: Optional[List[str]] = None) -> Dict[str, A
     Returns Alpaca-compatible format: {SYM: alpaca_snapshot_dict}
     """
     if not _polygon_key():
+        return {}
+
+    if _polygon_rate_in_cooldown():
+        log.info("_fetch_polygon_snapshots: skipping (Polygon rate cooldown active)")
         return {}
 
     date_str = _polygon_last_trading_date()
@@ -2192,7 +2215,7 @@ def get_top_movers(limit: int) -> List[Dict[str, Any]]:
         # Low-request fallback: one batched snapshots call, no per-symbol bars calls.
         quotes: List[Dict[str, Any]] = []
         try:
-            snapmap = get_snapshots_batch(list(_LIQUID_SYMBOLS)) or {}
+            snapmap = get_snapshots_batch(list(_LIQUID_SYMBOLS), force=True) or {}
         except Exception:
             snapmap = {}
 
