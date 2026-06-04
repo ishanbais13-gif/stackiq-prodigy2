@@ -8298,6 +8298,12 @@ def _bg_brain_outcome_loop() -> None:
         log.info(f"brain_outcome_loop: checked {n} outcomes")
     except Exception as e:
         log.warning(f"brain_outcome_loop error: {e}")
+    try:
+        from performance_tracker import evaluate_pending_picks
+        n2 = evaluate_pending_picks()
+        log.info(f"brain_outcome_loop: evaluated {n2} perf_tracker picks")
+    except Exception as e:
+        log.warning(f"brain_outcome_loop perf_tracker error: {e}")
     finally:
         _t = threading.Timer(6 * 3600, _bg_brain_outcome_loop)
         _t.daemon = True
