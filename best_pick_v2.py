@@ -15,8 +15,15 @@ try:
     from backend.market_regime import detect_market_regime_full as _detect_regime_full
 except Exception:
     def _detect_regime_full() -> Dict[str, Any]:  # type: ignore
-        return {"regime": "UNKNOWN", "regime_legacy": "unknown", "regime_strength": "unknown",
-                "vix_proxy": 0.0, "trend_slope_5d": 0.0, "confidence": 0.0}
+        try:
+            from data_fetcher import get_market_regime
+            r = get_market_regime()
+            regime_map = {"bull": "BULL", "bear": "BEAR", "neutral": "CHOPPY"}
+            return {"regime": regime_map.get(r, "UNKNOWN"), "regime_legacy": r,
+                    "regime_strength": "moderate", "vix_proxy": 0.0, "trend_slope_5d": 0.0, "confidence": 0.7}
+        except Exception:
+            return {"regime": "UNKNOWN", "regime_legacy": "unknown", "regime_strength": "unknown",
+                    "vix_proxy": 0.0, "trend_slope_5d": 0.0, "confidence": 0.0}
 
 
 log = logging.getLogger("stackiq")

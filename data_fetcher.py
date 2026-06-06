@@ -2037,6 +2037,61 @@ _LIQUID_SYMBOLS = [
     "NFLX", "JPM", "XOM"
 ]
 
+_REGIME_CACHE: Dict[str, Any] = {}
+_REGIME_CACHE_TTL = 3600.0  # 1 hour — regime doesn't flip intraday
+
+
+def get_market_regime() -> str:
+    """Detect current market regime from SPY daily bars. Returns 'bull', 'bear', or 'neutral'.
+
+    Bull:    SPY above 50-day SMA and 20-day return > +2%
+    Bear:    SPY below 50-day SMA and 20-day return < -2%
+    Neutral: Everything else (consolidation, mixed signals)
+
+    Result is cached for 1 hour so it doesn't trigger API calls on every score.
+    """
+    now = time.time()
+    cached_result = _REGIME_CACHE.get("result")
+    cached_ts = float(_REGIME_CACHE.get("ts") or 0.0)
+    if cached_result and (now - cached_ts) < _REGIME_CACHE_TTL:
+        return str(cached_result)
+
+    try:
+        bars = get_bars("SPY", "1Day", 60)
+        candles = bars.get("candles") if isinstance(bars, dict) else []
+        if not isinstance(candles, list) or len(candles) < 22:
+            return "neutral"
+
+        closes = []
+        for c in candles:
+            if isinstance(c, dict) and c.get("c") is not None:
+                try:
+                    closes.append(float(c["c"]))
+                except Exception:
+                    pass
+
+        if len(closes) < 22:
+            return "neutral"
+
+        last = closes[-1]
+        n50 = min(50, len(closes))
+        sma50 = sum(closes[-n50:]) / n50
+        ret_20d = (last - closes[-21]) / closes[-21] if closes[-21] != 0.0 else 0.0
+
+        if last > sma50 and ret_20d > 0.02:
+            regime = "bull"
+        elif last < sma50 and ret_20d < -0.02:
+            regime = "bear"
+        else:
+            regime = "neutral"
+
+        _REGIME_CACHE["result"] = regime
+        _REGIME_CACHE["ts"] = now
+        log.info(f"market_regime: {regime} (SPY={last:.2f} SMA50={sma50:.2f} ret20d={ret_20d:.2%})")
+        return regime
+    except Exception:
+        return "neutral"
+
 
 def get_top_movers(limit: int) -> List[Dict[str, Any]]:
     top_n = max(1, min(int(limit or 10), 200))

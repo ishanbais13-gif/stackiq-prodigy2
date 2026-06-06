@@ -91,6 +91,7 @@ from data_fetcher import get_bars as _alpaca_get_bars, get_snapshot, get_snapsho
 from data_fetcher import get_bars_batch as _alpaca_get_bars_batch
 from data_fetcher import get_snapshots_batch as _alpaca_get_snapshots_batch
 from data_fetcher import validate_market_env as _validate_market_env
+from data_fetcher import get_market_regime as _get_market_regime
 from data_fetcher import get_snapshot_normalized as _get_snapshot_normalized
 from indicator_engine import calculate_indicators as calculate_indicators
 from scoring_engine import score_composite_0_100 as _score_composite_0_100, score_execution_0_100 as _score_execution_0_100
@@ -4424,7 +4425,12 @@ async def analyze(
         pass
 
     # --- New AI score weighting (institutional stack) ---
-    technical_score = float(_score_composite_0_100(indicators=indicators, news_sentiment_0_100=ns100) or 0.0)
+    _regime = "neutral"
+    try:
+        _regime = _get_market_regime()
+    except Exception:
+        pass
+    technical_score = float(_score_composite_0_100(indicators=indicators, news_sentiment_0_100=ns100, regime=_regime) or 0.0)
     news_sentiment_score = float(_clamp_0_100(ns100) if callable(globals().get("_clamp_0_100")) else max(0.0, min(100.0, float(ns100 or 0.0))))
     # Use 50 (neutral) as default for missing signals — 0 unfairly drags down
     # strong setups where secondary data simply hasn't loaded yet.
@@ -7699,7 +7705,12 @@ async def _scan_universe_ranked(*, universe: List[str], max_seconds: float = 8.0
         try:
             # Convert the sentiment proxy back to 0..100 to match the scoring engine signature.
             ns100 = float(max(0.0, min(100.0, float(sentiment_0_1) * 100.0)))
-            analyze_ai_0_100 = float(_score_composite_0_100(indicators=ind0, news_sentiment_0_100=ns100) or 0.0)
+            _regime = "neutral"
+            try:
+                _regime = _get_market_regime()
+            except Exception:
+                pass
+            analyze_ai_0_100 = float(_score_composite_0_100(indicators=ind0, news_sentiment_0_100=ns100, regime=_regime) or 0.0)
             analyze_ex_0_100 = float(_score_execution_0_100(indicators=ind0) or 0.0)
             analyze_rating_0_100 = float((0.65 * analyze_ai_0_100) + (0.35 * analyze_ex_0_100))
         except Exception:
@@ -8549,7 +8560,12 @@ async def best_pick(
             ind = out.get("technical_analysis") if isinstance(out.get("technical_analysis"), dict) else {}
             ns0 = out.get("news_sentiment") if isinstance(out.get("news_sentiment"), dict) else {}
             ns100 = float(_sentiment_score_0_100(ns0) or 50.0)
-            a_ai = float(_score_composite_0_100(indicators=ind, news_sentiment_0_100=ns100) or 0.0)
+            _regime = "neutral"
+            try:
+                _regime = _get_market_regime()
+            except Exception:
+                pass
+            a_ai = float(_score_composite_0_100(indicators=ind, news_sentiment_0_100=ns100, regime=_regime) or 0.0)
             a_ex = float(_score_execution_0_100(indicators=ind) or 0.0)
             out["analyze_ai_score_0_100"] = float(round(a_ai, 1))
             out["analyze_execution_score_0_100"] = float(round(a_ex, 1))
@@ -8633,7 +8649,12 @@ async def best_pick(
             ind = out.get("technical_analysis") if isinstance(out.get("technical_analysis"), dict) else {}
             ns0 = out.get("news_sentiment") if isinstance(out.get("news_sentiment"), dict) else {}
             ns100 = float(_sentiment_score_0_100(ns0) or 50.0)
-            a_ai = float(_score_composite_0_100(indicators=ind, news_sentiment_0_100=ns100) or 0.0)
+            _regime = "neutral"
+            try:
+                _regime = _get_market_regime()
+            except Exception:
+                pass
+            a_ai = float(_score_composite_0_100(indicators=ind, news_sentiment_0_100=ns100, regime=_regime) or 0.0)
             a_ex = float(_score_execution_0_100(indicators=ind) or 0.0)
             out["analyze_ai_score_0_100"] = float(round(a_ai, 1))
             out["analyze_execution_score_0_100"] = float(round(a_ex, 1))

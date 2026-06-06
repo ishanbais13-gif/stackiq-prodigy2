@@ -13,31 +13,58 @@ def _clamp_0_100(v: Any) -> float:
     return float(x)
 
 
-def score_composite_0_100(*, indicators: Dict[str, Any], news_sentiment_0_100: float) -> float:
+def score_composite_0_100(*, indicators: Dict[str, Any], news_sentiment_0_100: float, regime: str = "neutral") -> float:
     mom = _clamp_0_100((indicators or {}).get("momentum"))
     tr = _clamp_0_100((indicators or {}).get("trend"))
     vol = _clamp_0_100((indicators or {}).get("volatility"))
     liq = _clamp_0_100((indicators or {}).get("liquidity"))
     rk = _clamp_0_100((indicators or {}).get("risk"))
     news = _clamp_0_100(news_sentiment_0_100)
-
-    # Weights: momentum(30) + trend(25) + liquidity(15) + volatility(10) + risk_inverse(10) + news(10)
-    # Risk weight reduced: high-vol breakout stocks shouldn't be penalized for volatility
     risk_positive = _clamp_0_100(100.0 - rk)
+
+    r = str(regime or "neutral").lower()
+
+    # Regime-adjusted weights (all rows sum to 1.0)
+    # Bull:    momentum and trend carry more weight; risk matters less
+    # Bear:    risk management and liquidity carry more; momentum/trend less reliable
+    # Neutral: baseline weights
+    if r == "bull":
+        w_mom, w_tr, w_liq, w_vol, w_risk, w_news = 0.35, 0.30, 0.15, 0.10, 0.05, 0.05
+    elif r == "bear":
+        w_mom, w_tr, w_liq, w_vol, w_risk, w_news = 0.20, 0.15, 0.20, 0.15, 0.20, 0.10
+    else:
+        w_mom, w_tr, w_liq, w_vol, w_risk, w_news = 0.30, 0.25, 0.15, 0.10, 0.10, 0.10
+
     base = (
-        (0.30 * mom)
-        + (0.25 * tr)
-        + (0.15 * liq)
-        + (0.10 * vol)
-        + (0.10 * risk_positive)
-        + (0.10 * news)
+        (w_mom * mom)
+        + (w_tr * tr)
+        + (w_liq * liq)
+        + (w_vol * vol)
+        + (w_risk * risk_positive)
+        + (w_news * news)
     )
-    if mom > 70.0:
-        base *= 1.2
-    if tr > 60.0:
-        base *= 1.1
-    if news > 65.0:
-        base *= 1.05
+
+    # Regime-adjusted multiplier bonuses
+    if r == "bull":
+        if mom > 70.0:
+            base *= 1.25  # momentum breakouts hit harder in bull
+        if tr > 60.0:
+            base *= 1.15
+        if news > 65.0:
+            base *= 1.05
+    elif r == "bear":
+        if mom > 70.0:
+            base *= 1.05  # momentum less reliable; small bonus only
+        if news > 65.0:
+            base *= 1.10  # positive catalyst in bear market is more meaningful
+    else:
+        if mom > 70.0:
+            base *= 1.2
+        if tr > 60.0:
+            base *= 1.1
+        if news > 65.0:
+            base *= 1.05
+
     base = max(35.0, base)
     return float(min(100.0, max(0.0, base)))
 
