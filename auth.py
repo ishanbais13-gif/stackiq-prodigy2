@@ -693,12 +693,12 @@ def _state_ok(state: str, provider: str, max_age: int = 600) -> bool:
 
 # ── DB helper ────────────────────────────────────────────────────────────
 
-def _upsert_oauth_user(email: str) -> sqlite3.Row:
-    """Find or create a user by email (OAuth). New users get plan='free'."""
+def _upsert_oauth_user(email: str) -> tuple[sqlite3.Row, bool]:
+    """Find or create a user by email (OAuth). Returns (user, is_new)."""
     with _get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
         if user:
-            return user
+            return user, False
         now = datetime.now(timezone.utc).isoformat()
         fake_pw = hash_password(secrets.token_urlsafe(32))
         conn.execute(
@@ -706,14 +706,16 @@ def _upsert_oauth_user(email: str) -> sqlite3.Row:
             (email, fake_pw, now),
         )
         conn.commit()
-        return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone(), True
 
 
-def _redirect_to_app(user: sqlite3.Row) -> RedirectResponse:
+def _redirect_to_app(user: sqlite3.Row, is_new: bool = False) -> RedirectResponse:
     """Issue JWT and redirect to {FRONTEND_ORIGIN}/app?token=..."""
     plan = _user_plan(user)
     token = create_access_token(user["id"], user["email"], plan=plan)
     url = f"{FRONTEND_ORIGIN}/app?token={urllib.parse.quote(token)}"
+    if is_new:
+        url += "&new_user=1"
     return RedirectResponse(url=url, status_code=302)
 
 
@@ -766,8 +768,8 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
         log.warning("google_callback error: %s", exc)
         return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=google_failed", status_code=302)
 
-    user = _upsert_oauth_user(email)
-    return _redirect_to_app(user)
+    user, is_new = _upsert_oauth_user(email)
+    return _redirect_to_app(user, is_new=is_new)
 
 
 # ── Apple ────────────────────────────────────────────────────────────────
@@ -844,5 +846,5 @@ async def apple_callback(request: Request):
         log.warning("apple_callback error: %s", exc)
         return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=apple_failed", status_code=302)
 
-    user = _upsert_oauth_user(email)
-    return _redirect_to_app(user)
+    user, is_new = _upsert_oauth_user(email)
+    return _redirect_to_app(user, is_new=is_new)
