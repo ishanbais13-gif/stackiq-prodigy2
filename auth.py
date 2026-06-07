@@ -718,7 +718,7 @@ def _state_ok(state: str, provider: str, max_age: int = 600) -> bool:
 
 # ── DB helper ────────────────────────────────────────────────────────────
 
-def _upsert_oauth_user(email: str) -> tuple[sqlite3.Row, bool]:
+def _upsert_oauth_user(email: str, first_name: str = "", last_name: str = "") -> tuple[sqlite3.Row, bool]:
     """Find or create a user by email (OAuth). Returns (user, is_new)."""
     with _get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
@@ -727,8 +727,8 @@ def _upsert_oauth_user(email: str) -> tuple[sqlite3.Row, bool]:
         now = datetime.now(timezone.utc).isoformat()
         fake_pw = hash_password(secrets.token_urlsafe(32))
         conn.execute(
-            "INSERT INTO users (email, password_hash, plan, created_at) VALUES (?, ?, 'free', ?)",
-            (email, fake_pw, now),
+            "INSERT INTO users (email, password_hash, plan, first_name, last_name, created_at) VALUES (?, ?, 'free', ?, ?, ?)",
+            (email, fake_pw, first_name or None, last_name or None, now),
         )
         conn.commit()
         return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone(), True
@@ -789,11 +789,13 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
         email = str(info.get("email") or "").strip().lower()
         if not email:
             raise ValueError("no email in Google userinfo")
+        first_name = str(info.get("given_name") or "").strip()
+        last_name = str(info.get("family_name") or "").strip()
     except Exception as exc:
         log.warning("google_callback error: %s", exc)
         return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=google_failed", status_code=302)
 
-    user, is_new = _upsert_oauth_user(email)
+    user, is_new = _upsert_oauth_user(email, first_name=first_name, last_name=last_name)
     return _redirect_to_app(user, is_new=is_new)
 
 
