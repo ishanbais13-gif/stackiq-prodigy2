@@ -52,7 +52,19 @@ log = logging.getLogger("stackiq.auth")
 # Config
 # ---------------------------------------------------------------------------
 
-JWT_SECRET = os.getenv("JWT_SECRET_KEY", "CHANGE_ME_insecure_default_key_32chars!")
+_JWT_SECRET_RAW = os.getenv("JWT_SECRET_KEY", "")
+if not _JWT_SECRET_RAW or _JWT_SECRET_RAW.startswith("CHANGE_ME"):
+    import sys as _sys
+    _msg = (
+        "FATAL: JWT_SECRET_KEY env var is not set or is using the insecure default. "
+        "Generate one with: openssl rand -hex 32"
+    )
+    log.critical(_msg)
+    # Fail hard in production; allow local dev only if DEBUG is explicitly set
+    if not os.getenv("DEBUG"):
+        raise RuntimeError(_msg)
+    _JWT_SECRET_RAW = "dev-only-insecure-secret-do-not-use-in-prod"
+JWT_SECRET = _JWT_SECRET_RAW
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_DAYS = 30
 
@@ -63,6 +75,11 @@ PLAN_PRICES = {
     "starter": os.getenv("STRIPE_PRICE_STARTER", ""),
     "pro": os.getenv("STRIPE_PRICE_PRO", ""),
     "elite": os.getenv("STRIPE_PRICE_ELITE", ""),
+}
+
+# Reverse map: Stripe price ID → our plan string (built at import time)
+_PRICE_TO_PLAN: dict[str, str] = {
+    v: k for k, v in PLAN_PRICES.items() if v
 }
 
 PLAN_DISPLAY = {
@@ -109,9 +126,15 @@ def init_auth_db() -> None:
                 password_hash       TEXT    NOT NULL,
                 stripe_customer_id  TEXT,
                 subscription_status TEXT    NOT NULL DEFAULT 'inactive',
+                plan                TEXT    NOT NULL DEFAULT 'free',
                 created_at          TEXT    NOT NULL
             )
         """)
+        # Non-destructive migration: add plan column to existing databases
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'")
+        except Exception:
+            pass  # column already exists
         conn.commit()
     log.info("auth.db initialised")
 
@@ -135,9 +158,12 @@ def verify_password(plain: str, hashed: str) -> bool:
 # JWT helpers
 # ---------------------------------------------------------------------------
 
-def create_access_token(user_id: int, email: str) -> str:
+PLAN_RANK = {"free": 0, "starter": 1, "pro": 2, "elite": 3}
+
+
+def create_access_token(user_id: int, email: str, plan: str = "free") -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS)
-    payload = {"sub": str(user_id), "email": email, "exp": expire}
+    payload = {"sub": str(user_id), "email": email, "plan": plan, "exp": expire}
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -154,15 +180,19 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 def _extract_token(
+    request: Request,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
     authorization: Optional[str] = Header(default=None),
 ) -> str:
-    """Pull token from Bearer header. Returns raw token string or raises 401."""
+    """Pull token from Bearer header or httpOnly cookie. Raises 401 if absent."""
     token: Optional[str] = None
     if creds:
         token = creds.credentials
     elif authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
+    if not token:
+        # Fall back to the httpOnly session cookie
+        token = request.cookies.get("sq_token") or None
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -204,6 +234,26 @@ def require_active_subscription(user: sqlite3.Row = Depends(get_current_user)) -
     return user
 
 
+def require_plan(min_plan: str):
+    """
+    Dependency factory for plan-level gating.
+
+    Usage:
+        @app.get("/foo")
+        def foo(_user = Depends(require_plan("starter"))):
+            ...
+    """
+    def _dep(user: sqlite3.Row = Depends(get_current_user)) -> sqlite3.Row:
+        user_plan = str(user["plan"] or "free").lower()
+        if PLAN_RANK.get(user_plan, 0) < PLAN_RANK.get(min_plan, 0):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"PLAN_UPGRADE_REQUIRED:{min_plan}",
+            )
+        return user
+    return _dep
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
@@ -223,6 +273,25 @@ class CheckoutRequest(BaseModel):
     success_url: str
     cancel_url: str
 
+    def validated_urls(self) -> tuple[str, str]:
+        """Return (success_url, cancel_url) after origin validation. Raises 400 on bad input."""
+        _allowed_origins_raw = os.getenv("ALLOWED_ORIGINS", "")
+        _allowed = {o.strip().rstrip("/") for o in _allowed_origins_raw.split(",") if o.strip()}
+        # Always allow localhost for dev
+        _allowed.update({"http://localhost:3000", "http://localhost:5173", "http://localhost:8000"})
+
+        def _check(url: str) -> str:
+            from urllib.parse import urlparse
+            p = urlparse(url)
+            if p.scheme not in ("http", "https"):
+                raise HTTPException(400, "INVALID_REDIRECT_URL")
+            origin = f"{p.scheme}://{p.netloc}"
+            if _allowed and origin not in _allowed:
+                raise HTTPException(400, "INVALID_REDIRECT_URL")
+            return url
+
+        return _check(self.success_url), _check(self.cancel_url)
+
 
 # ---------------------------------------------------------------------------
 # Auth router
@@ -230,9 +299,25 @@ class CheckoutRequest(BaseModel):
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
 
+_IS_PROD = not bool(os.getenv("DEBUG"))
+_COOKIE_MAX_AGE = JWT_EXPIRE_DAYS * 86400
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    """Attach an httpOnly session cookie alongside the JSON body token."""
+    response.set_cookie(
+        key="sq_token",
+        value=token,
+        max_age=_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=_IS_PROD,        # Secure=True in prod (HTTPS); False in local dev
+        samesite="lax",         # lax allows top-level navigation redirects (e.g. Stripe return)
+        path="/",
+    )
+
 
 @auth_router.post("/signup", status_code=201)
-def signup(body: SignupRequest):
+def signup(body: SignupRequest, response: Response):
     if len(body.password) < 8:
         raise HTTPException(400, "Password must be at least 8 characters")
 
@@ -249,12 +334,13 @@ def signup(body: SignupRequest):
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Email already registered")
 
-    token = create_access_token(user_id, body.email)
-    return {"access_token": token, "token_type": "bearer", "user_id": user_id, "email": body.email}
+    token = create_access_token(user_id, body.email, plan="free")
+    _set_auth_cookie(response, token)
+    return {"access_token": token, "token_type": "bearer", "user_id": user_id, "email": body.email, "plan": "free"}
 
 
 @auth_router.post("/login")
-def login(body: LoginRequest):
+def login(body: LoginRequest, response: Response):
     with _get_db() as conn:
         user = conn.execute(
             "SELECT * FROM users WHERE email = ?", (body.email,)
@@ -266,14 +352,24 @@ def login(body: LoginRequest):
             detail="Invalid email or password",
         )
 
-    token = create_access_token(user["id"], user["email"])
+    plan = str(user["plan"] or "free").lower()
+    token = create_access_token(user["id"], user["email"], plan=plan)
+    _set_auth_cookie(response, token)
     return {
         "access_token": token,
         "token_type": "bearer",
         "user_id": user["id"],
         "email": user["email"],
+        "plan": plan,
         "subscription_status": user["subscription_status"],
     }
+
+
+@auth_router.post("/logout")
+def logout(response: Response):
+    """Clear the httpOnly session cookie."""
+    response.delete_cookie(key="sq_token", path="/", httponly=True, secure=_IS_PROD, samesite="lax")
+    return {"ok": True}
 
 
 @auth_router.get("/me")
@@ -281,6 +377,7 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
     return {
         "id": user["id"],
         "email": user["email"],
+        "plan": str(user["plan"] or "free"),
         "subscription_status": user["subscription_status"],
         "stripe_customer_id": user["stripe_customer_id"],
         "created_at": user["created_at"],
@@ -327,13 +424,14 @@ def create_checkout_session(
             )
             conn.commit()
 
+    success_url, cancel_url = body.validated_urls()
     session = _stripe.checkout.Session.create(
         customer=customer_id,
         payment_method_types=["card"],
         mode="subscription",
         line_items=[{"price": price_id, "quantity": 1}],
-        success_url=body.success_url,
-        cancel_url=body.cancel_url,
+        success_url=success_url,
+        cancel_url=cancel_url,
         metadata={"user_id": str(user["id"])},
     )
     return {"checkout_url": session["url"], "session_id": session["id"]}
@@ -361,10 +459,24 @@ _SUB_STATUS_MAP = {
 }
 
 
+def _plan_from_stripe_sub(stripe_sub) -> str:
+    """Extract our plan string from a Stripe subscription object."""
+    try:
+        items = stripe_sub.get("items", {}).get("data", [])
+        for item in items:
+            price_id = item.get("price", {}).get("id", "")
+            if price_id in _PRICE_TO_PLAN:
+                return _PRICE_TO_PLAN[price_id]
+    except Exception:
+        pass
+    return "free"
+
+
 def _update_subscription_from_stripe(stripe_sub) -> None:
-    """Persist subscription status change to the users table."""
+    """Persist subscription status and plan change to the users table."""
     raw_status = stripe_sub.get("status", "inactive")
     new_status = _SUB_STATUS_MAP.get(raw_status, "inactive")
+    new_plan = _plan_from_stripe_sub(stripe_sub) if new_status == "active" else "free"
 
     # Prefer metadata user_id, fall back to customer lookup
     user_id: Optional[int] = None
@@ -391,11 +503,14 @@ def _update_subscription_from_stripe(stripe_sub) -> None:
 
     with _get_db() as conn:
         conn.execute(
-            "UPDATE users SET subscription_status = ? WHERE id = ?",
-            (new_status, user_id),
+            "UPDATE users SET subscription_status = ?, plan = ? WHERE id = ?",
+            (new_status, new_plan, user_id),
         )
         conn.commit()
-    log.info("subscription %s → status=%s for user_id=%s", stripe_sub.get("id"), new_status, user_id)
+    log.info(
+        "subscription %s → status=%s plan=%s for user_id=%s",
+        stripe_sub.get("id"), new_status, new_plan, user_id,
+    )
 
 
 @stripe_router.post("/webhook")

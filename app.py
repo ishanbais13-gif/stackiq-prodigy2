@@ -10,7 +10,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi import FastAPI, HTTPException, Query, Body
+from fastapi import FastAPI, HTTPException, Query, Body, Depends, Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone, timedelta
@@ -30,10 +31,31 @@ import csv
 import io
 import xml.etree.ElementTree as ET
 import sqlite3
+import collections
 import alpaca_trade_api as tradeapi
 from dotenv import load_dotenv
 import engine as ta
 from indicators import technical_analysis_from_candles
+
+
+# ---------------------------------------------------------------------------
+# Simple in-memory rate limiter (sliding window)
+# ---------------------------------------------------------------------------
+_rate_store: Dict[str, collections.deque] = {}
+_rate_lock = threading.Lock()
+
+
+def _rate_limit(key: str, max_calls: int, window_s: float) -> bool:
+    """Return True if the call is allowed, False if rate-limited."""
+    now = time.monotonic()
+    with _rate_lock:
+        dq = _rate_store.setdefault(key, collections.deque())
+        while dq and dq[0] < now - window_s:
+            dq.popleft()
+        if len(dq) >= max_calls:
+            return False
+        dq.append(now)
+        return True
 
 try:
     from alpaca.trading.client import TradingClient as _AlpacaPyTradingClient  # type: ignore
@@ -2397,12 +2419,31 @@ def _no_nulls(obj: Any) -> Any:
 app = FastAPI(title="StackIQ Prodigy")
 
 try:
-    from auth import auth_router, stripe_router
+    from auth import (
+        auth_router, stripe_router,
+        get_current_user as _get_current_user,
+        require_active_subscription as _require_subscription,
+        require_plan as _require_plan,
+    )
     app.include_router(auth_router)
     app.include_router(stripe_router)
+    _dep_starter = Depends(_require_plan("starter"))
+    _dep_pro     = Depends(_require_plan("pro"))
+    _dep_elite   = Depends(_require_plan("elite"))
 except Exception as _auth_err:
     import logging as _lg
     _lg.getLogger("stackiq").warning(f"Auth module not loaded: {_auth_err}")
+    def _get_current_user():  # type: ignore[misc]
+        raise HTTPException(status_code=503, detail="Auth module not available")
+    def _require_subscription():  # type: ignore[misc]
+        raise HTTPException(status_code=503, detail="Auth module not available")
+    def _require_plan(_min_plan: str):  # type: ignore[misc]
+        def _dep():
+            raise HTTPException(status_code=503, detail="Auth module not available")
+        return _dep
+    _dep_starter = Depends(_require_plan("starter"))
+    _dep_pro     = Depends(_require_plan("pro"))
+    _dep_elite   = Depends(_require_plan("elite"))
 
 
 _SEED_UNIVERSE = [
@@ -2514,17 +2555,47 @@ def _startup_init():
     except Exception as _be:
         log.warning(f"brain init error: {_be}")
 
+_ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "")
+_CORS_ORIGINS: list[str] = (
+    [o.strip() for o in _ALLOWED_ORIGINS_RAW.split(",") if o.strip()]
+    if _ALLOWED_ORIGINS_RAW
+    else ["http://localhost:3000", "http://localhost:5173", "http://localhost:8000"]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"] ,
-    allow_headers=["*"] ,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 
-@app.get("/debug/openai", include_in_schema=True)
-def debug_openai():
+class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Inject standard security response headers on every reply."""
+    async def dispatch(self, request: Request, call_next):
+        resp = await call_next(request)
+        resp.headers.setdefault("X-Frame-Options", "DENY")
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+        resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        resp.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; object-src 'none'; frame-ancestors 'none'",
+        )
+        resp.headers.setdefault("Permissions-Policy", "geolocation=(), camera=(), microphone=()")
+        return resp
+
+
+app.add_middleware(_SecurityHeadersMiddleware)
+
+
+def _require_debug():
+    if not os.getenv("DEBUG"):
+        raise HTTPException(status_code=403, detail="Debug endpoints are disabled in production")
+
+
+@app.get("/debug/openai", include_in_schema=False)
+def debug_openai(_: None = Depends(_require_debug)):
     key = os.getenv("OPENAI_API_KEY") or ""
     present = bool(key)
 
@@ -2561,8 +2632,8 @@ def debug_openai():
     })
 
 
-@app.get("/debug/llm", include_in_schema=True)
-def debug_llm():
+@app.get("/debug/llm", include_in_schema=False)
+def debug_llm(_: None = Depends(_require_debug)):
     # Minimal live call to verify that the key + model access + billing are working.
     if not os.getenv("OPENAI_API_KEY"):
         return {"success": False, "reason": "key_missing"}
@@ -5050,8 +5121,8 @@ def technical(symbol: str):
     }
 
 
-@app.get("/debug/candles/{symbol}")
-def debug_candles(symbol: str):
+@app.get("/debug/candles/{symbol}", include_in_schema=False)
+def debug_candles(symbol: str, _: None = Depends(_require_debug)):
     sym = (symbol or "").strip().upper()
     df = None
     try:
@@ -5075,8 +5146,8 @@ def debug_candles(symbol: str):
     return {"symbol": sym, "count": int(n), "sample": sample}
 
 
-@app.get("/debug/indicators/{symbol}")
-def debug_indicators(symbol: str):
+@app.get("/debug/indicators/{symbol}", include_in_schema=False)
+def debug_indicators(symbol: str, _: None = Depends(_require_debug)):
     sym = (symbol or "").strip().upper()
     df = None
     try:
@@ -8903,6 +8974,7 @@ async def best_pick_v2(
     refresh: bool = False,
     allow_llm_news: bool = True,
     full_universe: bool = False,
+    _user=_dep_starter,
 ):
     _ = refresh
     _ = full_universe
@@ -9844,7 +9916,7 @@ def watchlist():
 
 
 @app.post("/watchlist/add", include_in_schema=True)
-def watchlist_add(payload: Dict[str, Any] = Body(...)):
+def watchlist_add(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
     sym_raw = str((payload or {}).get("symbol") or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
@@ -9869,7 +9941,7 @@ def watchlist_add(payload: Dict[str, Any] = Body(...)):
 
 
 @app.delete("/watchlist/remove/{symbol}", include_in_schema=True)
-def watchlist_remove(symbol: str):
+def watchlist_remove(symbol: str, _user=_dep_starter):
     sym_raw = str(symbol or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
@@ -9890,7 +9962,7 @@ def watchlist_remove(symbol: str):
 
 
 @app.post("/portfolio/add", include_in_schema=True)
-def portfolio_add(payload: Dict[str, Any] = Body(...)):
+def portfolio_add(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
     sym_raw = str((payload or {}).get("symbol") or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
@@ -9929,7 +10001,7 @@ def portfolio_add(payload: Dict[str, Any] = Body(...)):
 
 
 @app.delete("/portfolio/remove/{symbol}", include_in_schema=True)
-def portfolio_remove(symbol: str):
+def portfolio_remove(symbol: str, _user=_dep_pro):
     sym_raw = str(symbol or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
@@ -9950,7 +10022,7 @@ def portfolio_remove(symbol: str):
 
 
 @app.post("/portfolio/save_pick")
-def portfolio_save_pick(payload: Dict[str, Any] = Body(...)):
+def portfolio_save_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
     sym_raw = str((payload or {}).get("symbol") or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     if not bool(sd.get("ok")):
@@ -10030,7 +10102,7 @@ def portfolio_save_pick(payload: Dict[str, Any] = Body(...)):
 
 
 @app.post("/portfolio/close_pick")
-def portfolio_close_pick(payload: Dict[str, Any] = Body(...)):
+def portfolio_close_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
     pid = str((payload or {}).get("id") or "").strip()
     if not pid:
         raise HTTPException(status_code=400, detail="MISSING_ID")
@@ -10176,6 +10248,7 @@ def performance_picks():
 async def scan_pre_movers(
     refresh: bool = Query(False, description="Force a fresh scan instead of returning cached results"),
     max_results: int = Query(20, ge=1, le=50),
+    _user=_dep_starter,
 ):
     """Return top small-cap pre-mover candidates ($1-$20).
 
@@ -10223,7 +10296,7 @@ async def scan_pre_movers(
         }
     except Exception as e:
         log.exception(f"scan_pre_movers error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="SCAN_FAILED")
 
 
 @app.get("/scan/brain_stats", include_in_schema=True)
@@ -10239,4 +10312,222 @@ async def scan_brain_stats():
         return get_brain_stats()
     except Exception as e:
         log.warning(f"brain_stats error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="BRAIN_STATS_FAILED")
+
+
+@app.post("/scan/train_nn", include_in_schema=True)
+async def scan_train_nn(
+    force: bool = Query(False, description="Train even if fewer than 20 resolved picks"),
+    _user=_dep_starter,
+):
+    """
+    Trigger a neural network training run from resolved picks in perf_tracker.db.
+    Runs in a background thread — returns immediately with a status message.
+    The trained model is saved to models/nn_scorer.npz and applied to all
+    future scans automatically.
+    """
+    import threading as _threading
+
+    def _train():
+        try:
+            from ml.trainer import run_training
+            result = run_training(force=force)
+            log.info(f"train_nn endpoint: {result}")
+        except Exception as e:
+            log.warning(f"train_nn endpoint error: {e}")
+
+    t = _threading.Thread(target=_train, daemon=True)
+    t.start()
+    return {"status": "training_started", "force": force,
+            "message": "NN training running in background. Check /scan/nn_status for progress."}
+
+
+@app.get("/scan/nn_status", include_in_schema=True)
+async def scan_nn_status():
+    """
+    Returns the status of the neural network scorer:
+    - Whether a trained model exists
+    - How old it is
+    - Win probability for a test inference (using neutral inputs)
+    """
+    try:
+        from ml.predictor import model_info, predict_win_prob
+        info = model_info()
+        # Quick sanity-check inference with neutral inputs
+        if info.get("ready"):
+            test_closes = [100.0] * 60
+            test_prob = predict_win_prob(test_closes, test_closes, test_closes, [1_000_000] * 60)
+            info["test_inference_prob"] = round(test_prob, 3)
+        return info
+    except Exception as e:
+        log.warning(f"nn_status error: {e}")
+        return {"ready": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Chatbot endpoint
+# ---------------------------------------------------------------------------
+
+def _chat_build_context() -> str:
+    """Pull live system context to include in the chatbot system prompt."""
+    lines = []
+
+    # Recent picks from perf_tracker
+    try:
+        import sqlite3 as _sq
+        _pt = os.getenv("PERF_TRACKER_DB", os.path.join(os.path.dirname(__file__), "perf_tracker.db"))
+        con = _sq.connect(_pt, timeout=5)
+        con.row_factory = _sq.Row
+        rows = con.execute(
+            "SELECT symbol, status, edge_signals, edge_score, final_score, "
+            "max_return_pct, recorded_at FROM picks ORDER BY recorded_at DESC LIMIT 8"
+        ).fetchall()
+        con.close()
+        if rows:
+            lines.append("RECENT PICKS (last 8):")
+            for r in rows:
+                sig = r["edge_signals"] or "[]"
+                ret = f"{r['max_return_pct']:+.1f}%" if r["max_return_pct"] is not None else "pending"
+                lines.append(
+                    f"  {r['symbol']:6s} status={r['status']:15s} score={r['final_score'] or r['edge_score'] or 0:.1f}/10 "
+                    f"return={ret} signals={sig}"
+                )
+    except Exception:
+        pass
+
+    # Win/loss summary
+    try:
+        con2 = _sq.connect(_pt, timeout=5)
+        row2 = con2.execute(
+            "SELECT COUNT(*) as total, "
+            "SUM(CASE WHEN status IN ('won','won_drift') THEN 1 ELSE 0 END) as wins, "
+            "SUM(CASE WHEN status IN ('lost','lost_drift') THEN 1 ELSE 0 END) as losses, "
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending "
+            "FROM picks"
+        ).fetchone()
+        con2.close()
+        if row2:
+            wr = int(row2["wins"]) / max(int(row2["wins"]) + int(row2["losses"]), 1) * 100
+            lines.append(
+                f"\nPERFORMANCE SUMMARY: {row2['total']} total | "
+                f"{row2['wins']} wins | {row2['losses']} losses | {row2['pending']} pending | "
+                f"win rate {wr:.0f}%"
+            )
+    except Exception:
+        pass
+
+    # NN status
+    try:
+        from ml.predictor import model_info
+        info = model_info()
+        if info.get("ready"):
+            lines.append(f"\nNEURAL NETWORK: trained {info.get('trained_h_ago', '?')}h ago, active")
+        else:
+            lines.append("\nNEURAL NETWORK: not yet trained")
+    except Exception:
+        pass
+
+    # Saved portfolio picks
+    try:
+        conn3 = _db_connect()
+        cur3 = conn3.cursor()
+        cur3.execute("SELECT symbol, side, status, score FROM saved_picks ORDER BY opened_at DESC LIMIT 5")
+        saved = cur3.fetchall() or []
+        conn3.close()
+        if saved:
+            lines.append("\nPORTFOLIO PICKS:")
+            for s in saved:
+                lines.append(f"  {s['symbol']} {s['side']} status={s['status']} score={s['score']}")
+    except Exception:
+        pass
+
+    return "\n".join(lines) if lines else "No live context available."
+
+
+_CHAT_SYSTEM = """You are StackIQ's AI trading assistant — a sharp, concise market analyst built into the StackIQ scanner platform.
+
+You have real-time access to the system's live data shown below. Use it to give concrete, specific answers.
+
+Your personality:
+- Direct and confident, like a good trading desk analyst
+- Short answers unless asked to elaborate — traders don't want walls of text
+- Always ground your answers in the data when it's relevant
+- If asked about a specific stock not in the context, say you don't have live data but can discuss it generally
+- Never give financial advice — frame everything as analysis and education
+
+You know about:
+- The system's recent picks and their win/loss outcomes
+- The neural network scorer and what signals it's learning from
+- Market regime detection (BULL/BEAR/CHOPPY)
+- Technical signals: MOMENTUM_EXPANSION, BREAKOUT_STRUCTURE, RS_LEADER, VOLATILITY_EXPANSION, SUPPORT_RECLAIM
+- How the scoring system works (0-10 scale, edge signals, NN probability blend)
+
+Live system context:
+{context}
+"""
+
+
+class _ChatMessage(BaseModel):
+    role: str   # "user" | "assistant"
+    content: str
+
+
+class _ChatRequest(BaseModel):
+    message: str
+    history: List[_ChatMessage] = []
+
+
+@app.post("/api/chat", include_in_schema=True)
+async def api_chat(req: _ChatRequest, request: Request, _user=_dep_starter):
+    """
+    Chatbot endpoint.  Accepts a user message + conversation history,
+    returns the AI assistant's reply.  Backed by GPT-4o-mini with live
+    system context (recent picks, performance, NN status).
+    """
+    # Rate limit: 20 messages per minute per IP
+    client_ip = (request.headers.get("X-Forwarded-For") or request.client.host or "unknown").split(",")[0].strip()
+    if not _rate_limit(f"chat:{client_ip}", max_calls=20, window_s=60):
+        raise HTTPException(status_code=429, detail="RATE_LIMIT_EXCEEDED")
+
+    try:
+        from llm_client import call_llm_text, llm_available
+
+        if not llm_available():
+            return {"reply": "The AI assistant isn't available right now (LLM not configured). "
+                             "Check that OPENAI_API_KEY is set.", "ok": False}
+
+        context = await asyncio.to_thread(_chat_build_context)
+        system_prompt = _CHAT_SYSTEM.format(context=context)
+
+        history_text = ""
+        for msg in (req.history or [])[-10:]:
+            role = "You" if msg.role == "assistant" else "User"
+            history_text += f"{role}: {msg.content}\n"
+
+        user_prompt = history_text + f"User: {req.message.strip()}\nYou:"
+
+        reply = await asyncio.to_thread(
+            call_llm_text,
+            system=system_prompt,
+            user=user_prompt,
+            max_output_tokens=512,
+            timeout_s=20.0,
+        )
+
+        return {"reply": reply.strip(), "ok": True}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"api_chat error: {e}")
+        return {"reply": "Sorry, I hit an internal error. Please try again.", "ok": False}
+
+
+@app.get("/chat", include_in_schema=False)
+async def serve_chatbot():
+    """Serve the standalone chatbot page."""
+    from fastapi.responses import FileResponse as _FR
+    widget = os.path.join(os.path.dirname(__file__), "chatbot_widget.html")
+    if os.path.isfile(widget):
+        return _FR(widget, media_type="text/html")
+    raise HTTPException(status_code=404, detail="chatbot_widget.html not found")
