@@ -723,6 +723,18 @@ def _upsert_oauth_user(email: str, first_name: str = "", last_name: str = "") ->
     with _get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
         if user:
+            # Backfill name if we now have it but didn't before
+            try:
+                has_name = bool(user["first_name"])
+            except (IndexError, KeyError):
+                has_name = False
+            if not has_name and first_name:
+                conn.execute(
+                    "UPDATE users SET first_name = ?, last_name = ? WHERE id = ?",
+                    (first_name, last_name or None, user["id"]),
+                )
+                conn.commit()
+                user = conn.execute("SELECT * FROM users WHERE id = ?", (user["id"],)).fetchone()
             return user, False
         now = datetime.now(timezone.utc).isoformat()
         fake_pw = hash_password(secrets.token_urlsafe(32))
