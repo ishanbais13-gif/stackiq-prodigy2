@@ -29,7 +29,11 @@ from __future__ import annotations
 import os
 import sqlite3
 import logging
+import smtplib
+import threading
 from datetime import datetime, timedelta, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
@@ -156,6 +160,153 @@ def _user_plan(user: sqlite3.Row) -> str:
 
 # Run migration immediately on import so the plan column always exists.
 init_auth_db()
+
+# ---------------------------------------------------------------------------
+# Email — welcome message sent in a background thread after signup
+# ---------------------------------------------------------------------------
+
+_SMTP_HOST     = os.getenv("SMTP_HOST", "")
+_SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+_SMTP_USER     = os.getenv("SMTP_USERNAME", "")
+_SMTP_PASS     = os.getenv("SMTP_PASSWORD", "")
+_SMTP_TLS      = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+_FROM_EMAIL    = os.getenv("ALERT_FROM_EMAIL", "hello@useaurexis.com")
+_SENDGRID_KEY  = os.getenv("SENDGRID_API_KEY", "")
+_FRONTEND_URL  = os.getenv("FRONTEND_ORIGIN", "https://useaurexis.com")
+
+
+def _welcome_html(first_name: str) -> str:
+    greeting = f"Hey {first_name}," if first_name else "Hey there,"
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Welcome to Aurexis</title></head>
+<body style="margin:0;padding:0;background:#060a10;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#060a10;padding:48px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+
+        <!-- Logo -->
+        <tr><td style="padding:0 0 32px;text-align:center;">
+          <table cellpadding="0" cellspacing="0" style="display:inline-table;">
+            <tr>
+              <td style="width:36px;height:36px;background:#00b450;border-radius:10px;text-align:center;vertical-align:middle;">
+                <span style="font-size:18px;font-weight:900;color:#fff;line-height:36px;">A</span>
+              </td>
+              <td style="padding-left:10px;font-size:15px;font-weight:900;letter-spacing:0.18em;color:rgba(255,255,255,0.85);vertical-align:middle;">AUREXIS</td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <!-- Card -->
+        <tr><td style="background:linear-gradient(160deg,#0a1018,#0d1420);border:1px solid rgba(255,255,255,0.07);border-radius:20px;padding:48px 48px 40px;">
+
+          <p style="margin:0 0 8px;font-size:13px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#00b450;">Welcome to Aurexis</p>
+          <h1 style="margin:0 0 20px;font-size:30px;font-weight:800;color:#fff;line-height:1.15;letter-spacing:-0.02em;">{greeting}<br>Your edge starts now.</h1>
+          <p style="margin:0 0 32px;font-size:16px;color:rgba(255,255,255,0.50);line-height:1.75;">
+            Every morning before the open, Aurexis scans 1,200+ stocks and surfaces the single highest-conviction trade setup of the day — with entry, stop-loss, and Fibonacci targets calculated for you.
+          </p>
+
+          <!-- Stats row -->
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:36px;">
+            <tr>
+              <td style="text-align:center;padding:18px;background:rgba(0,180,80,0.07);border:1px solid rgba(0,180,80,0.14);border-radius:12px;">
+                <div style="font-size:28px;font-weight:900;color:#00b450;letter-spacing:-0.03em;">1,200+</div>
+                <div style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.30);letter-spacing:0.08em;text-transform:uppercase;margin-top:4px;">Stocks scanned</div>
+              </td>
+              <td width="12"></td>
+              <td style="text-align:center;padding:18px;background:rgba(0,180,80,0.07);border:1px solid rgba(0,180,80,0.14);border-radius:12px;">
+                <div style="font-size:28px;font-weight:900;color:#00b450;letter-spacing:-0.03em;">1</div>
+                <div style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.30);letter-spacing:0.08em;text-transform:uppercase;margin-top:4px;">Pick per day</div>
+              </td>
+              <td width="12"></td>
+              <td style="text-align:center;padding:18px;background:rgba(0,180,80,0.07);border:1px solid rgba(0,180,80,0.14);border-radius:12px;">
+                <div style="font-size:28px;font-weight:900;color:#00b450;letter-spacing:-0.03em;">+6.8%</div>
+                <div style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.30);letter-spacing:0.08em;text-transform:uppercase;margin-top:4px;">Avg winner</div>
+              </td>
+            </tr>
+          </table>
+
+          <!-- CTA -->
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr><td align="center">
+              <a href="{_FRONTEND_URL}/app" style="display:inline-block;padding:16px 40px;background:linear-gradient(135deg,#00c853,#009c3b);border-radius:12px;font-size:15px;font-weight:700;color:#fff;text-decoration:none;letter-spacing:0.3px;box-shadow:0 4px 24px rgba(0,180,80,0.35);">
+                Open Aurexis →
+              </a>
+            </td></tr>
+          </table>
+
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="padding:28px 0 0;text-align:center;">
+          <p style="margin:0;font-size:12px;color:rgba(255,255,255,0.18);line-height:1.6;">
+            You're receiving this because you created an Aurexis account.<br>
+            <a href="{_FRONTEND_URL}/privacy" style="color:rgba(255,255,255,0.25);text-decoration:underline;">Privacy Policy</a>
+          </p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+
+
+def _send_welcome_email(to_email: str, first_name: str = "") -> None:
+    """Fire-and-forget welcome email. Called in a background thread."""
+    subject = "Welcome to Aurexis — your edge starts now"
+    html = _welcome_html(first_name)
+    plain = f"Hey {first_name or 'there'},\n\nWelcome to Aurexis. Every morning we scan 1,200+ stocks and surface one high-conviction trade setup with entry, stop, and targets.\n\nOpen the app: {_FRONTEND_URL}/app\n\nAurexis"
+
+    # Try SendGrid first
+    if _SENDGRID_KEY:
+        try:
+            import urllib.request as _ur, json as _json
+            payload = _json.dumps({
+                "personalizations": [{"to": [{"email": to_email}]}],
+                "from": {"email": _FROM_EMAIL, "name": "Aurexis"},
+                "subject": subject,
+                "content": [
+                    {"type": "text/plain", "value": plain},
+                    {"type": "text/html",  "value": html},
+                ],
+            }).encode()
+            req = _ur.Request(
+                "https://api.sendgrid.com/v3/mail/send",
+                data=payload,
+                headers={"Authorization": f"Bearer {_SENDGRID_KEY}", "Content-Type": "application/json"},
+                method="POST",
+            )
+            _ur.urlopen(req, timeout=10)
+            log.info("Welcome email sent via SendGrid to %s", to_email)
+            return
+        except Exception as exc:
+            log.warning("SendGrid welcome email failed: %s", exc)
+
+    # Fall back to SMTP
+    if not _SMTP_HOST or not _SMTP_USER or not _SMTP_PASS:
+        log.info("No email credentials configured — skipping welcome email for %s", to_email)
+        return
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"]    = f"Aurexis <{_FROM_EMAIL}>"
+        msg["To"]      = to_email
+        msg.attach(MIMEText(plain, "plain"))
+        msg.attach(MIMEText(html,  "html"))
+        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT) as s:
+            if _SMTP_TLS:
+                s.starttls()
+            s.login(_SMTP_USER, _SMTP_PASS)
+            s.sendmail(_FROM_EMAIL, to_email, msg.as_string())
+        log.info("Welcome email sent via SMTP to %s", to_email)
+    except Exception as exc:
+        log.warning("SMTP welcome email failed: %s", exc)
+
+
+def send_welcome_email_bg(to_email: str, first_name: str = "") -> None:
+    """Send welcome email in a background thread — never blocks the request."""
+    threading.Thread(target=_send_welcome_email, args=(to_email, first_name), daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +510,7 @@ def signup(body: SignupRequest, response: Response):
 
     token = create_access_token(user_id, body.email, plan="free")
     _set_auth_cookie(response, token)
+    send_welcome_email_bg(body.email, first)
     return {"access_token": token, "token_type": "bearer", "user_id": user_id, "email": body.email, "plan": "free", "first_name": first}
 
 
@@ -808,6 +960,8 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
         return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=google_failed", status_code=302)
 
     user, is_new = _upsert_oauth_user(email, first_name=first_name, last_name=last_name)
+    if is_new:
+        send_welcome_email_bg(email, first_name)
     return _redirect_to_app(user, is_new=is_new)
 
 
