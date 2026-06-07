@@ -2532,9 +2532,8 @@ def _startup_init():
     except Exception:
         pass
     try:
-        # Fire bg scan fast (30s) so fresh 3000-symbol universe is ready before
-        # first user request. Previously 180s, which meant seed-only for 3 min.
-        _t = threading.Timer(30, _bg_v2_scan_loop)
+        # Delay scan so worker is fully up before loading 3000 symbols.
+        _t = threading.Timer(180, _bg_v2_scan_loop)
         _t.daemon = True
         _t.start()
     except Exception:
