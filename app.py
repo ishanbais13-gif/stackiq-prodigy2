@@ -2555,6 +2555,26 @@ def _startup_init():
         _t3.start()
     except Exception as _be:
         log.warning(f"brain init error: {_be}")
+    # Auto-train NN on startup if we have enough resolved picks and model is stale/missing
+    def _startup_nn_train():
+        try:
+            from ml.predictor import model_is_ready
+            import os as _os
+            from ml.nn_model import _MODEL_PATH
+            model_age_h = (_os.path.getmtime(_MODEL_PATH) if _os.path.isfile(_MODEL_PATH) else 0)
+            model_stale = (time.time() - model_age_h) > 12 * 3600  # retrain if >12h old
+            if not model_is_ready() or model_stale:
+                from ml.trainer import run_training
+                result = run_training(force=False)
+                log.info(f"startup nn_train: {result}")
+        except Exception as _te:
+            log.warning(f"startup nn_train error: {_te}")
+    try:
+        _t_nn = threading.Timer(120, _startup_nn_train)
+        _t_nn.daemon = True
+        _t_nn.start()
+    except Exception:
+        pass
 
 _ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "")
 _CORS_ORIGINS: list[str] = (

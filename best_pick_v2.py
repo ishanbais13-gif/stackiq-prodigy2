@@ -605,6 +605,7 @@ class _Candidate:
     edge_signals: List[str] = None         # MOMENTUM_EXPANSION | BREAKOUT_STRUCTURE | RS_LEADER | VOLATILITY_EXPANSION
     edge_score_0_10: float = 0.0           # 0–10 from signal weights
     is_momentum_bypass: bool = False       # True when changePercent > 15% — gets 1.3x final_score boost in ranking
+    nn_win_prob: Optional[float] = None    # P(win) from the trained neural network [0, 1]; None = model not ready
 
 
 def _detect_edge_signals(c: "_Candidate", spy_roc5: Optional[float] = None) -> List[str]:
@@ -2546,6 +2547,20 @@ async def scan_best_pick_v2(
             c.edge_signals = []
             c.edge_score_0_10 = 0.0
 
+        # Edge signal boost to final_score in all regimes (0.45/signal in BULL/NEUTRAL, 0.8/signal in CHOPPY).
+        # Strong edge signals confirm momentum/breakout structure that the score blend may not fully capture.
+        try:
+            _es = float(c.edge_score_0_10 or 0.0)
+            if _es > 0 and regime_str != "CHOPPY":
+                _n_sigs = sum(1 for sig in ["MOMENTUM_EXPANSION", "BREAKOUT_STRUCTURE", "RS_LEADER", "VOLATILITY_EXPANSION"] if sig in (c.edge_signals or []))
+                _edge_boost = _n_sigs * 0.45
+                c.final_score_0_10 = float(round(_clamp(float(c.final_score_0_10 or 1.0) + _edge_boost, 1.0, 10.0), 1))
+                # Strong edge setup (3+ signals) also lifts premover floor so the HIGH_CONVICTION gate can clear
+                if _n_sigs >= 3 and float(c.premover_score_0_10 or 0.0) < 6.5:
+                    c.premover_score_0_10 = float(round(_clamp(max(float(c.premover_score_0_10 or 5.0), 6.5), 1.0, 10.0), 1))
+        except Exception:
+            pass
+
         # CHOPPY-specific signals: RSI_OVERSOLD_BOUNCE, SUPPORT_RECLAIM, SECTOR_ROTATION
         # Each fired signal adds 0.8 to final_score and is appended to edge_signals.
         if regime_str == "CHOPPY":
@@ -2569,6 +2584,23 @@ async def scan_best_pick_v2(
                 + 0.35 * (float(c.premover_score_0_10) - _pm_center)  # centered: threshold=neutral, >threshold=boost, <threshold=drag
                 - float(c.overextended_penalty),
                 1.0, 10.0), 1))
+        except Exception:
+            pass
+
+        # Neural network win-probability adjustment
+        # The NN predicts P(win) from bar patterns + current subscores.
+        # We blend ±0.75 pts into final_score: confident win → +0.75, confident loss → -0.75.
+        # When the model isn't trained yet this is a no-op (nn_win_prob stays None).
+        try:
+            from ml.predictor import predict_win_prob_from_candidate, model_is_ready
+            if model_is_ready():
+                _nn_p = predict_win_prob_from_candidate(c)
+                c.nn_win_prob = round(float(_nn_p), 3)
+                # centre at 0.5; max ±1.5 pts adjustment (was ±0.75)
+                _nn_delta = (_nn_p - 0.5) * 3.0
+                c.final_score_0_10 = float(round(_clamp(
+                    float(c.final_score_0_10 or 1.0) + _nn_delta,
+                    1.0, 10.0), 1))
         except Exception:
             pass
 
@@ -2880,10 +2912,10 @@ async def scan_best_pick_v2(
             _no_trade_reason = "No high-conviction setups found: " + "; ".join(_parts)
             best.trade_decision = "NO_TRADE"
             best.is_trade = False
-        elif _pm >= 7.0 and _fs >= 7.5:
+        elif _pm >= 6.5 and _fs >= 7.0:
             best.trade_decision = "HIGH_CONVICTION"
             best.is_trade = True
-        elif _pm >= 6.0 and _fs >= 6.5:
+        elif _pm >= 5.5 and _fs >= 6.0:
             best.trade_decision = "LOW_CONVICTION"
             best.is_trade = False
         else:
@@ -3100,6 +3132,8 @@ async def scan_best_pick_v2(
         # Edge detection (v5)
         "edge_signals": list(best.edge_signals or []),
         "edge_score_0_10": float(best.edge_score_0_10 or 0.0),
+        # Neural network win probability (None until model is trained)
+        "nn_win_prob": best.nn_win_prob,
         # Elite trading intelligence fields (v3)
         "market_regime": str(best.market_regime or regime_str),
         "trade_quality": str(best.trade_quality or "B"),
