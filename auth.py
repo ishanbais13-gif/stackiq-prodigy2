@@ -619,3 +619,218 @@ class JWTMiddleware(BaseHTTPMiddleware):
             )
 
         return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# Google + Apple OAuth
+# ---------------------------------------------------------------------------
+
+import hashlib
+import hmac
+import secrets
+import urllib.parse
+
+from fastapi.responses import RedirectResponse
+
+GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+APPLE_CLIENT_ID      = os.getenv("APPLE_CLIENT_ID", "")   # Service ID, e.g. com.aurexis.web
+APPLE_TEAM_ID        = os.getenv("APPLE_TEAM_ID", "")
+APPLE_KEY_ID         = os.getenv("APPLE_KEY_ID", "")
+APPLE_PRIVATE_KEY    = os.getenv("APPLE_PRIVATE_KEY", "").replace("\\n", "\n")
+APP_BASE_URL         = os.getenv("APP_BASE_URL", "https://aurexis-backend-production.up.railway.app").rstrip("/")
+FRONTEND_ORIGIN      = os.getenv("FRONTEND_ORIGIN", "https://useaurexis.com").rstrip("/")
+
+_GOOGLE_AUTH_URL     = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_URL    = "https://oauth2.googleapis.com/token"
+_GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+_APPLE_AUTH_URL      = "https://appleid.apple.com/auth/authorize"
+_APPLE_TOKEN_URL     = "https://appleid.apple.com/auth/token"
+
+oauth_router = APIRouter(prefix="/auth", tags=["oauth"])
+
+
+# ── CSRF state helpers ────────────────────────────────────────────────────
+
+def _state_make(provider: str) -> str:
+    """Signed state token: {provider}:{ts}:{hmac16}"""
+    ts = str(int(datetime.now(timezone.utc).timestamp()))
+    msg = f"{provider}:{ts}".encode()
+    sig = hmac.new(JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:16]
+    return f"{provider}:{ts}:{sig}"
+
+
+def _state_ok(state: str, provider: str, max_age: int = 600) -> bool:
+    """Return True if the signed state is valid and not expired."""
+    try:
+        parts = state.rsplit(":", 2)
+        if len(parts) != 3:
+            return False
+        p, ts, sig = parts
+        if p != provider:
+            return False
+        age = abs(datetime.now(timezone.utc).timestamp() - int(ts))
+        if age > max_age:
+            return False
+        msg = f"{provider}:{ts}".encode()
+        expected = hmac.new(JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:16]
+        return hmac.compare_digest(sig, expected)
+    except Exception:
+        return False
+
+
+# ── DB helper ────────────────────────────────────────────────────────────
+
+def _upsert_oauth_user(email: str) -> sqlite3.Row:
+    """Find or create a user by email (OAuth). New users get plan='free'."""
+    with _get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+        if user:
+            return user
+        now = datetime.now(timezone.utc).isoformat()
+        fake_pw = hash_password(secrets.token_urlsafe(32))
+        conn.execute(
+            "INSERT INTO users (email, password_hash, plan, created_at) VALUES (?, ?, 'free', ?)",
+            (email, fake_pw, now),
+        )
+        conn.commit()
+        return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+
+
+def _redirect_to_app(user: sqlite3.Row) -> RedirectResponse:
+    """Issue JWT and redirect to {FRONTEND_ORIGIN}/app?token=..."""
+    plan = str(user["plan"] or "free").lower()
+    token = create_access_token(user["id"], user["email"], plan=plan)
+    url = f"{FRONTEND_ORIGIN}/app?token={urllib.parse.quote(token)}"
+    return RedirectResponse(url=url, status_code=302)
+
+
+# ── Google ───────────────────────────────────────────────────────────────
+
+@oauth_router.get("/google/redirect")
+def google_redirect():
+    if not GOOGLE_CLIENT_ID:
+        raise HTTPException(503, "GOOGLE_CLIENT_ID not configured")
+    state = _state_make("google")
+    params = urllib.parse.urlencode({
+        "client_id":     GOOGLE_CLIENT_ID,
+        "redirect_uri":  f"{APP_BASE_URL}/auth/google/callback",
+        "response_type": "code",
+        "scope":         "openid email profile",
+        "state":         state,
+        "access_type":   "online",
+        "prompt":        "select_account",
+    })
+    return RedirectResponse(url=f"{_GOOGLE_AUTH_URL}?{params}", status_code=302)
+
+
+@oauth_router.get("/google/callback")
+def google_callback(code: str = "", state: str = "", error: str = ""):
+    if error:
+        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=google_denied", status_code=302)
+    if not _state_ok(state, "google"):
+        raise HTTPException(400, "INVALID_OAUTH_STATE")
+    try:
+        import requests as _req
+        tok = _req.post(_GOOGLE_TOKEN_URL, data={
+            "code":          code,
+            "client_id":     GOOGLE_CLIENT_ID,
+            "client_secret": GOOGLE_CLIENT_SECRET,
+            "redirect_uri":  f"{APP_BASE_URL}/auth/google/callback",
+            "grant_type":    "authorization_code",
+        }, timeout=10).json()
+        access_token = tok.get("access_token", "")
+        if not access_token:
+            raise ValueError(f"no access_token: {tok}")
+        info = _req.get(
+            _GOOGLE_USERINFO_URL,
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=10,
+        ).json()
+        email = str(info.get("email") or "").strip().lower()
+        if not email:
+            raise ValueError("no email in Google userinfo")
+    except Exception as exc:
+        log.warning("google_callback error: %s", exc)
+        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=google_failed", status_code=302)
+
+    user = _upsert_oauth_user(email)
+    return _redirect_to_app(user)
+
+
+# ── Apple ────────────────────────────────────────────────────────────────
+
+def _apple_client_secret() -> str:
+    """
+    Apple requires a JWT signed with your ES256 private key as the client_secret.
+    Valid up to 6 months. Requires APPLE_TEAM_ID, APPLE_KEY_ID, APPLE_PRIVATE_KEY.
+    """
+    now = datetime.now(timezone.utc)
+    payload = {
+        "iss": APPLE_TEAM_ID,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(days=180)).timestamp()),
+        "aud": "https://appleid.apple.com",
+        "sub": APPLE_CLIENT_ID,
+    }
+    return jwt.encode(payload, APPLE_PRIVATE_KEY, algorithm="ES256", headers={"kid": APPLE_KEY_ID})
+
+
+@oauth_router.get("/apple/redirect")
+def apple_redirect():
+    if not APPLE_CLIENT_ID:
+        raise HTTPException(503, "APPLE_CLIENT_ID not configured")
+    state = _state_make("apple")
+    params = urllib.parse.urlencode({
+        "client_id":     APPLE_CLIENT_ID,
+        "redirect_uri":  f"{APP_BASE_URL}/auth/apple/callback",
+        "response_type": "code",
+        "scope":         "name email",
+        "state":         state,
+        "response_mode": "form_post",
+    })
+    return RedirectResponse(url=f"{_APPLE_AUTH_URL}?{params}", status_code=302)
+
+
+@oauth_router.post("/apple/callback")
+async def apple_callback(request: Request):
+    """Apple sends the callback as an HTTP form POST (not GET)."""
+    form = await request.form()
+    code  = str(form.get("code", ""))
+    state = str(form.get("state", ""))
+    error = str(form.get("error", ""))
+
+    if error:
+        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=apple_denied", status_code=302)
+    if not _state_ok(state, "apple"):
+        raise HTTPException(400, "INVALID_OAUTH_STATE")
+
+    try:
+        import requests as _req
+        tok = _req.post(_APPLE_TOKEN_URL, data={
+            "client_id":     APPLE_CLIENT_ID,
+            "client_secret": _apple_client_secret(),
+            "code":          code,
+            "grant_type":    "authorization_code",
+            "redirect_uri":  f"{APP_BASE_URL}/auth/apple/callback",
+        }, timeout=10).json()
+
+        id_token = tok.get("id_token", "")
+        if not id_token:
+            raise ValueError(f"no id_token: {tok}")
+
+        # Decode claims without verifying signature —
+        # the token exchange itself (authenticated with our client_secret) proves authenticity
+        claims = jwt.get_unverified_claims(id_token)
+        email = str(claims.get("email") or "").strip().lower()
+        if not email:
+            # Apple private relay — build a stable synthetic email from the user's sub
+            sub = str(claims.get("sub") or secrets.token_hex(8))
+            email = f"{sub}@privaterelay.appleid.com"
+
+    except Exception as exc:
+        log.warning("apple_callback error: %s", exc)
+        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=apple_failed", status_code=302)
+
+    user = _upsert_oauth_user(email)
+    return _redirect_to_app(user)

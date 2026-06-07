@@ -2420,13 +2420,14 @@ app = FastAPI(title="StackIQ Prodigy")
 
 try:
     from auth import (
-        auth_router, stripe_router,
+        auth_router, stripe_router, oauth_router,
         get_current_user as _get_current_user,
         require_active_subscription as _require_subscription,
         require_plan as _require_plan,
     )
     app.include_router(auth_router)
     app.include_router(stripe_router)
+    app.include_router(oauth_router)
     _dep_starter = Depends(_require_plan("starter"))
     _dep_pro     = Depends(_require_plan("pro"))
     _dep_elite   = Depends(_require_plan("elite"))
@@ -2444,6 +2445,7 @@ except Exception as _auth_err:
     _dep_starter = Depends(_require_plan("starter"))
     _dep_pro     = Depends(_require_plan("pro"))
     _dep_elite   = Depends(_require_plan("elite"))
+    oauth_router = None  # type: ignore[assignment]
 
 
 _SEED_UNIVERSE = [
