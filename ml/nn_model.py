@@ -2,7 +2,7 @@
 ml/nn_model.py — 3-layer MLP neural network, pure numpy.
 
 Architecture:
-    Input(18) → Dense(32, ReLU) → Dense(16, ReLU) → Dense(1, Sigmoid)
+    Input(23) → Dense(32, ReLU) → Dense(16, ReLU) → Dense(1, Sigmoid)
 
 Trained with Adam optimiser + mini-batch gradient descent.
 Weights saved/loaded as a single .npz file — no framework needed.
@@ -52,10 +52,10 @@ def _sigmoid(x):
 class NNScorer:
     """
     Lightweight 3-layer binary-classification MLP.
-    Predicts P(win) for a stock pick given an 18-dim feature vector.
+    Predicts P(win) for a stock pick given a 23-dim feature vector.
     """
 
-    def __init__(self, input_dim: int = 18, h1: int = 32, h2: int = 16):
+    def __init__(self, input_dim: int = 23, h1: int = 32, h2: int = 16):
         if not _NP:
             raise RuntimeError("numpy is required for NNScorer")
 

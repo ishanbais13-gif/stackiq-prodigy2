@@ -2551,13 +2551,28 @@ async def scan_best_pick_v2(
         # Strong edge signals confirm momentum/breakout structure that the score blend may not fully capture.
         try:
             _es = float(c.edge_score_0_10 or 0.0)
+            _sigs = c.edge_signals or []
             if _es > 0 and regime_str != "CHOPPY":
-                _n_sigs = sum(1 for sig in ["MOMENTUM_EXPANSION", "BREAKOUT_STRUCTURE", "RS_LEADER", "VOLATILITY_EXPANSION"] if sig in (c.edge_signals or []))
+                _n_sigs = sum(1 for sig in ["MOMENTUM_EXPANSION", "BREAKOUT_STRUCTURE", "RS_LEADER", "VOLATILITY_EXPANSION"] if sig in _sigs)
                 _edge_boost = _n_sigs * 0.45
                 c.final_score_0_10 = float(round(_clamp(float(c.final_score_0_10 or 1.0) + _edge_boost, 1.0, 10.0), 1))
                 # Strong edge setup (3+ signals) also lifts premover floor so the HIGH_CONVICTION gate can clear
                 if _n_sigs >= 3 and float(c.premover_score_0_10 or 0.0) < 6.5:
                     c.premover_score_0_10 = float(round(_clamp(max(float(c.premover_score_0_10 or 5.0), 6.5), 1.0, 10.0), 1))
+
+            # ── GOLDEN PATTERN: MOMENTUM_EXPANSION + VOLATILITY_EXPANSION at early stage ──
+            # Data from 33 resolved picks: every instance with pm < 5.0 was a BIG WIN (NOK +17%,
+            # CLSK +14%, CLSK +14%, SE +9%, ROIV +7.9%). Every loss had pm >= 5.0.
+            # The current premover function penalises these stocks for not yet being "confirmed"
+            # pre-movers — but that's exactly why they have room to run.
+            _has_mom  = "MOMENTUM_EXPANSION"  in _sigs
+            _has_vola = "VOLATILITY_EXPANSION" in _sigs
+            _pm_now   = float(c.premover_score_0_10 or 5.0)
+            if _has_mom and _has_vola and _pm_now < 5.0:
+                # Early-stage momentum expansion: the stock is coiling before the move.
+                # Lift premover to 6.5+ and add final_score bonus to clear HIGH_CONVICTION.
+                c.premover_score_0_10 = float(round(_clamp(max(_pm_now + 2.5, 6.5), 1.0, 10.0), 1))
+                c.final_score_0_10    = float(round(_clamp(float(c.final_score_0_10 or 1.0) + 1.5, 1.0, 10.0), 1))
         except Exception:
             pass
 

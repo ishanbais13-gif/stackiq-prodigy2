@@ -19,7 +19,7 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("stackiq")
 
@@ -81,13 +81,33 @@ def _label(row: Dict[str, Any]) -> int:
     return 0
 
 
-def _extra_scores(row: Dict[str, Any]) -> Tuple[float, float, float]:
-    """Return (edge_score_0_10, momentum_score, volatility_score) from stored pick."""
+def _extra_scores(row: Dict[str, Any]) -> Dict[str, float]:
+    """Return feature kwargs extracted from stored pick row."""
+    import json
     edge  = float(row.get("edge_score")  or 5.0)
     final = float(row.get("final_score") or 5.0)
     conf  = float(row.get("confidence")  or 5.0)
-    # We stored edge_score and final_score in the pick; use them as proxies
-    return edge, final, conf
+
+    # Parse edge_signals JSON string → set of signal names
+    raw_sigs = row.get("edge_signals") or "[]"
+    try:
+        sigs = set(json.loads(raw_sigs) if isinstance(raw_sigs, str) else raw_sigs)
+    except Exception:
+        sigs = set()
+
+    # premover_score may be stored in a separate column or not at all; default 5.0
+    premover = float(row.get("premover_score") or row.get("premover") or 5.0)
+
+    return {
+        "edge_score_0_10":          edge,
+        "momentum_score":           final,
+        "volatility_score_0_10":    conf,
+        "has_momentum_expansion":   1.0 if "MOMENTUM_EXPANSION"  in sigs else 0.0,
+        "has_volatility_expansion": 1.0 if "VOLATILITY_EXPANSION" in sigs else 0.0,
+        "has_breakout_structure":   1.0 if "BREAKOUT_STRUCTURE"   in sigs else 0.0,
+        "has_rs_leader":            1.0 if "RS_LEADER"            in sigs else 0.0,
+        "premover_score_0_10":      premover,
+    }
 
 
 def run_training(force: bool = False) -> Dict[str, Any]:
@@ -126,13 +146,11 @@ def run_training(force: bool = False) -> Dict[str, Any]:
             skipped += 1
             continue
 
-        edge, momentum, vol = _extra_scores(pick)
+        feat_kwargs = _extra_scores(pick)
         try:
             vec = vector_from_bars(
                 bars["closes"], bars["highs"], bars["lows"], bars["volumes"],
-                edge_score_0_10=edge,
-                momentum_score=momentum,
-                volatility_score_0_10=vol,
+                **feat_kwargs,
             )
         except Exception as fe:
             log.warning(f"nn_trainer: feature error {sym}: {fe}")
