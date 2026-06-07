@@ -139,6 +139,18 @@ def init_auth_db() -> None:
     log.info("auth.db initialised")
 
 
+def _user_plan(user: sqlite3.Row) -> str:
+    """Safely read plan from a Row that may predate the plan column."""
+    try:
+        return str(user["plan"] or "free").lower()
+    except (IndexError, KeyError):
+        return "free"
+
+
+# Run migration immediately on import so the plan column always exists.
+init_auth_db()
+
+
 # ---------------------------------------------------------------------------
 # Password hashing
 # ---------------------------------------------------------------------------
@@ -244,7 +256,7 @@ def require_plan(min_plan: str):
             ...
     """
     def _dep(user: sqlite3.Row = Depends(get_current_user)) -> sqlite3.Row:
-        user_plan = str(user["plan"] or "free").lower()
+        user_plan = _user_plan(user)
         if PLAN_RANK.get(user_plan, 0) < PLAN_RANK.get(min_plan, 0):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -352,7 +364,7 @@ def login(body: LoginRequest, response: Response):
             detail="Invalid email or password",
         )
 
-    plan = str(user["plan"] or "free").lower()
+    plan = _user_plan(user)
     token = create_access_token(user["id"], user["email"], plan=plan)
     _set_auth_cookie(response, token)
     return {
@@ -377,7 +389,7 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
     return {
         "id": user["id"],
         "email": user["email"],
-        "plan": str(user["plan"] or "free"),
+        "plan": _user_plan(user),
         "subscription_status": user["subscription_status"],
         "stripe_customer_id": user["stripe_customer_id"],
         "created_at": user["created_at"],
@@ -699,7 +711,7 @@ def _upsert_oauth_user(email: str) -> sqlite3.Row:
 
 def _redirect_to_app(user: sqlite3.Row) -> RedirectResponse:
     """Issue JWT and redirect to {FRONTEND_ORIGIN}/app?token=..."""
-    plan = str(user["plan"] or "free").lower()
+    plan = _user_plan(user)
     token = create_access_token(user["id"], user["email"], plan=plan)
     url = f"{FRONTEND_ORIGIN}/app?token={urllib.parse.quote(token)}"
     return RedirectResponse(url=url, status_code=302)
