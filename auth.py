@@ -138,14 +138,24 @@ def init_auth_db() -> None:
         """)
         # Non-destructive migrations for existing databases
         for col, defn in [
-            ("plan",       "TEXT NOT NULL DEFAULT 'free'"),
-            ("first_name", "TEXT"),
-            ("last_name",  "TEXT"),
+            ("plan",            "TEXT NOT NULL DEFAULT 'free'"),
+            ("first_name",      "TEXT"),
+            ("last_name",       "TEXT"),
+            ("two_fa_enabled",  "INTEGER NOT NULL DEFAULT 0"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
             except Exception:
                 pass  # column already exists
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS otp_tokens (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                code       TEXT    NOT NULL,
+                expires_at TEXT    NOT NULL,
+                used       INTEGER NOT NULL DEFAULT 0
+            )
+        """)
         conn.commit()
     log.info("auth.db initialised")
 
@@ -307,6 +317,124 @@ def _send_welcome_email(to_email: str, first_name: str = "") -> None:
 def send_welcome_email_bg(to_email: str, first_name: str = "") -> None:
     """Send welcome email in a background thread — never blocks the request."""
     threading.Thread(target=_send_welcome_email, args=(to_email, first_name), daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# OTP helpers for 2FA
+# ---------------------------------------------------------------------------
+
+import random as _random
+
+_OTP_EXPIRE_MINUTES = 10
+
+
+def _generate_otp(user_id: int) -> str:
+    code = f"{_random.randint(0, 999999):06d}"
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=_OTP_EXPIRE_MINUTES)).isoformat()
+    with _get_db() as conn:
+        # Invalidate any previous unused codes for this user
+        conn.execute("UPDATE otp_tokens SET used = 1 WHERE user_id = ? AND used = 0", (user_id,))
+        conn.execute(
+            "INSERT INTO otp_tokens (user_id, code, expires_at) VALUES (?, ?, ?)",
+            (user_id, code, expires_at),
+        )
+        conn.commit()
+    return code
+
+
+def _verify_otp(user_id: int, code: str) -> bool:
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT id, expires_at FROM otp_tokens WHERE user_id = ? AND code = ? AND used = 0",
+            (user_id, code),
+        ).fetchone()
+        if not row:
+            return False
+        if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
+            return False
+        conn.execute("UPDATE otp_tokens SET used = 1 WHERE id = ?", (row["id"],))
+        conn.commit()
+    return True
+
+
+def _send_otp_email(to_email: str, code: str, first_name: str = "") -> None:
+    greeting = f"Hey {first_name}," if first_name else "Hey there,"
+    subject = f"{code} is your Aurexis verification code"
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Your Aurexis code</title></head>
+<body style="margin:0;padding:0;background:#060a10;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#060a10;padding:48px 0;">
+    <tr><td align="center">
+      <table width="480" cellpadding="0" cellspacing="0" style="max-width:480px;width:100%;">
+        <tr><td style="padding:0 0 28px;text-align:center;">
+          <table cellpadding="0" cellspacing="0" style="display:inline-table;">
+            <tr>
+              <td style="width:32px;height:32px;background:#00b450;border-radius:9px;text-align:center;vertical-align:middle;">
+                <span style="font-size:16px;font-weight:900;color:#fff;line-height:32px;">A</span>
+              </td>
+              <td style="padding-left:9px;font-size:14px;font-weight:900;letter-spacing:0.18em;color:rgba(255,255,255,0.85);vertical-align:middle;">AUREXIS</span></td>
+            </tr>
+          </table>
+        </td></tr>
+        <tr><td style="background:linear-gradient(160deg,#0a1018,#0d1420);border:1px solid rgba(255,255,255,0.07);border-radius:18px;padding:40px;">
+          <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#00b450;">Two-Factor Authentication</p>
+          <h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#fff;letter-spacing:-0.02em;">{greeting}<br>Your verification code:</h1>
+          <div style="text-align:center;margin:28px 0;">
+            <div style="display:inline-block;padding:20px 40px;background:rgba(0,180,80,0.08);border:1px solid rgba(0,180,80,0.20);border-radius:14px;">
+              <span style="font-size:42px;font-weight:900;letter-spacing:0.18em;color:#00b450;">{code}</span>
+            </div>
+          </div>
+          <p style="margin:0;font-size:14px;color:rgba(255,255,255,0.40);text-align:center;line-height:1.6;">
+            This code expires in {_OTP_EXPIRE_MINUTES} minutes.<br>If you didn't request this, you can ignore this email.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    plain = f"{greeting}\n\nYour Aurexis verification code is: {code}\n\nExpires in {_OTP_EXPIRE_MINUTES} minutes."
+
+    if _SENDGRID_KEY:
+        try:
+            import urllib.request as _ur, json as _json
+            payload = _json.dumps({
+                "personalizations": [{"to": [{"email": to_email}]}],
+                "from": {"email": _FROM_EMAIL, "name": "Aurexis"},
+                "subject": subject,
+                "content": [{"type": "text/plain", "value": plain}, {"type": "text/html", "value": html}],
+            }).encode()
+            req = _ur.Request("https://api.sendgrid.com/v3/mail/send", data=payload,
+                headers={"Authorization": f"Bearer {_SENDGRID_KEY}", "Content-Type": "application/json"}, method="POST")
+            _ur.urlopen(req, timeout=10)
+            return
+        except Exception as exc:
+            log.warning("SendGrid OTP email failed: %s", exc)
+
+    if not _SMTP_HOST or not _SMTP_USER or not _SMTP_PASS:
+        log.warning("No email credentials — cannot send OTP to %s", to_email)
+        return
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = f"Aurexis <{_FROM_EMAIL}>"
+        msg["To"] = to_email
+        msg.attach(MIMEText(plain, "plain"))
+        msg.attach(MIMEText(html, "html"))
+        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT) as s:
+            if _SMTP_TLS:
+                s.starttls()
+            s.login(_SMTP_USER, _SMTP_PASS)
+            s.sendmail(_FROM_EMAIL, to_email, msg.as_string())
+    except Exception as exc:
+        log.warning("SMTP OTP email failed: %s", exc)
+
+
+def send_otp_bg(user_id: int, to_email: str, first_name: str = "") -> str:
+    code = _generate_otp(user_id)
+    threading.Thread(target=_send_otp_email, args=(to_email, code, first_name), daemon=True).start()
+    return code
 
 
 # ---------------------------------------------------------------------------
@@ -527,6 +655,19 @@ def login(body: LoginRequest, response: Response):
             detail="Invalid email or password",
         )
 
+    # If 2FA is enabled, send OTP and ask frontend to show code screen
+    try:
+        two_fa = bool(user["two_fa_enabled"])
+    except (IndexError, KeyError):
+        two_fa = False
+
+    if two_fa:
+        first = ""
+        try: first = user["first_name"] or ""
+        except (IndexError, KeyError): pass
+        send_otp_bg(user["id"], user["email"], first)
+        return {"requires_2fa": True, "email": user["email"]}
+
     plan = _user_plan(user)
     token = create_access_token(user["id"], user["email"], plan=plan)
     _set_auth_cookie(response, token)
@@ -538,6 +679,62 @@ def login(body: LoginRequest, response: Response):
         "plan": plan,
         "subscription_status": user["subscription_status"],
     }
+
+
+class OTPRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+
+@auth_router.post("/verify-otp")
+def verify_otp(body: OTPRequest, response: Response):
+    with _get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (body.email,)).fetchone()
+    if user is None:
+        raise HTTPException(401, "Invalid code")
+    if not _verify_otp(user["id"], body.code.strip()):
+        raise HTTPException(401, "Invalid or expired code")
+    plan = _user_plan(user)
+    token = create_access_token(user["id"], user["email"], plan=plan)
+    _set_auth_cookie(response, token)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": user["id"],
+        "email": user["email"],
+        "plan": plan,
+    }
+
+
+class Enable2FARequest(BaseModel):
+    code: str
+
+
+@auth_router.post("/2fa/send-setup-code")
+def send_setup_code(user: sqlite3.Row = Depends(get_current_user)):
+    first = ""
+    try: first = user["first_name"] or ""
+    except (IndexError, KeyError): pass
+    send_otp_bg(user["id"], user["email"], first)
+    return {"ok": True}
+
+
+@auth_router.post("/2fa/enable")
+def enable_2fa(body: Enable2FARequest, user: sqlite3.Row = Depends(get_current_user)):
+    if not _verify_otp(user["id"], body.code.strip()):
+        raise HTTPException(400, "Invalid or expired code")
+    with _get_db() as conn:
+        conn.execute("UPDATE users SET two_fa_enabled = 1 WHERE id = ?", (user["id"],))
+        conn.commit()
+    return {"ok": True, "two_fa_enabled": True}
+
+
+@auth_router.post("/2fa/disable")
+def disable_2fa(user: sqlite3.Row = Depends(get_current_user)):
+    with _get_db() as conn:
+        conn.execute("UPDATE users SET two_fa_enabled = 0 WHERE id = ?", (user["id"],))
+        conn.commit()
+    return {"ok": True, "two_fa_enabled": False}
 
 
 @auth_router.post("/logout")
@@ -561,6 +758,7 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
         "created_at": user["created_at"],
         "first_name": _safe("first_name"),
         "last_name": _safe("last_name"),
+        "two_fa_enabled": bool(_safe("two_fa_enabled")),
     }
 
 
