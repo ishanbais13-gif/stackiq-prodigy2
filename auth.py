@@ -127,14 +127,21 @@ def init_auth_db() -> None:
                 stripe_customer_id  TEXT,
                 subscription_status TEXT    NOT NULL DEFAULT 'inactive',
                 plan                TEXT    NOT NULL DEFAULT 'free',
+                first_name          TEXT,
+                last_name           TEXT,
                 created_at          TEXT    NOT NULL
             )
         """)
-        # Non-destructive migration: add plan column to existing databases
-        try:
-            conn.execute("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'")
-        except Exception:
-            pass  # column already exists
+        # Non-destructive migrations for existing databases
+        for col, defn in [
+            ("plan",       "TEXT NOT NULL DEFAULT 'free'"),
+            ("first_name", "TEXT"),
+            ("last_name",  "TEXT"),
+        ]:
+            try:
+                conn.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
+            except Exception:
+                pass  # column already exists
         conn.commit()
     log.info("auth.db initialised")
 
@@ -273,6 +280,8 @@ def require_plan(min_plan: str):
 class SignupRequest(BaseModel):
     email: EmailStr
     password: str
+    first_name: str = ""
+    last_name: str = ""
 
 
 class LoginRequest(BaseModel):
@@ -335,11 +344,13 @@ def signup(body: SignupRequest, response: Response):
 
     pw_hash = hash_password(body.password)
     now = datetime.now(timezone.utc).isoformat()
+    first = body.first_name.strip()[:64]
+    last = body.last_name.strip()[:64]
     try:
         with _get_db() as conn:
             cur = conn.execute(
-                "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-                (body.email, pw_hash, now),
+                "INSERT INTO users (email, password_hash, first_name, last_name, created_at) VALUES (?, ?, ?, ?, ?)",
+                (body.email, pw_hash, first or None, last or None, now),
             )
             conn.commit()
             user_id = cur.lastrowid
@@ -348,7 +359,7 @@ def signup(body: SignupRequest, response: Response):
 
     token = create_access_token(user_id, body.email, plan="free")
     _set_auth_cookie(response, token)
-    return {"access_token": token, "token_type": "bearer", "user_id": user_id, "email": body.email, "plan": "free"}
+    return {"access_token": token, "token_type": "bearer", "user_id": user_id, "email": body.email, "plan": "free", "first_name": first}
 
 
 @auth_router.post("/login")
@@ -386,6 +397,9 @@ def logout(response: Response):
 
 @auth_router.get("/me")
 def me(user: sqlite3.Row = Depends(get_current_user)):
+    def _safe(col):
+        try: return user[col]
+        except (IndexError, KeyError): return None
     return {
         "id": user["id"],
         "email": user["email"],
@@ -393,6 +407,8 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
         "subscription_status": user["subscription_status"],
         "stripe_customer_id": user["stripe_customer_id"],
         "created_at": user["created_at"],
+        "first_name": _safe("first_name"),
+        "last_name": _safe("last_name"),
     }
 
 
