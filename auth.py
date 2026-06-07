@@ -1039,31 +1039,60 @@ oauth_router = APIRouter(prefix="/auth", tags=["oauth"])
 
 # ── CSRF state helpers ────────────────────────────────────────────────────
 
-def _state_make(provider: str) -> str:
-    """Signed state token: {provider}:{ts}:{hmac16}"""
+def _state_make(provider: str, extras: dict | None = None) -> str:
+    """Signed state token.
+    Old format (3-part): {provider}:{ts}:{hmac16}
+    New format (4-part): {provider}:{ts}:{extras_b64}:{hmac16}
+    """
+    import base64 as _b64, json as _json
     ts = str(int(datetime.now(timezone.utc).timestamp()))
+    if extras:
+        extras_b64 = _b64.urlsafe_b64encode(_json.dumps(extras).encode()).decode().rstrip("=")
+        msg = f"{provider}:{ts}:{extras_b64}".encode()
+        sig = hmac.new(JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:16]
+        return f"{provider}:{ts}:{extras_b64}:{sig}"
     msg = f"{provider}:{ts}".encode()
     sig = hmac.new(JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:16]
     return f"{provider}:{ts}:{sig}"
 
 
 def _state_ok(state: str, provider: str, max_age: int = 600) -> bool:
-    """Return True if the signed state is valid and not expired."""
+    """Return True if the signed state is valid and not expired.
+    Handles both 3-part (legacy) and 4-part (with extras) formats.
+    """
     try:
-        parts = state.rsplit(":", 2)
-        if len(parts) != 3:
+        parts = state.split(":", 3)
+        if len(parts) == 3:
+            p, ts, sig = parts
+            msg = f"{p}:{ts}".encode()
+        elif len(parts) == 4:
+            p, ts, extras_b64, sig = parts
+            msg = f"{p}:{ts}:{extras_b64}".encode()
+        else:
             return False
-        p, ts, sig = parts
         if p != provider:
             return False
         age = abs(datetime.now(timezone.utc).timestamp() - int(ts))
         if age > max_age:
             return False
-        msg = f"{provider}:{ts}".encode()
         expected = hmac.new(JWT_SECRET.encode(), msg, hashlib.sha256).hexdigest()[:16]
         return hmac.compare_digest(sig, expected)
     except Exception:
         return False
+
+
+def _state_extras(state: str) -> dict:
+    """Extract the extras dict from a 4-part state token. Returns {} otherwise."""
+    import base64 as _b64, json as _json
+    try:
+        parts = state.split(":", 3)
+        if len(parts) == 4:
+            extras_b64 = parts[2]
+            padded = extras_b64 + "=" * (-len(extras_b64) % 4)
+            return _json.loads(_b64.urlsafe_b64decode(padded))
+    except Exception:
+        pass
+    return {}
 
 
 # ── DB helper ────────────────────────────────────────────────────────────
@@ -1096,11 +1125,12 @@ def _upsert_oauth_user(email: str, first_name: str = "", last_name: str = "") ->
         return conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone(), True
 
 
-def _redirect_to_app(user: sqlite3.Row, is_new: bool = False) -> RedirectResponse:
-    """Issue JWT and redirect to {FRONTEND_ORIGIN}/app?token=..."""
+def _redirect_to_app(user: sqlite3.Row, is_new: bool = False, origin: str = "") -> RedirectResponse:
+    """Issue JWT and redirect to {origin}/app?token=..."""
     plan = _user_plan(user)
     token = create_access_token(user["id"], user["email"], plan=plan)
-    url = f"{FRONTEND_ORIGIN}/app?token={urllib.parse.quote(token)}"
+    base = (origin or FRONTEND_ORIGIN).rstrip("/")
+    url = f"{base}/app?token={urllib.parse.quote(token)}"
     if is_new:
         url += "&new_user=1"
     return RedirectResponse(url=url, status_code=302)
@@ -1108,11 +1138,22 @@ def _redirect_to_app(user: sqlite3.Row, is_new: bool = False) -> RedirectRespons
 
 # ── Google ───────────────────────────────────────────────────────────────
 
+_ALLOWED_PLANS = {"free", "starter", "pro", "elite"}
+
+
 @oauth_router.get("/google/redirect")
-def google_redirect():
+def google_redirect(plan: str = "free", origin: str = ""):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(503, "GOOGLE_CLIENT_ID not configured")
-    state = _state_make("google")
+    clean_plan = plan.lower() if plan.lower() in _ALLOWED_PLANS else "free"
+    _allowed_origins = {
+        FRONTEND_ORIGIN,
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+    }
+    clean_origin = origin if origin in _allowed_origins else FRONTEND_ORIGIN
+    state = _state_make("google", {"plan": clean_plan, "origin": clean_origin})
     params = urllib.parse.urlencode({
         "client_id":     GOOGLE_CLIENT_ID,
         "redirect_uri":  f"{APP_BASE_URL}/auth/google/callback",
@@ -1160,7 +1201,45 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
     user, is_new = _upsert_oauth_user(email, first_name=first_name, last_name=last_name)
     if is_new:
         send_welcome_email_bg(email, first_name)
-    return _redirect_to_app(user, is_new=is_new)
+
+    extras = _state_extras(state)
+    selected_plan = extras.get("plan", "free")
+    callback_origin = extras.get("origin", FRONTEND_ORIGIN)
+
+    if selected_plan in ("starter", "pro", "elite") and _stripe and STRIPE_SECRET_KEY:
+        price_id = PLAN_PRICES.get(selected_plan, "")
+        if price_id:
+            try:
+                customer_id = user["stripe_customer_id"]
+                if not customer_id:
+                    customer = _stripe.Customer.create(email=user["email"])
+                    customer_id = customer["id"]
+                    with _get_db() as conn:
+                        conn.execute(
+                            "UPDATE users SET stripe_customer_id = ? WHERE id = ?",
+                            (customer_id, user["id"]),
+                        )
+                        conn.commit()
+                plan = _user_plan(user)
+                token = create_access_token(user["id"], user["email"], plan=plan)
+                success_url = f"{callback_origin}/app?token={urllib.parse.quote(token)}"
+                if is_new:
+                    success_url += "&new_user=1"
+                cancel_url = f"{callback_origin}/signup?plan={selected_plan}"
+                session = _stripe.checkout.Session.create(
+                    customer=customer_id,
+                    payment_method_types=["card"],
+                    mode="subscription",
+                    line_items=[{"price": price_id, "quantity": 1}],
+                    success_url=success_url,
+                    cancel_url=cancel_url,
+                    metadata={"user_id": str(user["id"])},
+                )
+                return RedirectResponse(url=session["url"], status_code=302)
+            except Exception as exc:
+                log.warning("google_callback stripe checkout error: %s", exc)
+
+    return _redirect_to_app(user, is_new=is_new, origin=callback_origin)
 
 
 # ── Apple ────────────────────────────────────────────────────────────────
