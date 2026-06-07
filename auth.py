@@ -396,6 +396,15 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
     }
 
 
+@auth_router.delete("/delete-account")
+def delete_account(response: Response, user: sqlite3.Row = Depends(get_current_user)):
+    with _get_db() as conn:
+        conn.execute("DELETE FROM users WHERE id = ?", (user["id"],))
+        conn.commit()
+    response.delete_cookie(key="sq_token", path="/", httponly=True, secure=_IS_PROD, samesite="lax")
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Stripe router
 # ---------------------------------------------------------------------------
