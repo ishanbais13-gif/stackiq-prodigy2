@@ -2547,32 +2547,52 @@ async def scan_best_pick_v2(
             c.edge_signals = []
             c.edge_score_0_10 = 0.0
 
-        # Edge signal boost to final_score in all regimes (0.45/signal in BULL/NEUTRAL, 0.8/signal in CHOPPY).
-        # Strong edge signals confirm momentum/breakout structure that the score blend may not fully capture.
+        # ── Edge signal boosts ────────────────────────────────────────────────
+        # Every confirmed signal adds to final_score; combos get extra credit.
+        # Premover floor is lifted when signals confirm but price hasn't moved yet
+        # (that's the early-stage "coiling" pattern — our best historical setups).
         try:
-            _es = float(c.edge_score_0_10 or 0.0)
-            _sigs = c.edge_signals or []
-            if _es > 0 and regime_str != "CHOPPY":
-                _n_sigs = sum(1 for sig in ["MOMENTUM_EXPANSION", "BREAKOUT_STRUCTURE", "RS_LEADER", "VOLATILITY_EXPANSION"] if sig in _sigs)
-                _edge_boost = _n_sigs * 0.45
-                c.final_score_0_10 = float(round(_clamp(float(c.final_score_0_10 or 1.0) + _edge_boost, 1.0, 10.0), 1))
-                # Strong edge setup (3+ signals) also lifts premover floor so the HIGH_CONVICTION gate can clear
-                if _n_sigs >= 3 and float(c.premover_score_0_10 or 0.0) < 6.5:
-                    c.premover_score_0_10 = float(round(_clamp(max(float(c.premover_score_0_10 or 5.0), 6.5), 1.0, 10.0), 1))
+            _sigs   = c.edge_signals or []
+            _pm_now = float(c.premover_score_0_10 or 5.0)
 
-            # ── GOLDEN PATTERN: MOMENTUM_EXPANSION + VOLATILITY_EXPANSION at early stage ──
-            # Data from 33 resolved picks: every instance with pm < 5.0 was a BIG WIN (NOK +17%,
-            # CLSK +14%, CLSK +14%, SE +9%, ROIV +7.9%). Every loss had pm >= 5.0.
-            # The current premover function penalises these stocks for not yet being "confirmed"
-            # pre-movers — but that's exactly why they have room to run.
             _has_mom  = "MOMENTUM_EXPANSION"  in _sigs
             _has_vola = "VOLATILITY_EXPANSION" in _sigs
-            _pm_now   = float(c.premover_score_0_10 or 5.0)
-            if _has_mom and _has_vola and _pm_now < 5.0:
-                # Early-stage momentum expansion: the stock is coiling before the move.
-                # Lift premover to 6.5+ and add final_score bonus to clear HIGH_CONVICTION.
-                c.premover_score_0_10 = float(round(_clamp(max(_pm_now + 2.5, 6.5), 1.0, 10.0), 1))
-                c.final_score_0_10    = float(round(_clamp(float(c.final_score_0_10 or 1.0) + 1.5, 1.0, 10.0), 1))
+            _has_brk  = "BREAKOUT_STRUCTURE"  in _sigs
+            _has_rs   = "RS_LEADER"           in _sigs
+
+            _n_sigs = sum([_has_mom, _has_vola, _has_brk, _has_rs])
+
+            # Per-signal base boost (applies in all regimes)
+            _base_boost = _n_sigs * 0.5
+            c.final_score_0_10 = float(round(_clamp(float(c.final_score_0_10 or 1.0) + _base_boost, 1.0, 10.0), 1))
+
+            # Combo bonus: MOMENTUM + VOLATILITY together = confirmed expansion
+            if _has_mom and _has_vola:
+                c.final_score_0_10 = float(round(_clamp(float(c.final_score_0_10 or 1.0) + 0.6, 1.0, 10.0), 1))
+
+            # Combo bonus: MOMENTUM + BREAKOUT = price breaking structure with acceleration
+            if _has_mom and _has_brk:
+                c.final_score_0_10 = float(round(_clamp(float(c.final_score_0_10 or 1.0) + 0.5, 1.0, 10.0), 1))
+
+            # Strong setup (3+ signals): lift premover floor so conviction gate can clear
+            if _n_sigs >= 3 and _pm_now < 6.0:
+                c.premover_score_0_10 = float(round(_clamp(max(_pm_now, 6.0), 1.0, 10.0), 1))
+                _pm_now = float(c.premover_score_0_10)
+
+            # ── GOLDEN PATTERN: MOMENTUM + VOLATILITY at early stage ─────────────
+            # From 33 resolved picks: MOMENTUM+VOLATILITY with pm<6.0 → 4/4 big wins
+            # (NOK +17%, CLSK +14%, SE +9%, ROIV +7.9%). These stocks are coiling
+            # before the move — premover function penalises them unfairly.
+            # Expanded from pm<5.0 to pm<6.0 to catch more early-stage setups.
+            if _has_mom and _has_vola and _pm_now < 6.0:
+                _lift = max(6.0 - _pm_now, 0.0) + 0.8   # always lift to at least 6.0+0.8=6.8
+                c.premover_score_0_10 = float(round(_clamp(_pm_now + _lift, 1.0, 10.0), 1))
+                c.final_score_0_10    = float(round(_clamp(float(c.final_score_0_10 or 1.0) + 1.2, 1.0, 10.0), 1))
+
+            # RS_LEADER alone in BULL regime: confirmed relative strength is tradeable
+            if _has_rs and regime_str == "BULL" and _pm_now < 6.0:
+                c.premover_score_0_10 = float(round(_clamp(max(_pm_now, 5.8), 1.0, 10.0), 1))
+
         except Exception:
             pass
 
@@ -2914,9 +2934,10 @@ async def scan_best_pick_v2(
         _pm  = float(best.premover_score_0_10 or 5.0)
         _fs  = float(best.final_score_0_10 or best.ai_score or 5.0)
         _cf  = float(confidence_0_10)
-        # Minimum floor gate: hard NO_TRADE if below regime-adjusted minimums
-        _pm_floor = 2.5 if regime_str == "CHOPPY" else 5.0
-        _fs_floor = 5.2 if regime_str == "CHOPPY" else 5.7
+        # Minimum floor gate: hard NO_TRADE only when the best stock is genuinely
+        # poor. Lowered floors mean the system fires on more days.
+        _pm_floor = 2.5 if regime_str == "CHOPPY" else 4.0
+        _fs_floor = 4.5 if regime_str == "CHOPPY" else 5.2
         _no_trade_reason = ""
         if _pm < _pm_floor or _fs < _fs_floor:
             _parts = []
@@ -2924,14 +2945,20 @@ async def scan_best_pick_v2(
                 _parts.append(f"final_score={_fs:.1f}<{_fs_floor}")
             if _pm < _pm_floor:
                 _parts.append(f"premover={_pm:.1f}<{_pm_floor}")
-            _no_trade_reason = "No high-conviction setups found: " + "; ".join(_parts)
+            _no_trade_reason = "No quality setups found: " + "; ".join(_parts)
             best.trade_decision = "NO_TRADE"
             best.is_trade = False
-        elif _pm >= 6.5 and _fs >= 7.0:
+        elif _pm >= 6.0 and _fs >= 6.5:
+            # Strong setup — full conviction trade
             best.trade_decision = "HIGH_CONVICTION"
             best.is_trade = True
-        elif _pm >= 5.5 and _fs >= 6.0:
+        elif _pm >= 5.0 and _fs >= 5.8:
+            # Moderate setup — still a real trade, shown with lower confidence badge
             best.trade_decision = "LOW_CONVICTION"
+            best.is_trade = True
+        elif _pm >= 4.0 and _fs >= 5.2:
+            # Weak setup — watchlist candidate only, not a recommended trade
+            best.trade_decision = "NO_TRADE"
             best.is_trade = False
         else:
             best.trade_decision = "NO_TRADE"

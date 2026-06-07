@@ -338,11 +338,52 @@ def recalibrate_weights() -> Dict[str, float]:
                     f"brain: recalibrated | {total} picks | baseline win_rate={baseline:.1%} | "
                     + " ".join(f"{k}={v:.2f}x" for k, v in sorted(multipliers.items(), key=lambda x: -x[1])[:6])
                 )
+
+                # Kick off NN retraining in a background thread after signal recalibration
+                _maybe_trigger_nn_training()
+
                 return multipliers
 
     except Exception as e:
         log.warning(f"brain.recalibrate: {e}")
         return {}
+
+
+_NN_MIN_SAMPLES = 20   # don't bother training until this many resolved picks
+
+
+def _maybe_trigger_nn_training() -> None:
+    """Fire-and-forget: retrain the NN scorer in a background thread if enough data."""
+    import threading as _threading
+    import sqlite3 as _sqlite3
+
+    perf_db = os.getenv("PERF_TRACKER_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf_tracker.db"))
+
+    try:
+        con = _sqlite3.connect(perf_db, timeout=5)
+        row = con.execute(
+            "SELECT COUNT(*) FROM picks WHERE status IN ('won','won_drift','lost','lost_drift')"
+        ).fetchone()
+        con.close()
+        resolved = int(row[0]) if row else 0
+    except Exception:
+        resolved = 0
+
+    if resolved < _NN_MIN_SAMPLES:
+        log.info(f"brain: NN training skipped — only {resolved} resolved picks (need {_NN_MIN_SAMPLES})")
+        return
+
+    def _train():
+        try:
+            from ml.trainer import run_training
+            result = run_training()
+            log.info(f"brain: NN retrain complete → {result}")
+        except Exception as e:
+            log.warning(f"brain: NN retrain failed: {e}")
+
+    t = _threading.Thread(target=_train, daemon=True)
+    t.start()
+    log.info(f"brain: NN retrain triggered ({resolved} resolved picks)")
 
 
 def get_learned_weights() -> Dict[str, float]:
