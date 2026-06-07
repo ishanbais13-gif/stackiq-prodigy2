@@ -18,7 +18,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("stackiq")
 
-_DB_PATH = os.getenv("PERF_TRACKER_DB", "perf_tracker.db")
+_DB_PATH = os.getenv("PERF_TRACKER_DB", os.path.join(
+    os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__))),
+    "perf_tracker.db"
+))
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS picks (

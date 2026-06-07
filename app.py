@@ -10182,7 +10182,8 @@ def account():
 @app.get("/performance", include_in_schema=True)
 def performance_summary():
     import sqlite3 as _sq
-    db_path = os.environ.get("PERF_TRACKER_DB_PATH", os.path.join(os.path.dirname(__file__), "perf_tracker.db"))
+    db_path = os.environ.get("PERF_TRACKER_DB", os.path.join(
+        os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
     try:
         con = _sq.connect(db_path)
         con.row_factory = _sq.Row
@@ -10214,7 +10215,8 @@ def performance_summary():
 @app.get("/performance/picks", include_in_schema=True)
 def performance_picks():
     import sqlite3 as _sq, datetime as _dt, json as _json
-    db_path = os.environ.get("PERF_TRACKER_DB_PATH", os.path.join(os.path.dirname(__file__), "perf_tracker.db"))
+    db_path = os.environ.get("PERF_TRACKER_DB", os.path.join(
+        os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
     out = []
     try:
         con = _sq.connect(db_path)
@@ -10376,7 +10378,7 @@ def _chat_build_context() -> str:
     # Recent picks from perf_tracker
     try:
         import sqlite3 as _sq
-        _pt = os.getenv("PERF_TRACKER_DB", os.path.join(os.path.dirname(__file__), "perf_tracker.db"))
+        _pt = os.getenv("PERF_TRACKER_DB", os.path.join(os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
         con = _sq.connect(_pt, timeout=5)
         con.row_factory = _sq.Row
         rows = con.execute(

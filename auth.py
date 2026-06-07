@@ -112,7 +112,8 @@ _JWT_PREFIXES: tuple[str, ...] = tuple(
 # Database
 # ---------------------------------------------------------------------------
 
-_AUTH_DB_PATH = os.path.join(os.path.dirname(__file__), "auth.db")
+_DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+_AUTH_DB_PATH = os.path.join(_DATA_DIR, "auth.db")
 
 
 def _get_db() -> sqlite3.Connection:
