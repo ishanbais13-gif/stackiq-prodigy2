@@ -8312,7 +8312,14 @@ def _bg_v2_scan_once() -> None:
                 try:
                     from performance_tracker import record_pick as _record_pick
                     if bool(out.get("is_trade")) and str(out.get("symbol") or "").strip():
-                        _record_pick(out)
+                        _rp_result = _record_pick(out)
+                        # Fire new-pick alert only for fresh inserts (not duplicate suppression)
+                        if isinstance(_rp_result, int):
+                            try:
+                                from alerts import send_new_pick_alert_bg
+                                send_new_pick_alert_bg(out)
+                            except Exception as _ae:
+                                log.warning(f"bg_scan: new_pick alert failed: {_ae}")
                     elif isinstance(cands, list) and cands:
                         top = cands[0]
                         _record_pick({
@@ -10171,6 +10178,41 @@ def portfolio_close_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
         pnl = 0.0
 
     return {"ok": True, "id": pid, "symbol": sym, "close_price": float(close_px), "pnl": float(round(pnl, 2))}
+
+
+@app.get("/alerts/preferences", include_in_schema=True)
+async def get_alerts_prefs(request: Request, _user=Depends(_get_current_user)):
+    """Return the authenticated user's alert preferences."""
+    try:
+        from alerts import get_alert_prefs
+        prefs = get_alert_prefs(_user["id"])
+        return JSONResponse({"ok": True, **prefs})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+class _AlertPrefsBody(BaseModel):
+    phone:            Optional[str]  = None
+    alerts_new_pick:  bool           = True
+    alerts_outcome:   bool           = True
+    alerts_channel:   str            = "email"
+
+
+@app.post("/alerts/preferences", include_in_schema=True)
+async def save_alerts_prefs(body: _AlertPrefsBody, _user=Depends(_get_current_user)):
+    """Save alert preferences for the authenticated user."""
+    try:
+        from alerts import save_alert_prefs
+        ok = save_alert_prefs(
+            user_id         = _user["id"],
+            phone           = body.phone,
+            alerts_new_pick = body.alerts_new_pick,
+            alerts_outcome  = body.alerts_outcome,
+            alerts_channel  = body.alerts_channel,
+        )
+        return JSONResponse({"ok": ok})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @app.get("/account", include_in_schema=True)

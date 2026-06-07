@@ -279,6 +279,20 @@ def evaluate_pending_picks(
                     ),
                 )
             updated += 1
+
+            # Fire outcome alert in background (won/lost only, not expired)
+            if outcome["status"] in ("won", "won_drift", "lost", "lost_drift"):
+                try:
+                    from alerts import send_outcome_alert_bg
+                    send_outcome_alert_bg(
+                        symbol     = sym,
+                        status     = outcome["status"],
+                        return_pct = outcome["max_return_pct"],
+                        entry      = _sf(row["entry_price"]),
+                    )
+                except Exception as _ae:
+                    log.warning(f"perf_tracker: outcome alert failed: {_ae}")
+
             log.info(
                 f"perf_tracker: evaluated id={row['id']} {sym} "
                 f"→ {outcome['status']} ret={outcome['max_return_pct']}% "
