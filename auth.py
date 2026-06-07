@@ -139,10 +139,12 @@ def init_auth_db() -> None:
         """)
         # Non-destructive migrations for existing databases
         for col, defn in [
-            ("plan",            "TEXT NOT NULL DEFAULT 'free'"),
-            ("first_name",      "TEXT"),
-            ("last_name",       "TEXT"),
-            ("two_fa_enabled",  "INTEGER NOT NULL DEFAULT 0"),
+            ("plan",                 "TEXT NOT NULL DEFAULT 'free'"),
+            ("first_name",           "TEXT"),
+            ("last_name",            "TEXT"),
+            ("two_fa_enabled",       "INTEGER NOT NULL DEFAULT 0"),
+            ("cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
+            ("current_period_end",   "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -182,8 +184,14 @@ _SMTP_USER     = os.getenv("SMTP_USERNAME", "")
 _SMTP_PASS     = os.getenv("SMTP_PASSWORD", "")
 _SMTP_TLS      = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
 _FROM_EMAIL    = os.getenv("ALERT_FROM_EMAIL", "hello@useaurexis.com")
-_SENDGRID_KEY  = os.getenv("SENDGRID_API_KEY", "")
 _FRONTEND_URL  = os.getenv("FRONTEND_ORIGIN", "https://useaurexis.com")
+
+# Read dynamically so Railway env var changes take effect without a full redeploy
+def _sg_key() -> str:
+    return os.getenv("SENDGRID_API_KEY", "")
+
+# Keep this for backwards compatibility with any direct reference
+_SENDGRID_KEY = _sg_key()
 
 
 def _welcome_html(first_name: str) -> str:
@@ -263,41 +271,58 @@ def _welcome_html(first_name: str) -> str:
 </html>"""
 
 
-def _send_welcome_email(to_email: str, first_name: str = "") -> None:
-    """Fire-and-forget welcome email. Called in a background thread."""
-    subject = "Welcome to Aurexis — your edge starts now"
-    html = _welcome_html(first_name)
-    plain = f"Hey {first_name or 'there'},\n\nWelcome to Aurexis. Every morning we scan 1,200+ stocks and surface one high-conviction trade setup with entry, stop, and targets.\n\nOpen the app: {_FRONTEND_URL}/app\n\nAurexis"
+def _sendgrid_send(to_email: str, subject: str, html: str, plain: str) -> bool:
+    """
+    Send via SendGrid. Returns True on success.
+    Logs the full response body on failure so we know exactly why it failed
+    (common causes: sender not verified, bad API key, plan limits).
+    """
+    import urllib.request as _ur
+    import urllib.error  as _ue
+    import json as _json
 
-    # Try SendGrid first
-    if _SENDGRID_KEY:
+    key = _sg_key()
+    if not key:
+        log.warning("sendgrid: SENDGRID_API_KEY not set — cannot send email to %s", to_email)
+        return False
+
+    payload = _json.dumps({
+        "personalizations": [{"to": [{"email": to_email}]}],
+        "from": {"email": _FROM_EMAIL, "name": "Aurexis"},
+        "subject": subject,
+        "content": [
+            {"type": "text/plain", "value": plain},
+            {"type": "text/html",  "value": html},
+        ],
+    }).encode()
+
+    req = _ur.Request(
+        "https://api.sendgrid.com/v3/mail/send",
+        data=payload,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _ur.urlopen(req, timeout=15) as resp:
+            status = resp.status
+        log.info("sendgrid: sent to %s (HTTP %s)", to_email, status)
+        return True
+    except _ue.HTTPError as e:
+        body = ""
         try:
-            import urllib.request as _ur, json as _json
-            payload = _json.dumps({
-                "personalizations": [{"to": [{"email": to_email}]}],
-                "from": {"email": _FROM_EMAIL, "name": "Aurexis"},
-                "subject": subject,
-                "content": [
-                    {"type": "text/plain", "value": plain},
-                    {"type": "text/html",  "value": html},
-                ],
-            }).encode()
-            req = _ur.Request(
-                "https://api.sendgrid.com/v3/mail/send",
-                data=payload,
-                headers={"Authorization": f"Bearer {_SENDGRID_KEY}", "Content-Type": "application/json"},
-                method="POST",
-            )
-            _ur.urlopen(req, timeout=10)
-            log.info("Welcome email sent via SendGrid to %s", to_email)
-            return
-        except Exception as exc:
-            log.warning("SendGrid welcome email failed: %s", exc)
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        log.error("sendgrid: HTTP %s sending to %s — %s", e.code, to_email, body)
+        return False
+    except Exception as exc:
+        log.error("sendgrid: unexpected error sending to %s — %s", to_email, exc)
+        return False
 
-    # Fall back to SMTP
+
+def _smtp_send(to_email: str, subject: str, html: str, plain: str) -> bool:
     if not _SMTP_HOST or not _SMTP_USER or not _SMTP_PASS:
-        log.info("No email credentials configured — skipping welcome email for %s", to_email)
-        return
+        return False
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -310,9 +335,35 @@ def _send_welcome_email(to_email: str, first_name: str = "") -> None:
                 s.starttls()
             s.login(_SMTP_USER, _SMTP_PASS)
             s.sendmail(_FROM_EMAIL, to_email, msg.as_string())
-        log.info("Welcome email sent via SMTP to %s", to_email)
+        log.info("smtp: sent to %s", to_email)
+        return True
     except Exception as exc:
-        log.warning("SMTP welcome email failed: %s", exc)
+        log.error("smtp: failed sending to %s — %s", to_email, exc)
+        return False
+
+
+def _send_email(to_email: str, subject: str, html: str, plain: str) -> bool:
+    """Try SendGrid, fall back to SMTP. Logs clearly if both fail."""
+    if _sendgrid_send(to_email, subject, html, plain):
+        return True
+    if _smtp_send(to_email, subject, html, plain):
+        return True
+    log.error("email: ALL delivery methods failed for %s (subject: %s) — "
+              "set SENDGRID_API_KEY in Railway env vars", to_email, subject)
+    return False
+
+
+def _send_welcome_email(to_email: str, first_name: str = "") -> None:
+    """Fire-and-forget welcome email. Called in a background thread."""
+    subject = "Welcome to Aurexis — your edge starts now"
+    html    = _welcome_html(first_name)
+    plain   = (
+        f"Hey {first_name or 'there'},\n\n"
+        f"Welcome to Aurexis. Every morning we scan 1,200+ stocks and surface one "
+        f"high-conviction trade setup with entry, stop, and targets.\n\n"
+        f"Open the app: {_FRONTEND_URL}\n\nAurexis"
+    )
+    _send_email(to_email, subject, html, plain)
 
 
 def send_welcome_email_bg(to_email: str, first_name: str = "") -> None:
@@ -396,40 +447,7 @@ def _send_otp_email(to_email: str, code: str, first_name: str = "") -> None:
 </body>
 </html>"""
     plain = f"{greeting}\n\nYour Aurexis verification code is: {code}\n\nExpires in {_OTP_EXPIRE_MINUTES} minutes."
-
-    if _SENDGRID_KEY:
-        try:
-            import urllib.request as _ur, json as _json
-            payload = _json.dumps({
-                "personalizations": [{"to": [{"email": to_email}]}],
-                "from": {"email": _FROM_EMAIL, "name": "Aurexis"},
-                "subject": subject,
-                "content": [{"type": "text/plain", "value": plain}, {"type": "text/html", "value": html}],
-            }).encode()
-            req = _ur.Request("https://api.sendgrid.com/v3/mail/send", data=payload,
-                headers={"Authorization": f"Bearer {_SENDGRID_KEY}", "Content-Type": "application/json"}, method="POST")
-            _ur.urlopen(req, timeout=10)
-            return
-        except Exception as exc:
-            log.warning("SendGrid OTP email failed: %s", exc)
-
-    if not _SMTP_HOST or not _SMTP_USER or not _SMTP_PASS:
-        log.warning("No email credentials — cannot send OTP to %s", to_email)
-        return
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = f"Aurexis <{_FROM_EMAIL}>"
-        msg["To"] = to_email
-        msg.attach(MIMEText(plain, "plain"))
-        msg.attach(MIMEText(html, "html"))
-        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT) as s:
-            if _SMTP_TLS:
-                s.starttls()
-            s.login(_SMTP_USER, _SMTP_PASS)
-            s.sendmail(_FROM_EMAIL, to_email, msg.as_string())
-    except Exception as exc:
-        log.warning("SMTP OTP email failed: %s", exc)
+    _send_email(to_email, subject, html, plain)
 
 
 def send_otp_bg(user_id: int, to_email: str, first_name: str = "") -> str:
@@ -760,6 +778,35 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
         "first_name": _safe("first_name"),
         "last_name": _safe("last_name"),
         "two_fa_enabled": bool(_safe("two_fa_enabled")),
+        "cancel_at_period_end": bool(_safe("cancel_at_period_end")),
+        "current_period_end": _safe("current_period_end"),
+    }
+
+
+@auth_router.post("/test-email")
+def test_email(user: sqlite3.Row = Depends(get_current_user)):
+    """
+    Send a test email to the authenticated user's address.
+    Use this to verify SendGrid is configured correctly on Railway.
+    """
+    to = user["email"]
+    name = ""
+    try: name = user["first_name"] or ""
+    except Exception: pass
+
+    key = _sg_key()
+    delivered = _send_email(
+        to_email = to,
+        subject  = "Aurexis — email delivery test",
+        html     = f"<p style='font-family:sans-serif'>Hey {name or 'there'},<br><br>This is a test email from Aurexis. If you see this, email delivery is working.</p>",
+        plain    = f"Hey {name or 'there'}, this is a test email from Aurexis. Email delivery is working.",
+    )
+    return {
+        "ok": delivered,
+        "to": to,
+        "sendgrid_key_set": bool(key),
+        "from_email": _FROM_EMAIL,
+        "smtp_configured": bool(_SMTP_HOST and _SMTP_USER),
     }
 
 
@@ -821,8 +868,43 @@ def create_checkout_session(
         success_url=success_url,
         cancel_url=cancel_url,
         metadata={"user_id": str(user["id"])},
+        subscription_data={"metadata": {"user_id": str(user["id"])}},
     )
     return {"checkout_url": session["url"], "session_id": session["id"]}
+
+
+@stripe_router.post("/cancel-subscription")
+def cancel_subscription(user: sqlite3.Row = Depends(get_current_user)):
+    _ensure_stripe()
+    customer_id = user["stripe_customer_id"]
+    if not customer_id:
+        raise HTTPException(400, "No Stripe customer on file")
+    subs = _stripe.Subscription.list(customer=customer_id, status="active", limit=1)
+    if not subs.data:
+        raise HTTPException(404, "No active subscription found")
+    sub = _stripe.Subscription.modify(subs.data[0].id, cancel_at_period_end=True)
+    _update_subscription_from_stripe(sub)
+    raw_end = sub.get("current_period_end")
+    period_end_iso = (
+        datetime.fromtimestamp(raw_end, tz=timezone.utc).isoformat() if raw_end else None
+    )
+    log.info("cancel_subscription: user_id=%s cancel_at_period_end=True end=%s", user["id"], period_end_iso)
+    return {"cancel_at_period_end": True, "current_period_end": period_end_iso}
+
+
+@stripe_router.post("/reactivate-subscription")
+def reactivate_subscription(user: sqlite3.Row = Depends(get_current_user)):
+    _ensure_stripe()
+    customer_id = user["stripe_customer_id"]
+    if not customer_id:
+        raise HTTPException(400, "No Stripe customer on file")
+    subs = _stripe.Subscription.list(customer=customer_id, limit=1)
+    if not subs.data:
+        raise HTTPException(404, "No subscription found")
+    sub = _stripe.Subscription.modify(subs.data[0].id, cancel_at_period_end=False)
+    _update_subscription_from_stripe(sub)
+    log.info("reactivate_subscription: user_id=%s", user["id"])
+    return {"cancel_at_period_end": False}
 
 
 @stripe_router.get("/plans")
@@ -889,15 +971,22 @@ def _update_subscription_from_stripe(stripe_sub) -> None:
         log.warning("stripe webhook: could not resolve user for subscription %s", stripe_sub.get("id"))
         return
 
+    cancel_at_end = int(bool(stripe_sub.get("cancel_at_period_end", False)))
+    raw_period_end = stripe_sub.get("current_period_end")
+    period_end_iso = (
+        datetime.fromtimestamp(raw_period_end, tz=timezone.utc).isoformat()
+        if raw_period_end else None
+    )
+
     with _get_db() as conn:
         conn.execute(
-            "UPDATE users SET subscription_status = ?, plan = ? WHERE id = ?",
-            (new_status, new_plan, user_id),
+            "UPDATE users SET subscription_status = ?, plan = ?, cancel_at_period_end = ?, current_period_end = ? WHERE id = ?",
+            (new_status, new_plan, cancel_at_end, period_end_iso, user_id),
         )
         conn.commit()
     log.info(
-        "subscription %s → status=%s plan=%s for user_id=%s",
-        stripe_sub.get("id"), new_status, new_plan, user_id,
+        "subscription %s → status=%s plan=%s cancel_at_end=%s for user_id=%s",
+        stripe_sub.get("id"), new_status, new_plan, cancel_at_end, user_id,
     )
 
 
@@ -920,7 +1009,32 @@ async def stripe_webhook(request: Request):
     event_type: str = event["type"]
     data_obj = event["data"]["object"]
 
-    if event_type in (
+    if event_type == "checkout.session.completed":
+        # Fired as soon as checkout succeeds — update plan immediately
+        sub_id = data_obj.get("subscription")
+        if sub_id:
+            try:
+                sub = _stripe.Subscription.retrieve(sub_id)
+                # Inject user_id from session metadata into sub for reliable lookup
+                meta_uid = (data_obj.get("metadata") or {}).get("user_id")
+                if meta_uid and not (sub.get("metadata") or {}).get("user_id"):
+                    # Manually pass user_id to the updater via customer lookup
+                    raw_status = sub.get("status", "inactive")
+                    new_status = _SUB_STATUS_MAP.get(raw_status, "inactive")
+                    new_plan = _plan_from_stripe_sub(sub) if new_status == "active" else "free"
+                    with _get_db() as conn:
+                        conn.execute(
+                            "UPDATE users SET subscription_status = ?, plan = ? WHERE id = ?",
+                            (new_status, new_plan, int(meta_uid)),
+                        )
+                        conn.commit()
+                    log.info("checkout.session.completed: user_id=%s → status=%s plan=%s", meta_uid, new_status, new_plan)
+                else:
+                    _update_subscription_from_stripe(sub)
+            except Exception as exc:
+                log.warning("checkout.session.completed: error processing sub %s: %s", sub_id, exc, exc_info=True)
+
+    elif event_type in (
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
@@ -1207,8 +1321,11 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
     selected_plan = extras.get("plan", "free")
     callback_origin = extras.get("origin", FRONTEND_ORIGIN)
 
+    log.info("google_callback: email=%s is_new=%s selected_plan=%s origin=%s", user["email"], is_new, selected_plan, callback_origin)
+
     if selected_plan in ("starter", "pro", "elite") and _stripe and STRIPE_SECRET_KEY:
         price_id = PLAN_PRICES.get(selected_plan, "")
+        log.info("google_callback: routing to Stripe plan=%s price_id=%s", selected_plan, price_id)
         if price_id:
             try:
                 customer_id = user["stripe_customer_id"]
@@ -1235,10 +1352,19 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
                     success_url=success_url,
                     cancel_url=cancel_url,
                     metadata={"user_id": str(user["id"])},
+                    subscription_data={"metadata": {"user_id": str(user["id"])}},
                 )
-                return RedirectResponse(url=session["url"], status_code=302)
+                checkout_url = session.get("url") or session.get("checkout_url", "")
+                log.info("google_callback: redirecting to Stripe checkout url=%s", checkout_url[:60] if checkout_url else "NONE")
+                if checkout_url:
+                    return RedirectResponse(url=checkout_url, status_code=302)
+                log.warning("google_callback: Stripe session had no url, falling through")
             except Exception as exc:
-                log.warning("google_callback stripe checkout error: %s", exc)
+                log.warning("google_callback stripe checkout error: %s", exc, exc_info=True)
+        else:
+            log.warning("google_callback: no price_id for plan=%s PLAN_PRICES=%s", selected_plan, PLAN_PRICES)
+    else:
+        log.info("google_callback: skipping Stripe — plan=%s stripe=%s key=%s", selected_plan, bool(_stripe), bool(STRIPE_SECRET_KEY))
 
     return _redirect_to_app(user, is_new=is_new, origin=callback_origin)
 
