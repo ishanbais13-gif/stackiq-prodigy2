@@ -26,14 +26,21 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger("stackiq")
 
 _AUTH_DB_PATH   = os.getenv("AUTH_DB_PATH",  os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth.db"))
-_SENDGRID_KEY   = os.getenv("SENDGRID_API_KEY", "")
 _FROM_EMAIL     = os.getenv("ALERT_FROM_EMAIL", "hello@useaurexis.com")
 _FRONTEND_URL   = os.getenv("FRONTEND_ORIGIN",  "https://useaurexis.com")
 
-_TWILIO_SID     = os.getenv("TWILIO_ACCOUNT_SID", "")
-_TWILIO_TOKEN   = os.getenv("TWILIO_AUTH_TOKEN",  "")
-_TWILIO_FROM    = os.getenv("TWILIO_FROM_NUMBER",  "")
-_TWILIO_CHANNEL = os.getenv("TWILIO_CHANNEL", "sms").lower()  # "sms" or "whatsapp"
+
+def _sg_key() -> str:
+    return os.getenv("SENDGRID_API_KEY", "")
+
+
+def _twilio_creds():
+    return (
+        os.getenv("TWILIO_ACCOUNT_SID", ""),
+        os.getenv("TWILIO_AUTH_TOKEN", ""),
+        os.getenv("TWILIO_FROM_NUMBER", ""),
+        os.getenv("TWILIO_CHANNEL", "sms").lower(),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,7 +94,9 @@ def _get_opted_in_users(alert_col: str) -> List[Dict[str, Any]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _send_email(to_email: str, subject: str, html: str) -> bool:
-    if not _SENDGRID_KEY:
+    key = _sg_key()
+    if not key:
+        log.warning("alerts: SENDGRID_API_KEY not set — cannot send email to %s", to_email)
         return False
     try:
         payload = json.dumps({
@@ -99,13 +108,22 @@ def _send_email(to_email: str, subject: str, html: str) -> bool:
         req = _ur.Request(
             "https://api.sendgrid.com/v3/mail/send",
             data=payload,
-            headers={"Authorization": f"Bearer {_SENDGRID_KEY}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             method="POST",
         )
         with _ur.urlopen(req, timeout=10) as resp:
+            log.info("alerts.email: sent to %s (HTTP %s)", to_email, resp.status)
             return resp.status in (200, 202)
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        log.error("alerts.email: HTTP %s sending to %s — %s", e.code, to_email, body)
+        return False
     except Exception as e:
-        log.warning(f"alerts.send_email to {to_email}: {e}")
+        log.error("alerts.email: unexpected error sending to %s — %s", to_email, e)
         return False
 
 
@@ -114,13 +132,17 @@ def _send_email(to_email: str, subject: str, html: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _send_sms(to_phone: str, body: str) -> bool:
-    if not (_TWILIO_SID and _TWILIO_TOKEN and _TWILIO_FROM):
+    twilio_sid, twilio_token, twilio_from, twilio_channel = _twilio_creds()
+    if not (twilio_sid and twilio_token and twilio_from):
+        log.warning("alerts.sms: Twilio env vars not set — cannot send SMS to %s", to_phone)
         return False
     if not to_phone or not to_phone.startswith("+"):
+        log.warning("alerts.sms: invalid phone number %r", to_phone)
         return False
     try:
-        from_addr = f"whatsapp:{_TWILIO_FROM}" if _TWILIO_CHANNEL == "whatsapp" else _TWILIO_FROM
-        to_addr   = f"whatsapp:{to_phone}"     if _TWILIO_CHANNEL == "whatsapp" else to_phone
+        import base64
+        from_addr = f"whatsapp:{twilio_from}" if twilio_channel == "whatsapp" else twilio_from
+        to_addr   = f"whatsapp:{to_phone}"    if twilio_channel == "whatsapp" else to_phone
 
         payload = urllib.parse.urlencode({
             "From": from_addr,
@@ -128,18 +150,26 @@ def _send_sms(to_phone: str, body: str) -> bool:
             "Body": body,
         }).encode()
 
-        import base64
-        creds = base64.b64encode(f"{_TWILIO_SID}:{_TWILIO_TOKEN}".encode()).decode()
+        creds = base64.b64encode(f"{twilio_sid}:{twilio_token}".encode()).decode()
         req = _ur.Request(
-            f"https://api.twilio.com/2010-04-01/Accounts/{_TWILIO_SID}/Messages.json",
+            f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Messages.json",
             data=payload,
             headers={"Authorization": f"Basic {creds}", "Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
         with _ur.urlopen(req, timeout=10) as resp:
+            log.info("alerts.sms: sent to %s (HTTP %s)", to_phone, resp.status)
             return resp.status in (200, 201)
+    except urllib.error.HTTPError as e:
+        body_txt = ""
+        try:
+            body_txt = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        log.error("alerts.sms: HTTP %s sending to %s — %s", e.code, to_phone, body_txt)
+        return False
     except Exception as e:
-        log.warning(f"alerts.send_sms to {to_phone}: {e}")
+        log.error("alerts.sms: unexpected error sending to %s — %s", to_phone, e)
         return False
 
 

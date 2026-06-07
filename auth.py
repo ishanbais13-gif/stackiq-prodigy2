@@ -810,6 +810,44 @@ def test_email(user: sqlite3.Row = Depends(get_current_user)):
     }
 
 
+@auth_router.post("/test-welcome")
+def test_welcome_email(user: sqlite3.Row = Depends(get_current_user)):
+    """Re-fire the welcome email to the current user. For testing only."""
+    to = user["email"]
+    name = ""
+    try: name = user["first_name"] or ""
+    except Exception: pass
+    delivered = _send_email(
+        to_email=to,
+        subject="Welcome to Aurexis — your edge starts now",
+        html=_welcome_html(name),
+        plain=(
+            f"Hey {name or 'there'},\n\nWelcome to Aurexis. Every morning we scan 1,200+ stocks "
+            f"and surface one high-conviction trade setup with entry, stop, and targets.\n\n"
+            f"Open the app: {_FRONTEND_URL}\n\nAurexis"
+        ),
+    )
+    return {"ok": delivered, "to": to, "from_email": _FROM_EMAIL}
+
+
+@auth_router.post("/test-alert")
+def test_alert_email(user: sqlite3.Row = Depends(get_current_user)):
+    """Fire a test new-pick alert email to the current user."""
+    from alerts import _new_pick_html, _send_email as _alerts_send_email
+    to = user["email"]
+    name = ""
+    try: name = user["first_name"] or ""
+    except Exception: pass
+    html = _new_pick_html(
+        symbol="NVDA", decision="HIGH_CONVICTION", score=8.4,
+        entry=875.20, stop=852.00, target=920.00,
+        signals=["MOMENTUM_EXPANSION", "BREAKOUT_STRUCTURE", "RS_LEADER"],
+        first_name=name,
+    )
+    delivered = _alerts_send_email(to, "New Aurexis AI Pick — NVDA (test)", html)
+    return {"ok": delivered, "to": to}
+
+
 @auth_router.delete("/delete-account")
 def delete_account(response: Response, user: sqlite3.Row = Depends(get_current_user)):
     with _get_db() as conn:
