@@ -674,30 +674,12 @@ def login(body: LoginRequest, response: Response):
             detail="Invalid email or password",
         )
 
-    # If 2FA is enabled, send OTP and ask frontend to show code screen
-    try:
-        two_fa = bool(user["two_fa_enabled"])
-    except (IndexError, KeyError):
-        two_fa = False
-
-    if two_fa:
-        first = ""
-        try: first = user["first_name"] or ""
-        except (IndexError, KeyError): pass
-        send_otp_bg(user["id"], user["email"], first)
-        return {"requires_2fa": True, "email": user["email"]}
-
-    plan = _user_plan(user)
-    token = create_access_token(user["id"], user["email"], plan=plan)
-    _set_auth_cookie(response, token)
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "user_id": user["id"],
-        "email": user["email"],
-        "plan": plan,
-        "subscription_status": user["subscription_status"],
-    }
+    # 2FA is mandatory — always send OTP and require verification
+    first = ""
+    try: first = user["first_name"] or ""
+    except (IndexError, KeyError): pass
+    send_otp_bg(user["id"], user["email"], first)
+    return {"requires_2fa": True, "email": user["email"]}
 
 
 class OTPRequest(BaseModel):
