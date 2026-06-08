@@ -174,6 +174,18 @@ def _user_plan(user: sqlite3.Row) -> str:
 # Run migration immediately on import so the plan column always exists.
 init_auth_db()
 
+# One-time: upgrade owner account to elite
+def _owner_upgrade() -> None:
+    try:
+        with _get_db() as conn:
+            conn.execute(
+                "UPDATE users SET plan='elite', subscription_status='active' WHERE email IN ('ishanbais13@gmail.com','baisishan48@gmail.com')"
+            )
+            conn.commit()
+    except Exception:
+        pass
+_owner_upgrade()
+
 # ---------------------------------------------------------------------------
 # Email — welcome message sent in a background thread after signup
 # ---------------------------------------------------------------------------
