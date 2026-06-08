@@ -783,6 +783,20 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
     }
 
 
+@auth_router.post("/refresh-token")
+def refresh_token(response: Response, user: sqlite3.Row = Depends(get_current_user)):
+    """Issue a new JWT reflecting the current plan/status from DB."""
+    plan = _user_plan(user)
+    token = create_access_token(user["id"], user["email"], plan=plan)
+    _set_auth_cookie(response, token)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "plan": plan,
+        "subscription_status": user["subscription_status"],
+    }
+
+
 @auth_router.post("/test-email")
 def test_email(user: sqlite3.Row = Depends(get_current_user)):
     """
