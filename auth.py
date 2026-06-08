@@ -783,17 +783,19 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
     }
 
 
+class AdminUpgradeBody(BaseModel):
+    email: str
+    plan: str = "starter"
+    secret: str = ""
+
 @auth_router.post("/admin-upgrade")
-def admin_upgrade(request: Request):
+def admin_upgrade(body: AdminUpgradeBody):
     """Temp: upgrade a user by email. Protected by ADMIN_SECRET env var."""
-    import asyncio
-    secret = os.getenv("ADMIN_SECRET", "")
-    auth_header = request.headers.get("x-admin-secret", "")
-    if not secret or auth_header != secret:
+    expected = os.getenv("ADMIN_SECRET", "")
+    if not expected or body.secret != expected:
         raise HTTPException(403, "Forbidden")
-    body = asyncio.get_event_loop().run_until_complete(request.json())
-    email = (body.get("email") or "").strip().lower()
-    plan = (body.get("plan") or "starter").strip().lower()
+    email = body.email.strip().lower()
+    plan = body.plan.strip().lower()
     if not email:
         raise HTTPException(400, "email required")
     with _get_db() as conn:
@@ -806,10 +808,7 @@ def admin_upgrade(request: Request):
         )
         conn.commit()
         row = conn.execute("SELECT id, email, plan, subscription_status FROM users WHERE LOWER(email)=?", (email,)).fetchone()
-    return {
-        "db_path": _AUTH_DB_PATH,
-        "updated": dict(row) if row else None,
-    }
+    return {"db_path": _AUTH_DB_PATH, "updated": dict(row) if row else None}
 
 
 @auth_router.get("/admin-dbinfo")
@@ -819,8 +818,9 @@ def admin_dbinfo(x_admin_secret: str = ""):
     if not secret or x_admin_secret != secret:
         raise HTTPException(403, "Forbidden")
     with _get_db() as conn:
-        rows = conn.execute("SELECT id, email, plan, subscription_status FROM users").fetchall()
-    return {"db_path": _AUTH_DB_PATH, "users": [dict(r) for r in rows]}
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(users)").fetchall()]
+        rows = conn.execute("SELECT id, email, plan, subscription_status FROM users").fetchall() if "plan" in cols else conn.execute("SELECT id, email, subscription_status FROM users").fetchall()
+    return {"db_path": _AUTH_DB_PATH, "cols": cols, "users": [dict(r) for r in rows]}
 
 
 @auth_router.post("/refresh-token")
