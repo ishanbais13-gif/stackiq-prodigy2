@@ -1,14 +1,12 @@
 """
-alerts.py — New-pick and outcome alerts via email (SendGrid) and SMS/WhatsApp (Twilio).
+alerts.py — New-pick and outcome alerts via email (SendGrid) and SMS (AWS SNS).
 
 Environment variables needed:
   SENDGRID_API_KEY       — already set (shared with auth.py)
   ALERT_FROM_EMAIL       — already set (shared with auth.py)
-  TWILIO_ACCOUNT_SID     — Twilio account SID
-  TWILIO_AUTH_TOKEN      — Twilio auth token
-  TWILIO_FROM_NUMBER     — E.164 SMS number, e.g. +14155551234
-                           For WhatsApp: set TWILIO_CHANNEL=whatsapp
-  TWILIO_CHANNEL         — "sms" (default) or "whatsapp"
+  AWS_ACCESS_KEY_ID      — IAM user with AmazonSNSFullAccess
+  AWS_SECRET_ACCESS_KEY  — IAM secret
+  AWS_REGION             — e.g. us-east-1
 """
 
 from __future__ import annotations
@@ -34,12 +32,11 @@ def _sg_key() -> str:
     return os.getenv("SENDGRID_API_KEY", "")
 
 
-def _twilio_creds():
+def _aws_creds():
     return (
-        os.getenv("TWILIO_ACCOUNT_SID", ""),
-        os.getenv("TWILIO_AUTH_TOKEN", ""),
-        os.getenv("TWILIO_FROM_NUMBER", ""),
-        os.getenv("TWILIO_CHANNEL", "sms").lower(),
+        os.getenv("AWS_ACCESS_KEY_ID", ""),
+        os.getenv("AWS_SECRET_ACCESS_KEY", ""),
+        os.getenv("AWS_REGION", "us-east-1"),
     )
 
 
@@ -132,44 +129,34 @@ def _send_email(to_email: str, subject: str, html: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _send_sms(to_phone: str, body: str) -> bool:
-    twilio_sid, twilio_token, twilio_from, twilio_channel = _twilio_creds()
-    if not (twilio_sid and twilio_token and twilio_from):
-        log.warning("alerts.sms: Twilio env vars not set — cannot send SMS to %s", to_phone)
+    aws_key, aws_secret, aws_region = _aws_creds()
+    if not (aws_key and aws_secret):
+        log.warning("alerts.sms: AWS creds not set — cannot send SMS to %s", to_phone)
         return False
     if not to_phone or not to_phone.startswith("+"):
         log.warning("alerts.sms: invalid phone number %r", to_phone)
         return False
     try:
-        import base64
-        from_addr = f"whatsapp:{twilio_from}" if twilio_channel == "whatsapp" else twilio_from
-        to_addr   = f"whatsapp:{to_phone}"    if twilio_channel == "whatsapp" else to_phone
-
-        payload = urllib.parse.urlencode({
-            "From": from_addr,
-            "To":   to_addr,
-            "Body": body,
-        }).encode()
-
-        creds = base64.b64encode(f"{twilio_sid}:{twilio_token}".encode()).decode()
-        req = _ur.Request(
-            f"https://api.twilio.com/2010-04-01/Accounts/{twilio_sid}/Messages.json",
-            data=payload,
-            headers={"Authorization": f"Basic {creds}", "Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
+        import boto3
+        sns = boto3.client(
+            "sns",
+            region_name=aws_region,
+            aws_access_key_id=aws_key,
+            aws_secret_access_key=aws_secret,
         )
-        with _ur.urlopen(req, timeout=10) as resp:
-            log.info("alerts.sms: sent to %s (HTTP %s)", to_phone, resp.status)
-            return resp.status in (200, 201)
-    except urllib.error.HTTPError as e:
-        body_txt = ""
-        try:
-            body_txt = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        log.error("alerts.sms: HTTP %s sending to %s — %s", e.code, to_phone, body_txt)
-        return False
+        resp = sns.publish(
+            PhoneNumber=to_phone,
+            Message=body,
+            MessageAttributes={
+                "AWS.SNS.SMS.SMSType": {"DataType": "String", "StringValue": "Transactional"},
+                "AWS.SNS.SMS.SenderID": {"DataType": "String", "StringValue": "Aurexis"},
+            },
+        )
+        msg_id = resp.get("MessageId", "")
+        log.info("alerts.sms: sent to %s (MessageId=%s)", to_phone, msg_id)
+        return bool(msg_id)
     except Exception as e:
-        log.error("alerts.sms: unexpected error sending to %s — %s", to_phone, e)
+        log.error("alerts.sms: error sending to %s — %s", to_phone, e)
         return False
 
 
