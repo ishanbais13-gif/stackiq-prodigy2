@@ -9002,7 +9002,7 @@ async def best_pick_v2(
     refresh: bool = False,
     allow_llm_news: bool = True,
     full_universe: bool = False,
-    _user=_dep_starter,
+    _user=Depends(_get_current_user),
 ):
     _ = refresh
     _ = full_universe
