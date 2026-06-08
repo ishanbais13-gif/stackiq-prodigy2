@@ -783,6 +783,46 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
     }
 
 
+@auth_router.post("/admin-upgrade")
+def admin_upgrade(request: Request):
+    """Temp: upgrade a user by email. Protected by ADMIN_SECRET env var."""
+    import asyncio
+    secret = os.getenv("ADMIN_SECRET", "")
+    auth_header = request.headers.get("x-admin-secret", "")
+    if not secret or auth_header != secret:
+        raise HTTPException(403, "Forbidden")
+    body = asyncio.get_event_loop().run_until_complete(request.json())
+    email = (body.get("email") or "").strip().lower()
+    plan = (body.get("plan") or "starter").strip().lower()
+    if not email:
+        raise HTTPException(400, "email required")
+    with _get_db() as conn:
+        cols = [c[1] for c in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "plan" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'")
+        conn.execute(
+            "UPDATE users SET plan=?, subscription_status='active' WHERE LOWER(email)=?",
+            (plan, email)
+        )
+        conn.commit()
+        row = conn.execute("SELECT id, email, plan, subscription_status FROM users WHERE LOWER(email)=?", (email,)).fetchone()
+    return {
+        "db_path": _AUTH_DB_PATH,
+        "updated": dict(row) if row else None,
+    }
+
+
+@auth_router.get("/admin-dbinfo")
+def admin_dbinfo(x_admin_secret: str = ""):
+    """Temp: show DB path and all users."""
+    secret = os.getenv("ADMIN_SECRET", "")
+    if not secret or x_admin_secret != secret:
+        raise HTTPException(403, "Forbidden")
+    with _get_db() as conn:
+        rows = conn.execute("SELECT id, email, plan, subscription_status FROM users").fetchall()
+    return {"db_path": _AUTH_DB_PATH, "users": [dict(r) for r in rows]}
+
+
 @auth_router.post("/refresh-token")
 def refresh_token(response: Response, user: sqlite3.Row = Depends(get_current_user)):
     """Issue a new JWT reflecting the current plan/status from DB."""
