@@ -3377,12 +3377,73 @@ async def scan_best_pick_v2(
 
     # --- normalize output ---
     tp = result.get("trade_plan", {})
+    _entry   = tp.get("entry")
+    _stop    = tp.get("stop")
+    _targets = tp.get("targets") or []
+    _t1      = _targets[0] if len(_targets) > 0 else None
+    _t2      = _targets[1] if len(_targets) > 1 else None
+    _t3      = _targets[2] if len(_targets) > 2 else None
+
+    # Risk:Reward ratio  (reward to first target / risk to stop)
+    _rr_ratio = None
+    try:
+        _risk   = abs(float(_entry) - float(_stop))
+        _reward = abs(float(_t1)    - float(_entry))
+        if _risk > 0:
+            _rr_ratio = round(_reward / _risk, 2)
+    except Exception:
+        pass
+
+    # Stop-loss % from entry
+    _stop_pct = None
+    try:
+        _stop_pct = round(abs(float(_entry) - float(_stop)) / float(_entry) * 100, 2)
+    except Exception:
+        pass
+
+    # T1 / T2 / T3 gain %
+    def _gain_pct(tgt):
+        try:
+            return round((float(tgt) - float(_entry)) / float(_entry) * 100, 2)
+        except Exception:
+            return None
+
+    # Time horizon: rough estimate from regime + conviction
+    _td  = result.get("trade_decision", "")
+    _reg = str(result.get("market_regime") or "").upper()
+    if "HIGH" in _td:
+        _horizon_days = 3 if "BULL" in _reg else 5
+        _horizon_label = "3–5 days"
+    elif "LOW" in _td:
+        _horizon_days = 5
+        _horizon_label = "5–7 days"
+    else:
+        _horizon_days = 7
+        _horizon_label = "7–10 days"
+
+    # Entry method based on regime
+    _entry_note = (
+        "Buy on open or limit at entry price" if "BULL" in _reg
+        else "Limit order at entry — do not chase" if "CHOP" in _reg
+        else "Limit order preferred"
+    )
 
     normalized = {
         "symbol": result.get("symbol"),
-        "entry": tp.get("entry"),
-        "stop": tp.get("stop"),
-        "take_profit": (tp.get("targets") or [None])[0],
+        "entry": _entry,
+        "stop": _stop,
+        "take_profit": _t1,
+        "target_1": _t1,
+        "target_2": _t2,
+        "target_3": _t3,
+        "target_1_gain_pct": _gain_pct(_t1),
+        "target_2_gain_pct": _gain_pct(_t2),
+        "target_3_gain_pct": _gain_pct(_t3),
+        "stop_loss_pct": _stop_pct,
+        "risk_reward_ratio": _rr_ratio,
+        "time_horizon_days": _horizon_days,
+        "time_horizon_label": _horizon_label,
+        "entry_note": _entry_note,
         "confidence": result.get("confidence_0_10"),
         "final_score_0_10": result.get("final_score_0_10"),
     }
