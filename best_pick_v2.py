@@ -87,6 +87,93 @@ def _normalize_llm_reasoning_payload(payload: Any) -> Dict[str, Any]:
 _EARNINGS_SAFE_CACHE: Dict[str, Any] = {}
 _EARNINGS_SAFE_CACHE_TTL = 3600  # seconds
 
+# ── Weekly pick quota by regime ────────────────────────────────────────────────
+
+def _regime_weekly_limit(regime: str) -> int:
+    """Max trade picks to output per calendar week based on market regime."""
+    r = regime.upper()
+    if "BULL" in r:
+        return 3   # active market — fire Mon/Wed/Fri-ish
+    elif "BEAR" in r:
+        return 1   # defensive — only the clearest setup all week
+    elif "CHOP" in r:
+        return 1   # choppy — one best shot, then stay cash
+    else:          # TRENDING, VOLATILE, SIDEWAYS, UNKNOWN
+        return 2   # moderate — two good setups per week
+
+
+def _weekly_picks_so_far() -> int:
+    """Count confirmed trade picks (non-NO_TRADE) recorded this ISO calendar week."""
+    import sqlite3 as _sql
+    from datetime import date, timedelta
+    today = date.today()
+    week_start = (today - timedelta(days=today.weekday())).isoformat()  # Monday
+    week_end   = (today + timedelta(days=6 - today.weekday())).isoformat()  # Sunday
+    _perf_db = os.getenv("PERF_TRACKER_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf_tracker.db"))
+    try:
+        con = _sql.connect(_perf_db, timeout=5)
+        row = con.execute(
+            "SELECT COUNT(*) FROM picks WHERE date >= ? AND date <= ? AND trade_decision IN ('HIGH_CONVICTION','LOW_CONVICTION')",
+            (week_start, week_end),
+        ).fetchone()
+        con.close()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
+# ── Historical win-pattern boost ──────────────────────────────────────────────
+
+_WIN_PATTERN_CACHE: Dict[str, Any] = {}
+
+def _winning_pattern_boost(candidate_signals: Set[str]) -> float:
+    """
+    Score boost (0–1.5) when today's candidate matches signal combos from recent big wins.
+    Caches for 6 hours so we don't hammer the DB on every candidate.
+    """
+    import sqlite3 as _sql, json as _json
+    now = time.time()
+    if _WIN_PATTERN_CACHE.get("ts", 0) + 21600 > now:
+        winning_combos = _WIN_PATTERN_CACHE.get("combos", [])
+    else:
+        _perf_db = os.getenv("PERF_TRACKER_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf_tracker.db"))
+        winning_combos: List[Set[str]] = []
+        try:
+            con = _sql.connect(_perf_db, timeout=5)
+            rows = con.execute(
+                """SELECT edge_signals, max_return_pct FROM picks
+                   WHERE status IN ('won','won_drift')
+                     AND max_return_pct >= 4.0
+                   ORDER BY max_return_pct DESC
+                   LIMIT 20"""
+            ).fetchall()
+            con.close()
+            for raw_sigs, ret_pct in rows:
+                try:
+                    sigs = set(_json.loads(raw_sigs or "[]"))
+                    if sigs:
+                        winning_combos.append((sigs, float(ret_pct or 0)))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        _WIN_PATTERN_CACHE["combos"] = winning_combos
+        _WIN_PATTERN_CACHE["ts"] = now
+
+    if not candidate_signals or not winning_combos:
+        return 0.0
+
+    best_overlap = 0.0
+    for win_sigs, win_ret in winning_combos:
+        if not win_sigs:
+            continue
+        overlap = len(candidate_signals & win_sigs) / max(len(win_sigs), 1)
+        # Weight by return magnitude — bigger wins count more
+        weight = min(win_ret / 10.0, 1.5)
+        best_overlap = max(best_overlap, overlap * weight)
+
+    return round(min(best_overlap, 1.5), 3)
+
 # Hardcoded earnings calendar — safety net when Yahoo Finance / news classifier misses
 # upcoming reports. Update weekly. Format: "TICKER": "YYYY-MM-DD".
 KNOWN_EARNINGS_DATES: Dict[str, str] = {
@@ -2934,11 +3021,26 @@ async def scan_best_pick_v2(
         _pm  = float(best.premover_score_0_10 or 5.0)
         _fs  = float(best.final_score_0_10 or best.ai_score or 5.0)
         _cf  = float(confidence_0_10)
-        # Minimum floor gate: hard NO_TRADE only when the best stock is genuinely
-        # poor. Lowered floors mean the system fires on more days.
+
+        # ── Winning-pattern boost ──────────────────────────────────────────
+        # Analyse recent big wins and reward candidates matching their signal
+        # fingerprint. Only boosts — never penalises.
+        _win_boost = _winning_pattern_boost(set(best.edge_signals or []))
+        _pm = min(_pm + _win_boost * 0.5, 10.0)
+        _fs = min(_fs + _win_boost * 0.4, 10.0)
+        if _win_boost > 0.1:
+            log.info("best_pick: winning-pattern boost +%.2f (pm→%.1f fs→%.1f)", _win_boost, _pm, _fs)
+
+        # ── Weekly pick-count gate ─────────────────────────────────────────
+        _week_limit  = _regime_weekly_limit(regime_str)
+        _week_so_far = _weekly_picks_so_far()
+        _week_full   = _week_so_far >= _week_limit
+
+        # Minimum floor gate
         _pm_floor = 2.5 if regime_str == "CHOPPY" else 4.0
         _fs_floor = 4.5 if regime_str == "CHOPPY" else 5.2
         _no_trade_reason = ""
+
         if _pm < _pm_floor or _fs < _fs_floor:
             _parts = []
             if _fs < _fs_floor:
@@ -2948,16 +3050,19 @@ async def scan_best_pick_v2(
             _no_trade_reason = "No quality setups found: " + "; ".join(_parts)
             best.trade_decision = "NO_TRADE"
             best.is_trade = False
+        elif _week_full:
+            # Weekly quota used — preserve as watchlist candidate, not a trade
+            _no_trade_reason = f"Weekly quota met ({_week_so_far}/{_week_limit} picks in {regime_str} regime)"
+            log.info("best_pick: %s", _no_trade_reason)
+            best.trade_decision = "NO_TRADE"
+            best.is_trade = False
         elif _pm >= 6.0 and _fs >= 6.5:
-            # Strong setup — full conviction trade
             best.trade_decision = "HIGH_CONVICTION"
             best.is_trade = True
         elif _pm >= 5.0 and _fs >= 5.8:
-            # Moderate setup — still a real trade, shown with lower confidence badge
             best.trade_decision = "LOW_CONVICTION"
             best.is_trade = True
         elif _pm >= 4.0 and _fs >= 5.2:
-            # Weak setup — watchlist candidate only, not a recommended trade
             best.trade_decision = "NO_TRADE"
             best.is_trade = False
         else:
