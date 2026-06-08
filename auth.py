@@ -655,10 +655,9 @@ def signup(body: SignupRequest, response: Response):
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Email already registered")
 
-    token = create_access_token(user_id, body.email, plan="free")
-    _set_auth_cookie(response, token)
-    send_welcome_email_bg(body.email, first)
-    return {"access_token": token, "token_type": "bearer", "user_id": user_id, "email": body.email, "plan": "free", "first_name": first}
+    # Send OTP for mandatory 2FA — welcome email fires after OTP verified
+    send_otp_bg(user_id, body.email, first)
+    return {"requires_2fa": True, "email": body.email, "first_name": first, "is_new_user": True}
 
 
 @auth_router.post("/login")
@@ -687,8 +686,14 @@ class OTPRequest(BaseModel):
     code: str
 
 
+class OTPVerifyRequest(BaseModel):
+    email: EmailStr
+    code: str
+    is_new_user: bool = False
+
+
 @auth_router.post("/verify-otp")
-def verify_otp(body: OTPRequest, response: Response):
+def verify_otp(body: OTPVerifyRequest, response: Response):
     with _get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE email = ?", (body.email,)).fetchone()
     if user is None:
@@ -698,13 +703,33 @@ def verify_otp(body: OTPRequest, response: Response):
     plan = _user_plan(user)
     token = create_access_token(user["id"], user["email"], plan=plan)
     _set_auth_cookie(response, token)
+    if body.is_new_user:
+        first = ""
+        try: first = user["first_name"] or ""
+        except (IndexError, KeyError): pass
+        send_welcome_email_bg(user["email"], first)
     return {
         "access_token": token,
         "token_type": "bearer",
         "user_id": user["id"],
         "email": user["email"],
         "plan": plan,
+        "first_name": user["first_name"] if "first_name" in user.keys() else "",
     }
+
+
+@auth_router.post("/resend-otp")
+def resend_otp(body: OTPRequest):
+    """Resend OTP to an existing user (used by signup OTP screen resend button)."""
+    with _get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (body.email,)).fetchone()
+    if user is None:
+        return {"ok": True}  # Don't reveal whether email exists
+    first = ""
+    try: first = user["first_name"] or ""
+    except (IndexError, KeyError): pass
+    send_otp_bg(user["id"], user["email"], first)
+    return {"ok": True}
 
 
 class Enable2FARequest(BaseModel):
