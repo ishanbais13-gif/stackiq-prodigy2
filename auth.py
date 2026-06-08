@@ -967,12 +967,34 @@ _SUB_STATUS_MAP = {
 }
 
 
+def _stripe_to_dict(obj) -> dict:
+    """Safely convert a Stripe SDK object (StripeObject) or plain dict to a regular dict."""
+    if isinstance(obj, dict):
+        return obj
+    try:
+        return obj.to_dict_recursive()
+    except AttributeError:
+        pass
+    try:
+        return dict(obj)
+    except Exception:
+        return {}
+
+
 def _plan_from_stripe_sub(stripe_sub) -> str:
     """Extract our plan string from a Stripe subscription object."""
     try:
-        items = stripe_sub.get("items", {}).get("data", [])
+        d = _stripe_to_dict(stripe_sub)
+        items_data = d.get("items", {})
+        if isinstance(items_data, dict):
+            items = items_data.get("data", [])
+        else:
+            items = []
         for item in items:
-            price_id = item.get("price", {}).get("id", "")
+            item_d = _stripe_to_dict(item) if not isinstance(item, dict) else item
+            price = item_d.get("price", {})
+            price_d = _stripe_to_dict(price) if not isinstance(price, dict) else price
+            price_id = price_d.get("id", "")
             if price_id in _PRICE_TO_PLAN:
                 return _PRICE_TO_PLAN[price_id]
     except Exception:
@@ -982,13 +1004,14 @@ def _plan_from_stripe_sub(stripe_sub) -> str:
 
 def _update_subscription_from_stripe(stripe_sub) -> None:
     """Persist subscription status and plan change to the users table."""
-    raw_status = stripe_sub.get("status", "inactive")
+    d = _stripe_to_dict(stripe_sub)
+    raw_status = d.get("status", "inactive")
     new_status = _SUB_STATUS_MAP.get(raw_status, "inactive")
-    new_plan = _plan_from_stripe_sub(stripe_sub) if new_status == "active" else "free"
+    new_plan = _plan_from_stripe_sub(d) if new_status == "active" else "free"
 
     # Prefer metadata user_id, fall back to customer lookup
     user_id: Optional[int] = None
-    meta_uid = (stripe_sub.get("metadata") or {}).get("user_id")
+    meta_uid = (d.get("metadata") or {}).get("user_id")
     if meta_uid:
         try:
             user_id = int(meta_uid)
@@ -996,7 +1019,7 @@ def _update_subscription_from_stripe(stripe_sub) -> None:
             pass
 
     if user_id is None:
-        customer_id = stripe_sub.get("customer")
+        customer_id = d.get("customer")
         if customer_id:
             with _get_db() as conn:
                 row = conn.execute(
@@ -1006,11 +1029,11 @@ def _update_subscription_from_stripe(stripe_sub) -> None:
                     user_id = row["id"]
 
     if user_id is None:
-        log.warning("stripe webhook: could not resolve user for subscription %s", stripe_sub.get("id"))
+        log.warning("stripe webhook: could not resolve user for subscription %s", d.get("id"))
         return
 
-    cancel_at_end = int(bool(stripe_sub.get("cancel_at_period_end", False)))
-    raw_period_end = stripe_sub.get("current_period_end")
+    cancel_at_end = int(bool(d.get("cancel_at_period_end", False)))
+    raw_period_end = d.get("current_period_end")
     period_end_iso = (
         datetime.fromtimestamp(raw_period_end, tz=timezone.utc).isoformat()
         if raw_period_end else None
@@ -1024,7 +1047,7 @@ def _update_subscription_from_stripe(stripe_sub) -> None:
         conn.commit()
     log.info(
         "subscription %s → status=%s plan=%s cancel_at_end=%s for user_id=%s",
-        stripe_sub.get("id"), new_status, new_plan, cancel_at_end, user_id,
+        d.get("id"), new_status, new_plan, cancel_at_end, user_id,
     )
 
 
@@ -1045,18 +1068,17 @@ async def stripe_webhook(request: Request):
         raise HTTPException(400, f"Webhook error: {exc}")
 
     event_type: str = event["type"]
-    data_obj = event["data"]["object"]
+    data_obj = _stripe_to_dict(event["data"]["object"])
 
     if event_type == "checkout.session.completed":
         # Fired as soon as checkout succeeds — update plan immediately
         sub_id = data_obj.get("subscription")
         if sub_id:
             try:
-                sub = _stripe.Subscription.retrieve(sub_id)
+                sub = _stripe_to_dict(_stripe.Subscription.retrieve(sub_id))
                 # Inject user_id from session metadata into sub for reliable lookup
                 meta_uid = (data_obj.get("metadata") or {}).get("user_id")
                 if meta_uid and not (sub.get("metadata") or {}).get("user_id"):
-                    # Manually pass user_id to the updater via customer lookup
                     raw_status = sub.get("status", "inactive")
                     new_status = _SUB_STATUS_MAP.get(raw_status, "inactive")
                     new_plan = _plan_from_stripe_sub(sub) if new_status == "active" else "free"
@@ -1071,6 +1093,27 @@ async def stripe_webhook(request: Request):
                     _update_subscription_from_stripe(sub)
             except Exception as exc:
                 log.warning("checkout.session.completed: error processing sub %s: %s", sub_id, exc, exc_info=True)
+        else:
+            # No subscription field — may be one-time payment; try customer lookup
+            customer_id = data_obj.get("customer")
+            meta_uid = (data_obj.get("metadata") or {}).get("user_id")
+            if meta_uid:
+                # One-time checkout with user_id in metadata — grant starter access
+                with _get_db() as conn:
+                    conn.execute(
+                        "UPDATE users SET subscription_status = 'active', plan = 'starter' WHERE id = ?",
+                        (int(meta_uid),),
+                    )
+                    conn.commit()
+                log.info("checkout.session.completed (one-time): user_id=%s → starter", meta_uid)
+            elif customer_id:
+                with _get_db() as conn:
+                    conn.execute(
+                        "UPDATE users SET subscription_status = 'active', plan = 'starter' WHERE stripe_customer_id = ?",
+                        (customer_id,),
+                    )
+                    conn.commit()
+                log.info("checkout.session.completed (one-time): customer=%s → starter", customer_id)
 
     elif event_type in (
         "customer.subscription.created",
@@ -1083,7 +1126,7 @@ async def stripe_webhook(request: Request):
         sub_id = data_obj.get("subscription")
         if sub_id:
             try:
-                sub = _stripe.Subscription.retrieve(sub_id)
+                sub = _stripe_to_dict(_stripe.Subscription.retrieve(sub_id))
                 _update_subscription_from_stripe(sub)
             except Exception as exc:
                 log.warning("Failed to retrieve subscription %s: %s", sub_id, exc)
@@ -1092,7 +1135,7 @@ async def stripe_webhook(request: Request):
         sub_id = data_obj.get("subscription")
         if sub_id:
             try:
-                sub = _stripe.Subscription.retrieve(sub_id)
+                sub = _stripe_to_dict(_stripe.Subscription.retrieve(sub_id))
                 _update_subscription_from_stripe(sub)
             except Exception as exc:
                 log.warning("Failed to retrieve subscription %s: %s", sub_id, exc)
