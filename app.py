@@ -8997,16 +8997,28 @@ async def best_pick_alias(max_scan: int = 200, refresh: bool = False, tz: Option
     return await best_pick(max_scan=max_scan, refresh=refresh, tz=tz, stream=stream)
 
 
+def _user_field(user, *keys):
+    """Read a field from a sqlite3.Row or dict safely."""
+    for k in keys:
+        try:
+            v = user[k]
+            if v is not None:
+                return v
+        except Exception:
+            pass
+    return None
+
+
 def _check_starter_daily_limit(user) -> None:
     """Raise 429 if a Starter user has already fetched a pick today (UTC date)."""
     import sqlite3 as _sq3
     from datetime import datetime, timezone
 
-    plan = (getattr(user, "plan", None) or (user.get("plan") if isinstance(user, dict) else None) or "free").lower()
+    plan = str(_user_field(user, "plan") or "free").lower()
     if plan not in ("starter",):
-        return  # Pro/Elite: no limit
+        return  # Free/Pro/Elite: not subject to starter daily limit
 
-    user_id = getattr(user, "id", None) or (user.get("sub") or user.get("id") if isinstance(user, dict) else None)
+    user_id = _user_field(user, "id")
     if not user_id:
         return
 
@@ -9142,12 +9154,11 @@ async def best_pick_v2_free_unlock(
     from datetime import datetime, timezone
     import sqlite3 as _sqlite3
 
-    user_id = _user.get("sub") or _user.get("id")
-    plan = (_user.get("plan") or "free").lower()
+    user_id = _user_field(_user, "id")
+    plan = str(_user_field(_user, "plan") or "free").lower()
 
-    # Paid users should use the regular endpoint
     if plan != "free":
-        return await best_pick_v2(max_scan=max_scan)
+        raise HTTPException(status_code=400, detail="PAID_USERS_USE_BEST_PICK_V2")
 
     current_month = datetime.now(timezone.utc).strftime("%Y-%m")
 
@@ -9173,7 +9184,16 @@ async def best_pick_v2_free_unlock(
         )
         conn.commit()
 
-    return await best_pick_v2(max_scan=max_scan)
+    # Run the scan directly — can't call best_pick_v2() internally (dependency injection won't fire)
+    universe = await asyncio.to_thread(get_scan_universe, int(max_scan or 400))
+    out = await _scan_best_pick_v2(
+        symbols=universe,
+        max_scan=int(max_scan or 400),
+        max_seconds=55,
+        allow_llm_news=False,
+    )
+    out.setdefault("watchlist_candidates", [])
+    return out
 
 
 @app.get("/health", include_in_schema=True)
