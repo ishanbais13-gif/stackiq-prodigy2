@@ -879,29 +879,19 @@ def delete_account(response: Response, user: sqlite3.Row = Depends(get_current_u
     return {"ok": True}
 
 
-# TEMP — remove after testing
-_ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+def _owner_upgrade() -> None:
+    try:
+        with _get_db() as conn:
+            for email in ("ishanbais13@gmail.com", "baisishan48@gmail.com"):
+                conn.execute(
+                    "UPDATE users SET plan='elite', subscription_status='active' WHERE email=?",
+                    (email,),
+                )
+            conn.commit()
+    except Exception as exc:
+        log.warning("_owner_upgrade failed: %s", exc)
 
-class _AdminSetPlanBody(BaseModel):
-    secret: str
-    email: str
-    plan: str
-
-@auth_router.post("/admin-set-plan")
-def admin_set_plan(body: _AdminSetPlanBody):
-    if not _ADMIN_SECRET or body.secret != _ADMIN_SECRET:
-        raise HTTPException(403, "forbidden")
-    with _get_db() as conn:
-        conn.execute(
-            "UPDATE users SET plan=?, subscription_status=? WHERE email=?",
-            (body.plan, "active" if body.plan != "free" else "inactive", body.email),
-        )
-        conn.commit()
-        row = conn.execute("SELECT id, email, plan, subscription_status FROM users WHERE email=?", (body.email,)).fetchone()
-    if not row:
-        raise HTTPException(404, "user not found")
-    return {"ok": True, "id": row["id"], "email": row["email"], "plan": row["plan"], "subscription_status": row["subscription_status"]}
-# END TEMP
+_owner_upgrade()
 
 
 # ---------------------------------------------------------------------------
