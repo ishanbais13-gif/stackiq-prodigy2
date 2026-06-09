@@ -152,6 +152,14 @@ def init_auth_db() -> None:
             except Exception:
                 pass  # column already exists
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS pick_usage (
+                user_id  INTEGER NOT NULL,
+                date     TEXT    NOT NULL,
+                count    INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, date)
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS otp_tokens (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id    INTEGER NOT NULL,

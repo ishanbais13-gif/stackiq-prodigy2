@@ -8997,6 +8997,41 @@ async def best_pick_alias(max_scan: int = 200, refresh: bool = False, tz: Option
     return await best_pick(max_scan=max_scan, refresh=refresh, tz=tz, stream=stream)
 
 
+def _check_starter_daily_limit(user) -> None:
+    """Raise 429 if a Starter user has already fetched a pick today (UTC date)."""
+    import sqlite3 as _sq3
+    from datetime import datetime, timezone
+
+    plan = (getattr(user, "plan", None) or (user.get("plan") if isinstance(user, dict) else None) or "free").lower()
+    if plan not in ("starter",):
+        return  # Pro/Elite: no limit
+
+    user_id = getattr(user, "id", None) or (user.get("sub") or user.get("id") if isinstance(user, dict) else None)
+    if not user_id:
+        return
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    db_path = os.getenv("AUTH_DB_PATH", "/app/data/auth.db")
+
+    with _sq3.connect(db_path, timeout=10) as conn:
+        conn.row_factory = _sq3.Row
+        row = conn.execute(
+            "SELECT count FROM pick_usage WHERE user_id = ? AND date = ?",
+            (user_id, today),
+        ).fetchone()
+        if row and row["count"] >= 1:
+            raise HTTPException(
+                status_code=429,
+                detail={"detail": "daily_limit_reached", "limit": 1, "plan": "starter", "upgrade_to": "pro"},
+            )
+        conn.execute(
+            """INSERT INTO pick_usage (user_id, date, count) VALUES (?, ?, 1)
+               ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1""",
+            (user_id, today),
+        )
+        conn.commit()
+
+
 @app.get("/best_pick_v2", response_model=BestPickV2Response)
 async def best_pick_v2(
     max_scan: int = 1500,
@@ -9007,6 +9042,7 @@ async def best_pick_v2(
 ):
     _ = refresh
     _ = full_universe
+    _check_starter_daily_limit(_user)
     try:
         universe = await asyncio.to_thread(get_scan_universe, int(max_scan or 1200))
     except Exception as e:
