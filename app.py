@@ -10364,6 +10364,23 @@ async def scan_pre_movers(
         raise HTTPException(status_code=500, detail="SCAN_FAILED")
 
 
+@app.post("/scan/brain_backfill", include_in_schema=True)
+async def scan_brain_backfill(_user=_dep_elite):
+    """
+    Retroactively evaluate ALL historical picks that haven't been fully checked.
+    Fetches real price bars from after each pick date and records outcomes.
+    Runs synchronously — may take 30-60s for large pick histories.
+    """
+    import asyncio
+    try:
+        from brain import backfill_all_outcomes
+        result = await asyncio.to_thread(backfill_all_outcomes)
+        return {"ok": True, **result}
+    except Exception as e:
+        log.warning(f"brain_backfill error: {e}")
+        raise HTTPException(status_code=500, detail="BRAIN_BACKFILL_FAILED")
+
+
 @app.get("/scan/brain_stats", include_in_schema=True)
 async def scan_brain_stats():
     """

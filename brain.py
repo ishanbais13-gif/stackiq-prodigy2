@@ -218,6 +218,113 @@ def record_outcome(pick_id: int, price_now: float) -> None:
         log.warning(f"brain.record_outcome: {e}")
 
 
+def _get_all_unchecked_picks() -> List[Dict[str, Any]]:
+    """All picks with < 2 outcomes, no date window — for backfill."""
+    try:
+        with _conn() as db:
+            rows = db.execute("""
+                SELECT p.id, p.symbol, p.picked_at, p.price_at_pick,
+                       COUNT(o.id) AS checks_done
+                FROM premover_picks p
+                LEFT JOIN outcomes o ON o.pick_id = p.id
+                WHERE p.price_at_pick IS NOT NULL
+                  AND p.price_at_pick > 0
+                GROUP BY p.id
+                HAVING checks_done < 2
+                ORDER BY p.picked_at ASC
+            """).fetchall()
+            return [dict(r) for r in rows]
+    except Exception as e:
+        log.warning(f"brain.all_unchecked: {e}")
+        return []
+
+
+def backfill_all_outcomes() -> Dict[str, int]:
+    """
+    Process ALL historical picks with < 2 outcome checks.
+    Uses get_bars_batch (last ~200 trading days = ~10 months of history).
+    Runs in symbol batches of 25 to stay within Alpaca limits.
+    """
+    all_picks = _get_all_unchecked_picks()
+    if not all_picks:
+        return {"processed": 0, "recorded": 0, "skipped_no_bars": 0}
+
+    try:
+        from data_fetcher import get_bars_batch
+    except ImportError:
+        log.warning("brain.backfill: data_fetcher not available")
+        return {"processed": 0, "recorded": 0, "skipped_no_bars": 0}
+
+    BATCH = 25
+    now = datetime.now(timezone.utc)
+    recorded = 0
+    skipped = 0
+
+    all_syms = list({p["symbol"] for p in all_picks})
+    bars_by_sym: Dict[str, List] = {}
+
+    for i in range(0, len(all_syms), BATCH):
+        batch_syms = all_syms[i:i + BATCH]
+        try:
+            chunk = get_bars_batch(batch_syms, "1Day", 200) or {}
+            bars_by_sym.update(chunk)
+        except Exception as e:
+            log.warning(f"brain.backfill: bars fetch error for batch {i}: {e}")
+
+    for pick in all_picks:
+        sym = pick["symbol"]
+        entry = float(pick.get("price_at_pick") or 0)
+        if not entry:
+            continue
+
+        picked_at = datetime.fromisoformat(str(pick["picked_at"]))
+        if picked_at.tzinfo is None:
+            picked_at = picked_at.replace(tzinfo=timezone.utc)
+
+        days_since = (now - picked_at).total_seconds() / 86400
+        if days_since < 1.0:
+            continue
+
+        bars = bars_by_sym.get(sym) or []
+        after_bars = []
+        for b in bars:
+            try:
+                bar_t = b.get("t") or b.get("time") or b.get("timestamp") or ""
+                bar_dt = datetime.fromisoformat(str(bar_t).replace("Z", "+00:00"))
+                if bar_dt.tzinfo is None:
+                    bar_dt = bar_dt.replace(tzinfo=timezone.utc)
+                if bar_dt > picked_at:
+                    after_bars.append((bar_dt, b))
+            except Exception:
+                continue
+
+        if not after_bars:
+            skipped += 1
+            continue
+
+        after_bars.sort(key=lambda x: x[0])
+        checks_done = pick.get("checks_done", 0)
+
+        if checks_done == 0:
+            _, bar = after_bars[0]
+            price = float(bar.get("h") or bar.get("c") or 0)
+        else:
+            window = after_bars[:3]
+            price = max(float(b.get("h") or b.get("c") or 0) for _, b in window)
+
+        if not price:
+            continue
+
+        record_outcome(pick["id"], price)
+        recorded += 1
+
+    log.info(f"brain.backfill: recorded={recorded} skipped={skipped} total_picks={len(all_picks)}")
+    if recorded > 0:
+        recalibrate_weights()
+
+    return {"processed": len(all_picks), "recorded": recorded, "skipped_no_bars": skipped}
+
+
 def run_outcome_checks() -> int:
     """
     Evaluate pending picks using historical daily bars from AFTER the pick date.
