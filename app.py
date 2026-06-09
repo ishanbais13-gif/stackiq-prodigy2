@@ -4321,6 +4321,7 @@ async def analyze(
     allow_llm: bool = True,
     tz: Optional[str] = Query(None),
     stream: bool = Query(False),
+    _user=Depends(_get_current_user),
 ):
     sd = _symbol_sanitize(symbol, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
@@ -5078,7 +5079,7 @@ async def _warm_market_cache_task() -> None:
 
 
 @app.get("/technical/{symbol}")
-def technical(symbol: str):
+def technical(symbol: str, _user=Depends(_get_current_user)):
     sym = (symbol or "").strip().upper()
     eng = aurexis_engine(sym, allow_llm=False)
     if not isinstance(eng, dict):
@@ -5196,7 +5197,7 @@ def debug_indicators(symbol: str, _: None = Depends(_require_debug)):
 
 
 @app.get("/news/{symbol}")
-def news(symbol: str, allow_llm: bool = True):
+def news(symbol: str, allow_llm: bool = True, _user=Depends(_get_current_user)):
     sym = (symbol or "").strip().upper()
     eng = aurexis_engine(sym, allow_llm=allow_llm)
     if not isinstance(eng, dict):
