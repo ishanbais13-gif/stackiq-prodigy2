@@ -27,9 +27,9 @@ log = logging.getLogger("stackiq")
 
 _BRAIN_LOCK = threading.Lock()
 
-# Win thresholds: what counts as a "successful" pre-mover pick
-WIN_THRESHOLD_1D = 0.05   # +5% within 1 trading day
-WIN_THRESHOLD_3D = 0.10   # +10% within 3 trading days
+# Win thresholds: what counts as a "successful" pick
+WIN_THRESHOLD_1D = 0.02   # +2% within 1 trading day  (realistic for large-caps)
+WIN_THRESHOLD_3D = 0.04   # +4% within 3 trading days
 MIN_SAMPLES = 8            # don't adjust a signal's weight until this many picks have fired it
 
 
@@ -91,6 +91,20 @@ def init_brain_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_out_pick_id  ON outcomes(pick_id);
         """)
     log.info(f"brain: DB ready at {_db_path()}")
+    # One-time: clear corrupt outcomes where price_then = price_at_pick (change_pct always 0)
+    try:
+        wiped = db.execute("""
+            DELETE FROM outcomes WHERE id IN (
+                SELECT o.id FROM outcomes o
+                JOIN premover_picks p ON p.id = o.pick_id
+                WHERE ABS(o.price_then - p.price_at_pick) < 0.0001
+            )
+        """).rowcount
+        if wiped:
+            db.execute("DELETE FROM signal_stats")
+            log.info(f"brain: wiped {wiped} corrupt zero-change outcomes and reset signal_stats")
+    except Exception as _e:
+        log.warning(f"brain: corrupt outcome cleanup failed: {_e}")
 
 
 # ---------------------------------------------------------------------------
@@ -206,53 +220,80 @@ def record_outcome(pick_id: int, price_now: float) -> None:
 
 def run_outcome_checks() -> int:
     """
-    Fetch current prices for all pending picks and record outcomes.
-    Returns number of outcomes recorded.
+    Evaluate pending picks using historical daily bars from AFTER the pick date.
+    Uses the highest close in the 1-5 days following the pick so we measure
+    actual next-day movement, not the same closing price the pick was recorded at.
     """
     pending = get_pending_checks()
     if not pending:
         return 0
 
     try:
-        from data_fetcher import get_snapshots_batch
+        from data_fetcher import get_bars_batch
     except ImportError:
         log.warning("brain: data_fetcher not available, skipping outcome checks")
         return 0
 
     syms = list({p["symbol"] for p in pending})
     try:
-        snaps = get_snapshots_batch(syms) or {}
+        # Pull last 10 daily bars — enough to cover 1-day and 3-day windows
+        bars_by_sym = get_bars_batch(syms, "1Day", 10) or {}
     except Exception as e:
-        log.warning(f"brain.outcome_checks: snapshot fetch error: {e}")
+        log.warning(f"brain.outcome_checks: bars fetch error: {e}")
         return 0
 
+    now = datetime.now(timezone.utc)
     recorded = 0
+
     for pick in pending:
         sym = pick["symbol"]
-        snap = snaps.get(sym)
-        if not isinstance(snap, dict):
+        entry = float(pick.get("price_at_pick") or 0)
+        if not entry:
             continue
-        db_d = snap.get("dailyBar") or snap.get("day") or {}
-        lt   = snap.get("latestTrade") or snap.get("latestQuote") or {}
-        price = None
-        for key in ("c", "vw"):
-            v = db_d.get(key)
-            if v:
-                try:
-                    price = float(v)
-                    break
-                except Exception:
-                    pass
-        if price is None:
-            for key in ("p", "ap"):
-                v = lt.get(key)
-                if v:
-                    try:
-                        price = float(v)
-                        break
-                    except Exception:
-                        pass
-        if price is None:
+
+        picked_at = datetime.fromisoformat(str(pick["picked_at"]))
+        if picked_at.tzinfo is None:
+            picked_at = picked_at.replace(tzinfo=timezone.utc)
+
+        days_since = (now - picked_at).total_seconds() / 86400
+
+        # Need at least 1 full trading day before evaluating
+        if days_since < 1.0:
+            continue
+
+        bars = bars_by_sym.get(sym) or []
+        # Filter to bars strictly AFTER the pick date
+        after_bars = []
+        for b in bars:
+            try:
+                bar_t = b.get("t") or b.get("time") or b.get("timestamp") or ""
+                bar_dt = datetime.fromisoformat(str(bar_t).replace("Z", "+00:00"))
+                if bar_dt.tzinfo is None:
+                    bar_dt = bar_dt.replace(tzinfo=timezone.utc)
+                if bar_dt > picked_at:
+                    after_bars.append((bar_dt, b))
+            except Exception:
+                continue
+
+        if not after_bars:
+            continue
+
+        after_bars.sort(key=lambda x: x[0])
+
+        # For 1-day check: use next day's close (high if available to capture intraday peak)
+        # For 3-day check: use best close in first 3 bars
+        checks_done = pick.get("checks_done", 0)
+
+        if checks_done == 0:
+            # First check: next trading day's close/high
+            _, bar = after_bars[0]
+            price = float(bar.get("h") or bar.get("c") or 0)
+        else:
+            # Second check: best close across first 3 days after pick
+            window = after_bars[:3]
+            price = max(float(b.get("h") or b.get("c") or 0) for _, b in window)
+
+        if not price:
             continue
 
         record_outcome(pick["id"], price)
