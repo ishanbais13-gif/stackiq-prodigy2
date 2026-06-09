@@ -10364,6 +10364,28 @@ async def scan_pre_movers(
         raise HTTPException(status_code=500, detail="SCAN_FAILED")
 
 
+@app.post("/scan/brain_reset", include_in_schema=True)
+async def scan_brain_reset(_user=_dep_elite):
+    """
+    Wipe ALL outcomes and signal_stats, then run a full backfill with correct bar data.
+    Use this once to clear corrupt outcomes from the old get_snapshots_batch bug.
+    """
+    import asyncio
+    try:
+        from brain import _conn, backfill_all_outcomes, recalibrate_weights
+        def _reset_and_backfill():
+            with _conn() as db:
+                db.execute("DELETE FROM outcomes")
+                db.execute("DELETE FROM signal_stats")
+            result = backfill_all_outcomes()
+            return result
+        result = await asyncio.to_thread(_reset_and_backfill)
+        return {"ok": True, "action": "wiped_all_outcomes_and_backfilled", **result}
+    except Exception as e:
+        log.warning(f"brain_reset error: {e}")
+        raise HTTPException(status_code=500, detail="BRAIN_RESET_FAILED")
+
+
 @app.post("/scan/brain_backfill", include_in_schema=True)
 async def scan_brain_backfill(_user=_dep_elite):
     """
