@@ -145,6 +145,7 @@ def init_auth_db() -> None:
             ("two_fa_enabled",       "INTEGER NOT NULL DEFAULT 0"),
             ("cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
             ("current_period_end",   "TEXT"),
+            ("free_pick_month",      "TEXT"),  -- "YYYY-MM" of last free pick used
         ]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")

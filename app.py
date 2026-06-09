@@ -9003,7 +9003,7 @@ async def best_pick_v2(
     refresh: bool = False,
     allow_llm_news: bool = True,
     full_universe: bool = False,
-    _user=Depends(_get_current_user),
+    _user=_dep_starter,
 ):
     _ = refresh
     _ = full_universe
@@ -9089,8 +9089,55 @@ async def best_pick_v2(
 
 
 @app.get("/best-pick-v2", response_model=BestPickV2Response)
-async def best_pick_v2_alias(max_scan: int = 400, refresh: bool = False, allow_llm_news: bool = True):
+async def best_pick_v2_alias(max_scan: int = 400, refresh: bool = False, allow_llm_news: bool = True, _user=_dep_starter):
     return await best_pick_v2(max_scan=max_scan, refresh=refresh, allow_llm_news=allow_llm_news)
+
+
+@app.post("/best_pick_v2/unlock")
+async def best_pick_v2_free_unlock(
+    max_scan: int = 400,
+    _user=Depends(_get_current_user),
+):
+    """
+    One-time monthly free pick for free-plan users.
+    Checks server-side if they've already used their pick this month.
+    If not, records usage in DB and returns the full pick.
+    """
+    from datetime import datetime, timezone
+    import sqlite3 as _sqlite3
+
+    user_id = _user.get("sub") or _user.get("id")
+    plan = (_user.get("plan") or "free").lower()
+
+    # Paid users should use the regular endpoint
+    if plan != "free":
+        return await best_pick_v2(max_scan=max_scan)
+
+    current_month = datetime.now(timezone.utc).strftime("%Y-%m")
+
+    db_path = os.getenv("AUTH_DB_PATH", "/app/data/auth.db")
+    with _sqlite3.connect(db_path, timeout=10) as conn:
+        conn.row_factory = _sqlite3.Row
+        row = conn.execute(
+            "SELECT free_pick_month FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(status_code=404, detail="USER_NOT_FOUND")
+
+        if row["free_pick_month"] == current_month:
+            raise HTTPException(
+                status_code=403,
+                detail="FREE_PICK_ALREADY_USED",
+            )
+
+        conn.execute(
+            "UPDATE users SET free_pick_month = ? WHERE id = ?",
+            (current_month, user_id),
+        )
+        conn.commit()
+
+    return await best_pick_v2(max_scan=max_scan)
 
 
 @app.get("/health", include_in_schema=True)
