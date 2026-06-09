@@ -9009,37 +9009,38 @@ def _user_field(user, *keys):
     return None
 
 
-def _check_starter_daily_limit(user) -> None:
-    """Raise 429 if a Starter user has already fetched a pick today (UTC date)."""
+def _check_starter_weekly_limit(user) -> None:
+    """Raise 429 if a Starter user has used both picks this ISO week."""
     import sqlite3 as _sq3
     from datetime import datetime, timezone
 
     plan = str(_user_field(user, "plan") or "free").lower()
     if plan not in ("starter",):
-        return  # Free/Pro/Elite: not subject to starter daily limit
+        return  # Free/Pro/Elite: not subject to starter weekly limit
 
     user_id = _user_field(user, "id")
     if not user_id:
         return
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    iso = datetime.now(timezone.utc).isocalendar()
+    week_key = f"{iso[0]}-W{iso[1]:02d}"
     db_path = os.getenv("AUTH_DB_PATH", "/app/data/auth.db")
 
     with _sq3.connect(db_path, timeout=10) as conn:
         conn.row_factory = _sq3.Row
         row = conn.execute(
             "SELECT count FROM pick_usage WHERE user_id = ? AND date = ?",
-            (user_id, today),
+            (user_id, week_key),
         ).fetchone()
-        if row and row["count"] >= 1:
+        if row and row["count"] >= 2:
             raise HTTPException(
                 status_code=429,
-                detail={"detail": "daily_limit_reached", "limit": 1, "plan": "starter", "upgrade_to": "pro"},
+                detail={"detail": "daily_limit_reached", "limit": 2, "plan": "starter", "upgrade_to": "pro"},
             )
         conn.execute(
             """INSERT INTO pick_usage (user_id, date, count) VALUES (?, ?, 1)
                ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1""",
-            (user_id, today),
+            (user_id, week_key),
         )
         conn.commit()
 
@@ -9054,7 +9055,7 @@ async def best_pick_v2(
 ):
     _ = refresh
     _ = full_universe
-    _check_starter_daily_limit(_user)
+    _check_starter_weekly_limit(_user)
     try:
         universe = await asyncio.to_thread(get_scan_universe, int(max_scan or 1200))
     except Exception as e:

@@ -72,12 +72,13 @@ migrate_alerts_columns()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_opted_in_users(alert_col: str) -> List[Dict[str, Any]]:
-    """Return users who opted in to the given alert column (1 = on)."""
+    """Return paid users who opted in to the given alert column (1 = on). Free users never get alerts."""
     try:
         conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            f"SELECT email, first_name, phone, alerts_channel FROM users WHERE {alert_col} = 1"
+            f"SELECT email, first_name, phone, alerts_channel FROM users "
+            f"WHERE {alert_col} = 1 AND plan IN ('starter', 'pro', 'elite')"
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
