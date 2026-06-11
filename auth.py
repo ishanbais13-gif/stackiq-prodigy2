@@ -1110,6 +1110,25 @@ def admin_get_token(body: AdminGetTokenRequest):
     return {"access_token": token, "plan": plan, "email": email}
 
 
+class AdminResetPicksRequest(BaseModel):
+    secret: str
+    email: str
+
+
+@auth_router.post("/admin-reset-picks")
+def admin_reset_picks(body: AdminResetPicksRequest):
+    """Dev-only: clear pick_usage rows for a user so weekly limit resets."""
+    if body.secret != _ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    with _get_db() as conn:
+        row = conn.execute("SELECT id FROM users WHERE LOWER(email) = ?", (body.email.strip().lower(),)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        conn.execute("DELETE FROM pick_usage WHERE user_id = ?", (row["id"],))
+        conn.commit()
+    return {"ok": True, "email": body.email.strip().lower()}
+
+
 @auth_router.post("/admin-set-plan")
 def admin_set_plan(body: AdminSetPlanRequest):
     if body.secret != _ADMIN_SECRET:
