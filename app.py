@@ -8477,6 +8477,7 @@ class BestPickV2Response(BaseModel):
     no_trade_reason: Optional[str] = None
     edge_signals: List[str] = Field(default_factory=list)
     position_size_pct: Optional[float] = None
+    upgrade_for_levels: Optional[bool] = None
 
 
 def _best_pick_contract(x: Any) -> Dict[str, Any]:
@@ -9135,6 +9136,34 @@ async def best_pick_v2(
     out.setdefault("risk_flags", [])
     out.setdefault("pillar_scores_0_10", {"technical": 1.0, "catalyst": 1.0, "sentiment": 1.0, "risk_structure": 1.0, "upside": 1.0})
     out.setdefault("watchlist_candidates", [])
+
+    # --- Dynamic position sizing (Pro/Elite only; stripped for Starter below) ---
+    _ai_s100 = float(out.get("ai_score_0_10") or 0.0) * 10.0
+    if _ai_s100 < 40:
+        _pos_pct = 2.0
+    elif _ai_s100 < 55:
+        _pos_pct = 4.0
+    elif _ai_s100 < 65:
+        _pos_pct = 6.0
+    elif _ai_s100 < 75:
+        _pos_pct = 8.0
+    elif _ai_s100 < 85:
+        _pos_pct = 10.0
+    else:
+        _pos_pct = 12.0
+    out["position_size_pct"] = _pos_pct
+
+    if _ai_s100 < 55 and not out.get("low_conviction_note"):
+        out["low_conviction_note"] = "Reduce size — moderate conviction"
+
+    # --- Tier gating: Starter gets no trade levels ---
+    _plan = str(_user_field(_user, "plan") or "free").lower()
+    if _plan == "starter":
+        out["trade_plan"] = {}
+        out["pillar_scores_0_10"] = {}
+        out["position_size_pct"] = None
+        out["upgrade_for_levels"] = True
+
     return out
 
 

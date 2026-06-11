@@ -1086,6 +1086,30 @@ class AdminSetPlanRequest(BaseModel):
     plan: str
 
 
+class AdminGetTokenRequest(BaseModel):
+    secret: str
+    email: str
+
+
+@auth_router.post("/admin-get-token")
+def admin_get_token(body: AdminGetTokenRequest):
+    """Dev-only: issue a JWT for any account using admin secret. For curl testing."""
+    if body.secret != _ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    email = body.email.strip().lower()
+    with _get_db() as conn:
+        user = conn.execute("SELECT * FROM users WHERE LOWER(email) = ?", (email,)).fetchone()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    plan = _user_plan(user)
+    try:
+        sid = user["session_id"] or ""
+    except (IndexError, KeyError):
+        sid = ""
+    token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
+    return {"access_token": token, "plan": plan, "email": email}
+
+
 @auth_router.post("/admin-set-plan")
 def admin_set_plan(body: AdminSetPlanRequest):
     if body.secret != _ADMIN_SECRET:
