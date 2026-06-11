@@ -57,10 +57,7 @@ alpaca-trade-api
 alpaca-py>=0.43.2
 yfinance>=0.2.0
 python-jose[cryptography]
-passlib[bcrypt]
 stripe
-email-validator
-email-validator
 email-validator
 bcrypt==4.0.1
 boto3>=1.34.0
