@@ -466,6 +466,68 @@ def send_otp_bg(user_id: int, to_email: str, first_name: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Password-reset OTP email
+# ---------------------------------------------------------------------------
+
+import time as _time
+
+_pw_reset_attempts: dict[str, list[float]] = {}  # email → list of epoch timestamps
+_PW_RESET_MAX = 3
+_PW_RESET_WINDOW = 3600  # 1 hour
+
+
+def _pw_reset_rate_ok(email: str) -> bool:
+    now = _time.time()
+    timestamps = [t for t in _pw_reset_attempts.get(email, []) if now - t < _PW_RESET_WINDOW]
+    _pw_reset_attempts[email] = timestamps
+    if len(timestamps) >= _PW_RESET_MAX:
+        return False
+    _pw_reset_attempts[email].append(now)
+    return True
+
+
+def _send_password_reset_email(to_email: str, code: str, first_name: str = "") -> None:
+    greeting = f"Hey {first_name}," if first_name else "Hey there,"
+    subject = f"{code} is your Aurexis password reset code"
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Reset your Aurexis password</title></head>
+<body style="margin:0;padding:0;background:#060a10;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Inter,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#060a10;padding:48px 0;">
+    <tr><td align="center">
+      <table width="480" cellpadding="0" cellspacing="0" style="max-width:480px;width:100%;">
+        <tr><td style="padding:0 0 28px;text-align:center;">
+          <table cellpadding="0" cellspacing="0" style="display:inline-table;">
+            <tr>
+              <td style="width:32px;height:32px;background:#00b450;border-radius:9px;text-align:center;vertical-align:middle;">
+                <span style="font-size:16px;font-weight:900;color:#fff;line-height:32px;">A</span>
+              </td>
+              <td style="padding-left:9px;font-size:14px;font-weight:900;letter-spacing:0.18em;color:rgba(255,255,255,0.85);vertical-align:middle;">AUREXIS</td>
+            </tr>
+          </table>
+        </td></tr>
+        <tr><td style="background:linear-gradient(160deg,#0a1018,#0d1420);border:1px solid rgba(255,255,255,0.07);border-radius:18px;padding:40px;">
+          <p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#00b450;">Password Reset</p>
+          <h1 style="margin:0 0 16px;font-size:24px;font-weight:800;color:#fff;letter-spacing:-0.02em;">{greeting}<br>Your reset code:</h1>
+          <div style="text-align:center;margin:28px 0;">
+            <div style="display:inline-block;padding:20px 40px;background:rgba(0,180,80,0.08);border:1px solid rgba(0,180,80,0.20);border-radius:14px;">
+              <span style="font-size:42px;font-weight:900;letter-spacing:0.18em;color:#00b450;">{code}</span>
+            </div>
+          </div>
+          <p style="margin:0;font-size:14px;color:rgba(255,255,255,0.40);text-align:center;line-height:1.6;">
+            This code expires in {_OTP_EXPIRE_MINUTES} minutes.<br>If you didn't request this, you can safely ignore this email.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    plain = f"{greeting}\n\nYour Aurexis password reset code is: {code}\n\nExpires in {_OTP_EXPIRE_MINUTES} minutes.\nIf you didn't request this, ignore this email."
+    _send_email(to_email, subject, html, plain)
+
+
+# ---------------------------------------------------------------------------
 # Password hashing
 # ---------------------------------------------------------------------------
 
@@ -888,6 +950,80 @@ def delete_account(response: Response, user: sqlite3.Row = Depends(get_current_u
     return {"ok": True}
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    code: str
+    new_password: str
+
+
+@auth_router.post("/forgot-password")
+def forgot_password(body: ForgotPasswordRequest):
+    """Send a password-reset OTP. Always returns ok=true to prevent account enumeration."""
+    email = (body.email or "").strip().lower()
+    if not email:
+        return {"ok": True}
+
+    if not _pw_reset_rate_ok(email):
+        # Still return ok to avoid enumeration, just don't send
+        return {"ok": True}
+
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT id, first_name FROM users WHERE LOWER(email) = ?", (email,)
+        ).fetchone()
+
+    if row:
+        code = _generate_otp(row["id"])
+        first_name = ""
+        try:
+            first_name = row["first_name"] or ""
+        except Exception:
+            pass
+        threading.Thread(
+            target=_send_password_reset_email,
+            args=(email, code, first_name),
+            daemon=True,
+        ).start()
+
+    return {"ok": True}
+
+
+@auth_router.post("/reset-password")
+def reset_password(body: ResetPasswordRequest):
+    """Verify OTP and set a new password. Does NOT issue a token — user must log in fresh."""
+    email = (body.email or "").strip().lower()
+    code = (body.code or "").strip()
+    new_password = body.new_password or ""
+
+    if len(new_password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
+
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT id FROM users WHERE LOWER(email) = ?", (email,)
+        ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=400, detail="Invalid or expired reset code.")
+
+    if not _verify_otp(row["id"], code):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset code.")
+
+    new_hash = hash_password(new_password)
+    with _get_db() as conn:
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (new_hash, row["id"]),
+        )
+        conn.commit()
+
+    return {"ok": True}
+
+
 def _owner_upgrade() -> None:
     try:
         with _get_db() as conn:
@@ -989,6 +1125,75 @@ def reactivate_subscription(user: sqlite3.Row = Depends(get_current_user)):
     _update_subscription_from_stripe(sub)
     log.info("reactivate_subscription: user_id=%s", user["id"])
     return {"cancel_at_period_end": False}
+
+
+@stripe_router.get("/payment-method")
+def get_payment_method(user: sqlite3.Row = Depends(get_current_user)):
+    _ensure_stripe()
+    customer_id = user["stripe_customer_id"]
+    if not customer_id:
+        return {"payment_method": None}
+    try:
+        # Try attached payment methods first (works for both old and new Stripe flows)
+        pms = _stripe.PaymentMethod.list(customer=customer_id, type="card", limit=1)
+        if pms.data:
+            pm = pms.data[0]
+            card = pm.card
+            return {"payment_method": {
+                "brand": card.brand.title(),
+                "last4": card.last4,
+                "exp_month": card.exp_month,
+                "exp_year": card.exp_year,
+            }}
+        # Fallback: check default_source (legacy card attach)
+        customer = _stripe.Customer.retrieve(customer_id, expand=["default_source"])
+        src = customer.get("default_source")
+        if src and isinstance(src, dict) and src.get("object") == "card":
+            return {"payment_method": {
+                "brand": src.get("brand", "Card").title(),
+                "last4": src.get("last4", ""),
+                "exp_month": src.get("exp_month"),
+                "exp_year": src.get("exp_year"),
+            }}
+        return {"payment_method": None}
+    except Exception as e:
+        log.warning("get_payment_method error: %s", e)
+        return {"payment_method": None}
+
+
+@stripe_router.get("/invoices")
+def get_invoices(user: sqlite3.Row = Depends(get_current_user)):
+    _ensure_stripe()
+    customer_id = user["stripe_customer_id"]
+    if not customer_id:
+        return {"invoices": []}
+    try:
+        inv_list = _stripe.Invoice.list(customer=customer_id, limit=12)
+        invoices = []
+        for inv in inv_list.data:
+            invoices.append({
+                "id": inv["id"],
+                "date": datetime.fromtimestamp(inv["created"], tz=timezone.utc).strftime("%b %d, %Y"),
+                "amount": f"${inv['amount_paid'] / 100:.2f}",
+                "status": inv["status"].title(),
+                "url": inv.get("hosted_invoice_url") or inv.get("invoice_pdf"),
+            })
+        return {"invoices": invoices}
+    except Exception:
+        return {"invoices": []}
+
+
+@stripe_router.post("/billing-portal")
+def billing_portal(user: sqlite3.Row = Depends(get_current_user)):
+    _ensure_stripe()
+    customer_id = user["stripe_customer_id"]
+    if not customer_id:
+        raise HTTPException(400, "No Stripe customer on file")
+    session = _stripe.billing_portal.Session.create(
+        customer=customer_id,
+        return_url="https://useaurexis.com/app",
+    )
+    return {"url": session["url"]}
 
 
 @stripe_router.get("/plans")
