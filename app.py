@@ -9010,9 +9010,9 @@ def _user_field(user, *keys):
 
 
 def _check_starter_weekly_limit(user) -> None:
-    """Raise 429 if a Starter user has used both picks this ISO week."""
+    """Raise 429 if a Starter user has used 3 picks this Mon-Sun UTC week."""
     import sqlite3 as _sq3
-    from datetime import datetime, timezone
+    from datetime import datetime, timezone, timedelta
 
     plan = str(_user_field(user, "plan") or "free").lower()
     if plan not in ("starter",):
@@ -9022,8 +9022,9 @@ def _check_starter_weekly_limit(user) -> None:
     if not user_id:
         return
 
-    iso = datetime.now(timezone.utc).isocalendar()
-    week_key = f"{iso[0]}-W{iso[1]:02d}"
+    today = datetime.now(timezone.utc).date()
+    week_start = today - timedelta(days=today.weekday())  # Monday of current UTC week
+    week_key = week_start.isoformat()  # e.g. "2026-06-09"
     db_path = os.getenv("AUTH_DB_PATH", "/app/data/auth.db")
 
     with _sq3.connect(db_path, timeout=10) as conn:
@@ -9032,10 +9033,10 @@ def _check_starter_weekly_limit(user) -> None:
             "SELECT count FROM pick_usage WHERE user_id = ? AND date = ?",
             (user_id, week_key),
         ).fetchone()
-        if row and row["count"] >= 2:
+        if row and row["count"] >= 3:
             raise HTTPException(
                 status_code=429,
-                detail={"detail": "daily_limit_reached", "limit": 2, "plan": "starter", "upgrade_to": "pro"},
+                detail={"detail": "daily_limit_reached", "limit": 3, "plan": "starter", "upgrade_to": "pro"},
             )
         conn.execute(
             """INSERT INTO pick_usage (user_id, date, count) VALUES (?, ?, 1)
@@ -9187,11 +9188,15 @@ async def best_pick_v2_free_unlock(
 
     # Run the scan directly — can't call best_pick_v2() internally (dependency injection won't fire)
     universe = await asyncio.to_thread(get_scan_universe, int(max_scan or 400))
+
+    def _noop_news(sym: str):
+        return {}
+
     out = await _scan_best_pick_v2(
-        symbols=universe,
-        max_scan=int(max_scan or 400),
-        max_seconds=55,
+        universe=universe,
+        news_fetcher=_noop_news,
         allow_llm_news=False,
+        max_seconds=55,
     )
     out.setdefault("watchlist_candidates", [])
     return out
