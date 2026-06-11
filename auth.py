@@ -44,6 +44,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from jose import JWTError, jwt
 import bcrypt as _bcrypt_lib
+import uuid as _uuid
 
 try:
     import stripe as _stripe
@@ -146,6 +147,7 @@ def init_auth_db() -> None:
             ("cancel_at_period_end", "INTEGER NOT NULL DEFAULT 0"),
             ("current_period_end",   "TEXT"),
             ("free_pick_month",      "TEXT"),
+            ("session_id",           "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -549,9 +551,20 @@ def verify_password(plain: str, hashed: str) -> bool:
 PLAN_RANK = {"free": 0, "starter": 1, "pro": 2, "elite": 3}
 
 
-def create_access_token(user_id: int, email: str, plan: str = "free") -> str:
+def _new_session(user_id: int) -> str:
+    """Generate a fresh session_id, persist it, and return it."""
+    sid = str(_uuid.uuid4())
+    with _get_db() as conn:
+        conn.execute("UPDATE users SET session_id = ? WHERE id = ?", (sid, user_id))
+        conn.commit()
+    return sid
+
+
+def create_access_token(user_id: int, email: str, plan: str = "free", session_id: str = "") -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS)
     payload = {"sub": str(user_id), "email": email, "plan": plan, "exp": expire}
+    if session_id:
+        payload["sid"] = session_id
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -609,6 +622,22 @@ def get_current_user(token: str = Depends(_extract_token)) -> sqlite3.Row:
         ).fetchone()
     if user is None:
         raise credentials_exc
+
+    # Single-session enforcement: if the DB has a session_id set, the JWT must match.
+    # Users without session_id in DB (logged in before this feature) are allowed through
+    # until their next login generates one.
+    try:
+        db_sid = user["session_id"]
+    except (IndexError, KeyError):
+        db_sid = None
+    jwt_sid = payload.get("sid")
+    if db_sid and jwt_sid != db_sid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session expired, please log in again",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     return user
 
 
@@ -772,7 +801,8 @@ def verify_otp(body: OTPVerifyRequest, response: Response):
     if not _verify_otp(user["id"], body.code.strip()):
         raise HTTPException(401, "Invalid or expired code")
     plan = _user_plan(user)
-    token = create_access_token(user["id"], user["email"], plan=plan)
+    sid = _new_session(user["id"])
+    token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
     _set_auth_cookie(response, token)
     if body.is_new_user:
         first = ""
@@ -884,7 +914,11 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
 def refresh_token(response: Response, user: sqlite3.Row = Depends(get_current_user)):
     """Issue a new JWT reflecting the current plan/status from DB."""
     plan = _user_plan(user)
-    token = create_access_token(user["id"], user["email"], plan=plan)
+    try:
+        sid = user["session_id"] or ""
+    except (IndexError, KeyError):
+        sid = ""
+    token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
     _set_auth_cookie(response, token)
     return {
         "access_token": token,
@@ -1623,7 +1657,8 @@ def _upsert_oauth_user(email: str, first_name: str = "", last_name: str = "") ->
 def _redirect_to_app(user: sqlite3.Row, is_new: bool = False, origin: str = "") -> RedirectResponse:
     """Issue JWT and redirect to {origin}/app?token=..."""
     plan = _user_plan(user)
-    token = create_access_token(user["id"], user["email"], plan=plan)
+    sid = _new_session(user["id"])
+    token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
     base = (origin or FRONTEND_ORIGIN).rstrip("/")
     url = f"{base}/app?token={urllib.parse.quote(token)}"
     if is_new:
@@ -1719,7 +1754,8 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
                         )
                         conn.commit()
                 plan = _user_plan(user)
-                token = create_access_token(user["id"], user["email"], plan=plan)
+                sid = _new_session(user["id"])
+                token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
                 success_url = f"{callback_origin}/app?token={urllib.parse.quote(token)}"
                 if is_new:
                     success_url += "&new_user=1"
