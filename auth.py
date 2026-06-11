@@ -843,13 +843,29 @@ def logout(response: Response):
 
 @auth_router.get("/me")
 def me(user: sqlite3.Row = Depends(get_current_user)):
+    from datetime import datetime, timezone, timedelta
     def _safe(col):
         try: return user[col]
         except (IndexError, KeyError): return None
+
+    plan = _user_plan(user)
+    picks_this_week = None
+    picks_limit = None
+    if plan == "starter":
+        today = datetime.now(timezone.utc).date()
+        week_start = today - timedelta(days=today.weekday())
+        with _get_db() as _c:
+            row = _c.execute(
+                "SELECT count FROM pick_usage WHERE user_id = ? AND date = ?",
+                (user["id"], week_start.isoformat()),
+            ).fetchone()
+        picks_this_week = int(row["count"]) if row else 0
+        picks_limit = 3
+
     return {
         "id": user["id"],
         "email": user["email"],
-        "plan": _user_plan(user),
+        "plan": plan,
         "subscription_status": user["subscription_status"],
         "stripe_customer_id": user["stripe_customer_id"],
         "created_at": user["created_at"],
@@ -858,6 +874,8 @@ def me(user: sqlite3.Row = Depends(get_current_user)):
         "two_fa_enabled": bool(_safe("two_fa_enabled")),
         "cancel_at_period_end": bool(_safe("cancel_at_period_end")),
         "current_period_end": _safe("current_period_end"),
+        "picks_this_week": picks_this_week,
+        "picks_limit": picks_limit,
     }
 
 
