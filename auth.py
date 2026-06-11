@@ -735,7 +735,7 @@ def signup(body: SignupRequest, response: Response):
 def login(body: LoginRequest, response: Response):
     with _get_db() as conn:
         user = conn.execute(
-            "SELECT * FROM users WHERE email = ?", (body.email,)
+            "SELECT * FROM users WHERE LOWER(email) = ?", (body.email.lower(),)
         ).fetchone()
 
     if user is None or not verify_password(body.password, user["password_hash"]):
@@ -766,7 +766,7 @@ class OTPVerifyRequest(BaseModel):
 @auth_router.post("/verify-otp")
 def verify_otp(body: OTPVerifyRequest, response: Response):
     with _get_db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE email = ?", (body.email,)).fetchone()
+        user = conn.execute("SELECT * FROM users WHERE LOWER(email) = ?", (body.email.lower(),)).fetchone()
     if user is None:
         raise HTTPException(401, "Invalid code")
     if not _verify_otp(user["id"], body.code.strip()):
