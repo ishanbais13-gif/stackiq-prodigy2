@@ -1024,6 +1024,36 @@ def reset_password(body: ResetPasswordRequest):
     return {"ok": True}
 
 
+_ADMIN_SECRET = os.getenv("ADMIN_SECRET", "aurexis_admin_2026")
+_VALID_PLANS = {"free", "starter", "pro", "elite"}
+
+
+class AdminSetPlanRequest(BaseModel):
+    secret: str
+    email: str
+    plan: str
+
+
+@auth_router.post("/admin-set-plan")
+def admin_set_plan(body: AdminSetPlanRequest):
+    if body.secret != _ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    plan = body.plan.strip().lower()
+    if plan not in _VALID_PLANS:
+        raise HTTPException(status_code=422, detail=f"Invalid plan. Must be one of: {', '.join(_VALID_PLANS)}")
+    email = body.email.strip().lower()
+    status_val = "active" if plan != "free" else "inactive"
+    with _get_db() as conn:
+        result = conn.execute(
+            "UPDATE users SET plan=?, subscription_status=? WHERE LOWER(email)=?",
+            (plan, status_val, email),
+        )
+        conn.commit()
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="User not found")
+    return {"ok": True, "email": email, "plan": plan}
+
+
 def _owner_upgrade() -> None:
     try:
         with _get_db() as conn:
