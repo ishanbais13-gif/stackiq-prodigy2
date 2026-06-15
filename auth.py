@@ -167,9 +167,14 @@ def init_auth_db() -> None:
                 user_id    INTEGER NOT NULL,
                 code       TEXT    NOT NULL,
                 expires_at TEXT    NOT NULL,
-                used       INTEGER NOT NULL DEFAULT 0
+                used       INTEGER NOT NULL DEFAULT 0,
+                attempts   INTEGER NOT NULL DEFAULT 0
             )
         """)
+        try:
+            conn.execute("ALTER TABLE otp_tokens ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
         conn.commit()
     log.info("auth.db initialised")
 
@@ -386,13 +391,13 @@ def send_welcome_email_bg(to_email: str, first_name: str = "") -> None:
 # OTP helpers for 2FA
 # ---------------------------------------------------------------------------
 
-import random as _random
+import secrets as _secrets
 
 _OTP_EXPIRE_MINUTES = 10
 
 
 def _generate_otp(user_id: int) -> str:
-    code = f"{_random.randint(0, 999999):06d}"
+    code = f"{_secrets.randbelow(1_000_000):06d}"
     expires_at = (datetime.now(timezone.utc) + timedelta(minutes=_OTP_EXPIRE_MINUTES)).isoformat()
     with _get_db() as conn:
         # Invalidate any previous unused codes for this user
@@ -405,17 +410,34 @@ def _generate_otp(user_id: int) -> str:
     return code
 
 
+_OTP_MAX_ATTEMPTS = 10
+
+
 def _verify_otp(user_id: int, code: str) -> bool:
     with _get_db() as conn:
-        row = conn.execute(
-            "SELECT id, expires_at FROM otp_tokens WHERE user_id = ? AND code = ? AND used = 0",
-            (user_id, code),
+        # Find the most recent unused, non-expired OTP for this user
+        active = conn.execute(
+            "SELECT id, code, expires_at, attempts FROM otp_tokens "
+            "WHERE user_id = ? AND used = 0 ORDER BY id DESC LIMIT 1",
+            (user_id,),
         ).fetchone()
-        if not row:
+        if not active:
             return False
-        if datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
+        if datetime.fromisoformat(active["expires_at"]) < datetime.now(timezone.utc):
+            conn.execute("UPDATE otp_tokens SET used = 1 WHERE id = ?", (active["id"],))
+            conn.commit()
             return False
-        conn.execute("UPDATE otp_tokens SET used = 1 WHERE id = ?", (row["id"],))
+        attempts = int(active["attempts"] or 0)
+        if attempts >= _OTP_MAX_ATTEMPTS:
+            # Too many wrong guesses — invalidate this OTP
+            conn.execute("UPDATE otp_tokens SET used = 1 WHERE id = ?", (active["id"],))
+            conn.commit()
+            return False
+        if not hmac.compare_digest(str(active["code"]), str(code)):
+            conn.execute("UPDATE otp_tokens SET attempts = attempts + 1 WHERE id = ?", (active["id"],))
+            conn.commit()
+            return False
+        conn.execute("UPDATE otp_tokens SET used = 1 WHERE id = ?", (active["id"],))
         conn.commit()
     return True
 
@@ -477,6 +499,10 @@ _pw_reset_attempts: dict[str, list[float]] = {}  # email → list of epoch times
 _PW_RESET_MAX = 3
 _PW_RESET_WINDOW = 3600  # 1 hour
 
+_otp_resend_attempts: dict[str, list[float]] = {}  # email → list of epoch timestamps
+_OTP_RESEND_MAX = 5
+_OTP_RESEND_WINDOW = 600  # 10 minutes
+
 
 def _pw_reset_rate_ok(email: str) -> bool:
     now = _time.time()
@@ -485,6 +511,16 @@ def _pw_reset_rate_ok(email: str) -> bool:
     if len(timestamps) >= _PW_RESET_MAX:
         return False
     _pw_reset_attempts[email].append(now)
+    return True
+
+
+def _otp_resend_rate_ok(email: str) -> bool:
+    now = _time.time()
+    timestamps = [t for t in _otp_resend_attempts.get(email, []) if now - t < _OTP_RESEND_WINDOW]
+    _otp_resend_attempts[email] = timestamps
+    if len(timestamps) >= _OTP_RESEND_MAX:
+        return False
+    _otp_resend_attempts[email].append(now)
     return True
 
 
@@ -822,8 +858,11 @@ def verify_otp(body: OTPVerifyRequest, response: Response):
 @auth_router.post("/resend-otp")
 def resend_otp(body: OTPRequest):
     """Resend OTP to an existing user (used by signup OTP screen resend button)."""
+    email = (body.email or "").strip().lower()
+    if not _otp_resend_rate_ok(email):
+        return {"ok": True}  # Silently drop — don't reveal rate limiting
     with _get_db() as conn:
-        user = conn.execute("SELECT * FROM users WHERE email = ?", (body.email,)).fetchone()
+        user = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     if user is None:
         return {"ok": True}  # Don't reveal whether email exists
     first = ""
@@ -1076,7 +1115,17 @@ def reset_password(body: ResetPasswordRequest):
     return {"ok": True}
 
 
-_ADMIN_SECRET = os.getenv("ADMIN_SECRET", "aurexis_admin_2026")
+_ADMIN_SECRET_RAW = os.getenv("ADMIN_SECRET", "")
+if not _ADMIN_SECRET_RAW or _ADMIN_SECRET_RAW == "aurexis_admin_2026":
+    _msg = (
+        "FATAL: ADMIN_SECRET env var is not set or is using the insecure default. "
+        "Generate one with: openssl rand -hex 32"
+    )
+    log.critical(_msg)
+    if not os.getenv("DEBUG"):
+        raise RuntimeError(_msg)
+    _ADMIN_SECRET_RAW = "aurexis_admin_2026"
+_ADMIN_SECRET = _ADMIN_SECRET_RAW
 _VALID_PLANS = {"free", "starter", "pro", "elite"}
 
 

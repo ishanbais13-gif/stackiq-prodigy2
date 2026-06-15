@@ -4323,6 +4323,7 @@ async def analyze(
     stream: bool = Query(False),
     _user=Depends(_get_current_user),
 ):
+    _check_analyze_daily_limit(_user)
     sd = _symbol_sanitize(symbol, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
     if not bool(sd.get("ok")):
@@ -8478,6 +8479,7 @@ class BestPickV2Response(BaseModel):
     edge_signals: List[str] = Field(default_factory=list)
     position_size_pct: Optional[float] = None
     upgrade_for_levels: Optional[bool] = None
+    conviction: Optional[str] = None
 
 
 def _best_pick_contract(x: Any) -> Dict[str, Any]:
@@ -9043,6 +9045,45 @@ def _check_starter_weekly_limit(user) -> None:
             """INSERT INTO pick_usage (user_id, date, count) VALUES (?, ?, 1)
                ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1""",
             (user_id, week_key),
+        )
+        conn.commit()
+
+
+# Analyze daily limits by plan (calls per UTC day)
+_ANALYZE_DAILY_LIMITS = {"free": 10, "starter": 50}  # pro/elite = unlimited
+
+
+def _check_analyze_daily_limit(user) -> None:
+    """Raise 429 if user has exceeded their daily /analyze call limit."""
+    import sqlite3 as _sq3
+
+    plan = str(_user_field(user, "plan") or "free").lower()
+    limit = _ANALYZE_DAILY_LIMITS.get(plan)
+    if limit is None:
+        return  # Pro/Elite: unlimited
+
+    user_id = _user_field(user, "id")
+    if not user_id:
+        return
+
+    today_key = f"analyze_{datetime.now(timezone.utc).date().isoformat()}"
+    db_path = os.getenv("AUTH_DB_PATH", "/app/data/auth.db")
+
+    with _sq3.connect(db_path, timeout=10) as conn:
+        conn.row_factory = _sq3.Row
+        row = conn.execute(
+            "SELECT count FROM pick_usage WHERE user_id = ? AND date = ?",
+            (user_id, today_key),
+        ).fetchone()
+        if row and row["count"] >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail={"detail": "analyze_limit_reached", "limit": limit, "plan": plan, "upgrade_to": "starter" if plan == "free" else "pro"},
+            )
+        conn.execute(
+            """INSERT INTO pick_usage (user_id, date, count) VALUES (?, ?, 1)
+               ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1""",
+            (user_id, today_key),
         )
         conn.commit()
 
