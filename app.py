@@ -2506,7 +2506,7 @@ _SEED_UNIVERSE = [
     "VNQ","KBWB","KBWR","IAT","FFIN","HTGM","KIE","ITB","XHB","HOMZ",
     # High-momentum / high-beta names
     "CELH","IONQ","QUBT","QBTS","RGTI","ARQQ","BTBT","MSTR","RIOT","MARA",
-    "CLSK","HUT","CIFR","BTDR","WULF","IREN","CORZ","MGNI","APP","APLS",
+    "CLSK","HUT","CIFR","BTDR","WULF","IREN","CORZ","MGNI","APP","APLS","NOK",
     "HOOD","SOFI","LCID","RIVN","NKLA","RIDE","BLNK","CHPT","EVGO","WPRT",
     "SOUN","AI","BBAI","GFAI","AITX","NVTS","LAZR","LIDR","OUST","VLDR",
     # Small/mid cap momentum
@@ -2555,6 +2555,20 @@ def _startup_init():
         _t3.start()
     except Exception as _be:
         log.warning(f"brain init error: {_be}")
+    # Backfill learning.db from all historical perf_tracker picks at startup.
+    # This was never wired up automatically — the evolution engine had zero data.
+    def _startup_learning_backfill():
+        try:
+            from learning import backfill_from_perf_tracker
+            from brain import recalibrate_weights
+            bf = backfill_from_perf_tracker()
+            recalibrate_weights()
+            log.info(f"startup: learning backfill done injected={bf.get('injected',0)}, weights recalibrated")
+        except Exception as _lbe:
+            log.warning(f"startup: learning backfill failed: {_lbe}")
+    _t_learn = threading.Timer(30, _startup_learning_backfill)
+    _t_learn.daemon = True
+    _t_learn.start()
     # Auto-train NN on startup if we have enough resolved picks and model is stale/missing
     def _startup_nn_train():
         try:
@@ -8271,6 +8285,7 @@ async def scan_market_for_best_pick(max_scan: int = 200) -> Dict[str, Any]:
 _BEST_PICK_CACHE: Dict[str, Any] = {"ts": 0.0, "resp": None}
 _BEST_PICK_PERSIST: Dict[str, Any] = {"ts": 0.0, "resp": None}
 _LAST_V2_WATCHLIST: Dict[str, Any] = {"ts": 0.0, "candidates": []}
+_LAST_V2_PICK: Dict[str, Any] = {"ts": 0.0, "pick": None}  # cached best pick from bg scan
 
 
 def _bg_v2_scan_once() -> None:
@@ -8307,6 +8322,17 @@ def _bg_v2_scan_once() -> None:
                 if isinstance(cands, list) and cands:
                     _LAST_V2_WATCHLIST["ts"] = float(time.time())
                     _LAST_V2_WATCHLIST["candidates"] = list(cands)
+
+                # Cache the best pick so the endpoint serves a stable result
+                if str(out.get("symbol") or "").strip():
+                    _LAST_V2_PICK["ts"] = float(time.time())
+                    _LAST_V2_PICK["pick"] = dict(out)
+                elif isinstance(_LAST_V2_PICK.get("pick"), dict):
+                    # No new pick found, but still refresh the regime so the
+                    # frontend doesn't show a stale "BULL" when conditions changed.
+                    fresh_mr = str(out.get("market_regime") or "").strip().upper()
+                    if fresh_mr and fresh_mr not in ("", "UNKNOWN"):
+                        _LAST_V2_PICK["pick"]["market_regime"] = fresh_mr
 
                 # Auto-record the top watchlist candidate into performance picks.
                 # Use the best pick (out) if it's a trade, otherwise fall back to
@@ -8416,6 +8442,21 @@ def _bg_brain_outcome_loop() -> None:
         log.info(f"brain_outcome_loop: evaluated {n2} perf_tracker picks")
     except Exception as e:
         log.warning(f"brain_outcome_loop perf_tracker error: {e}")
+    # Backfill learning.db from perf_tracker so the evolution engine
+    # actually has data to learn from (was never called automatically before)
+    try:
+        from learning import backfill_from_perf_tracker
+        bf = backfill_from_perf_tracker()
+        log.info(f"brain_outcome_loop: learning backfill injected={bf.get('injected',0)} skipped={bf.get('skipped',0)}")
+    except Exception as e:
+        log.warning(f"brain_outcome_loop: learning backfill failed: {e}")
+    # Recalibrate brain signal weights including main scanner signals
+    try:
+        from brain import recalibrate_weights
+        recalibrate_weights()
+        log.info("brain_outcome_loop: recalibrated signal weights")
+    except Exception as e:
+        log.warning(f"brain_outcome_loop: recalibrate_weights failed: {e}")
     finally:
         _t = threading.Timer(6 * 3600, _bg_brain_outcome_loop)
         _t.daemon = True
@@ -9096,71 +9137,91 @@ async def best_pick_v2(
     full_universe: bool = False,
     _user=_dep_starter,
 ):
-    _ = refresh
     _ = full_universe
     _check_starter_weekly_limit(_user)
-    try:
-        universe = await asyncio.to_thread(get_scan_universe, int(max_scan or 1200))
-    except Exception as e:
+
+    # Serve from background-scan cache if fresh (< 4 hours) and not forced refresh.
+    # The bg scan runs for 20 min every 4 hours and produces the true best pick.
+    # Without this, every request runs a 25-second partial scan → different pick each load.
+    out: Optional[Dict[str, Any]] = None
+    if not bool(refresh):
         try:
-            log.exception(f"best_pick_v2: get_scan_universe failed: {e}")
+            _cached_pick = _LAST_V2_PICK.get("pick")
+            _cached_ts = float(_LAST_V2_PICK.get("ts") or 0.0)
+            if isinstance(_cached_pick, dict) and str(_cached_pick.get("symbol") or "").strip() and (time.time() - _cached_ts) < 4 * 3600:
+                out = dict(_cached_pick)
+                try:
+                    wl_cands = out.get("watchlist_candidates")
+                    if isinstance(wl_cands, list) and wl_cands:
+                        _LAST_V2_WATCHLIST["candidates"] = list(wl_cands)
+                except Exception:
+                    pass
         except Exception:
             pass
-        universe = ["SPY"]
 
-    try:
-        news_top_k = int(os.getenv("BEST_PICK_V2_NEWS_TOPK", "25") or 25)
-    except Exception:
-        news_top_k = 25
-    news_top_k = max(0, min(50, news_top_k))
-
-    try:
-        max_s = float(os.getenv("BEST_PICK_V2_SCAN_MAX_SECONDS", "25.0") or 25.0)
-    except Exception:
-        max_s = 25.0
-    max_s = max(10.0, min(60.0, max_s))
-
-    def _news_fetcher(sym: str) -> Dict[str, Any]:
+    if out is None:
         try:
-            return _news_and_sentiment(str(sym or "").strip().upper(), allow_llm=bool(allow_llm_news))
-        except Exception:
-            return {}
+            universe = await asyncio.to_thread(get_scan_universe, int(max_scan or 1200))
+        except Exception as e:
+            try:
+                log.exception(f"best_pick_v2: get_scan_universe failed: {e}")
+            except Exception:
+                pass
+            universe = ["SPY"]
 
-    try:
-        start = time.time()
-        out = await _scan_best_pick_v2(
-            universe=universe,
-            news_fetcher=_news_fetcher,
-            allow_llm_news=bool(allow_llm_news),
-            max_seconds=float(max_s),
-            news_top_k=int(news_top_k),
-        )
         try:
-            log.info({"best_pick_v2_elapsed": float(time.time() - start), "max_scan": int(max_scan or 0), "max_seconds": float(max_s)})
+            news_top_k = int(os.getenv("BEST_PICK_V2_NEWS_TOPK", "25") or 25)
         except Exception:
-            pass
+            news_top_k = 25
+        news_top_k = max(0, min(50, news_top_k))
+
         try:
-            wl_cands = out.get("watchlist_candidates") if isinstance(out, dict) else None
-            if isinstance(wl_cands, list) and wl_cands:
-                _LAST_V2_WATCHLIST["ts"] = float(time.time())
-                _LAST_V2_WATCHLIST["candidates"] = list(wl_cands)
+            max_s = float(os.getenv("BEST_PICK_V2_SCAN_MAX_SECONDS", "25.0") or 25.0)
         except Exception:
-            pass
-    except Exception:
-        out = {
-            "symbol": "AAPL",
-            "type": "STOCK",
-            "ai_score_0_10": 1.0,
-            "execution_score_0_10": 1.0,
-            "confidence_0_100": 5,
-            "confidence_definition": "P(+1.5R before -1R in 7D)",
-            "high_grade": False,
-            "low_conviction_note": "Low-conviction environment — defensive positioning preferred.",
-            "trade_plan": {},
-            "catalysts": [],
-            "risk_flags": ["scan_failed"],
-            "pillar_scores_0_10": {"technical": 1.0, "catalyst": 1.0, "sentiment": 1.0, "risk_structure": 1.0, "upside": 1.0},
-        }
+            max_s = 25.0
+        max_s = max(10.0, min(60.0, max_s))
+
+        def _news_fetcher(sym: str) -> Dict[str, Any]:
+            try:
+                return _news_and_sentiment(str(sym or "").strip().upper(), allow_llm=bool(allow_llm_news))
+            except Exception:
+                return {}
+
+        try:
+            start = time.time()
+            out = await _scan_best_pick_v2(
+                universe=universe,
+                news_fetcher=_news_fetcher,
+                allow_llm_news=bool(allow_llm_news),
+                max_seconds=float(max_s),
+                news_top_k=int(news_top_k),
+            )
+            try:
+                log.info({"best_pick_v2_elapsed": float(time.time() - start), "max_scan": int(max_scan or 0), "max_seconds": float(max_s)})
+            except Exception:
+                pass
+            try:
+                wl_cands = out.get("watchlist_candidates") if isinstance(out, dict) else None
+                if isinstance(wl_cands, list) and wl_cands:
+                    _LAST_V2_WATCHLIST["ts"] = float(time.time())
+                    _LAST_V2_WATCHLIST["candidates"] = list(wl_cands)
+            except Exception:
+                pass
+        except Exception:
+            out = {
+                "symbol": "AAPL",
+                "type": "STOCK",
+                "ai_score_0_10": 1.0,
+                "execution_score_0_10": 1.0,
+                "confidence_0_100": 5,
+                "confidence_definition": "P(+1.5R before -1R in 7D)",
+                "high_grade": False,
+                "low_conviction_note": "Low-conviction environment — defensive positioning preferred.",
+                "trade_plan": {},
+                "catalysts": [],
+                "risk_flags": ["scan_failed"],
+                "pillar_scores_0_10": {"technical": 1.0, "catalyst": 1.0, "sentiment": 1.0, "risk_structure": 1.0, "upside": 1.0},
+            }
 
     if not isinstance(out, dict):
         out = {"symbol": "AAPL", "type": "STOCK"}
@@ -9270,6 +9331,36 @@ async def best_pick_v2_free_unlock(
     )
     out.setdefault("watchlist_candidates", [])
     return out
+
+
+@app.get("/learning/status", include_in_schema=True)
+def learning_status(_user=_dep_starter):
+    """Evolution engine status — signal weights, win rates, model intelligence."""
+    try:
+        from learning import get_learning_status, recalculate_weights
+        return get_learning_status()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/learning/recalculate", include_in_schema=True)
+def learning_recalculate(_user=_dep_elite):
+    """Force a weight recalculation. Elite only."""
+    try:
+        from learning import recalculate_weights
+        return recalculate_weights()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/learning/backfill", include_in_schema=True)
+def learning_backfill(_user=_dep_elite):
+    """Backfill all historical perf_tracker picks into evolution engine. Elite only."""
+    try:
+        from learning import backfill_from_perf_tracker
+        return backfill_from_perf_tracker()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.get("/health", include_in_schema=True)
