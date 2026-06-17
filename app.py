@@ -2515,6 +2515,11 @@ _SEED_UNIVERSE = [
     "GTLB","DOMO","TASK","BRZE","SMAR","FRSH","SPRK","SPRINKLR","FROG","TOST",
 ]
 
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
+
 @app.on_event("startup")
 def _startup_init():
     try:
