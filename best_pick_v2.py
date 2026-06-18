@@ -29,6 +29,20 @@ except Exception:
 log = logging.getLogger("stackiq")
 
 
+def _conviction_label(score_0_10: float) -> str:
+    """Map a 0-10 AI score to a conviction tier label."""
+    s = float(score_0_10 or 0.0) * 10.0  # convert to 0-100 scale
+    if s < 45:
+        return "LOW"
+    if s < 62:
+        return "MODERATE"
+    if s < 75:
+        return "SOLID"
+    if s < 85:
+        return "HIGH"
+    return "VERY HIGH"
+
+
 def _clamp(v: Any, lo: float, hi: float) -> float:
     try:
         x = float(v)
@@ -3031,10 +3045,18 @@ async def scan_best_pick_v2(
         if _win_boost > 0.1:
             log.info("best_pick: winning-pattern boost +%.2f (pm→%.1f fs→%.1f)", _win_boost, _pm, _fs)
 
-        # ── Weekly pick-count gate ─────────────────────────────────────────
-        _week_limit  = _regime_weekly_limit(regime_str)
+        _week_limit = _regime_weekly_limit(regime_str)
         _week_so_far = _weekly_picks_so_far()
-        _week_full   = _week_so_far >= _week_limit
+        _week_full = _week_so_far >= _week_limit
+
+        # Golden pattern: MOMENTUM_EXPANSION + VOLATILITY_EXPANSION = early-stage coiling.
+        # NOK +17%, CLSK +14%, HPQ +11.5%, SE +9.1% all had this combo at low premover.
+        # These historically fail the fs >= 5.8 gate despite being the best picks — lower
+        # the fs threshold specifically for this combo.
+        _golden_pattern = (
+            "MOMENTUM_EXPANSION" in (best.edge_signals or []) and
+            "VOLATILITY_EXPANSION" in (best.edge_signals or [])
+        )
 
         # Minimum floor gate
         _pm_floor = 2.5 if regime_str == "CHOPPY" else 4.0
@@ -3056,10 +3078,10 @@ async def scan_best_pick_v2(
             log.info("best_pick: %s", _no_trade_reason)
             best.trade_decision = "NO_TRADE"
             best.is_trade = False
-        elif _pm >= 6.0 and _fs >= 6.5:
+        elif _pm >= 6.0 and _fs >= (6.0 if _golden_pattern else 6.5):
             best.trade_decision = "HIGH_CONVICTION"
             best.is_trade = True
-        elif _pm >= 5.0 and _fs >= 5.8:
+        elif _pm >= 5.0 and _fs >= (5.0 if _golden_pattern else 5.8):
             best.trade_decision = "LOW_CONVICTION"
             best.is_trade = True
         elif _pm >= 4.0 and _fs >= 5.2:
@@ -3215,6 +3237,7 @@ async def scan_best_pick_v2(
         "high_grade": bool(high_grade),
         "low_conviction": bool(not high_grade),
         "low_conviction_note": str(low_note),
+        "conviction": _conviction_label(float(best.ai_score)),
         "log_llm_enabled": bool(log_llm_enabled),
         "total_scanned": int(total_scanned),
         "symbols_scanned": int(total_scanned),   # explicit alias — total symbols fed into scanner
@@ -3372,6 +3395,114 @@ async def scan_best_pick_v2(
                         pass
         except Exception:
             pass
+
+    # ── Evolution engine: apply learned weights + log pick ────────────────────
+    try:
+        from learning import (
+            get_weights, get_kelly_position_size, get_fingerprint_similarity,
+            get_calibration_multiplier, get_sector_bias, get_macro_conviction_penalty,
+            get_dynamic_thresholds, multi_agent_score, log_pick as _log_pick,
+            compute_second_deriv_momentum, compute_rsi_divergence,
+            compute_consolidation_tightness, compute_gap_fill_probability,
+        )
+
+        _regime_str = str(out.get("market_regime") or "ALL").upper()
+        _best_bars  = list(best.daily_bars or [])
+
+        # Compute additional evolved signals
+        _second_deriv = compute_second_deriv_momentum(_best_bars)
+        _rsi_div      = compute_rsi_divergence(_best_bars, rsi_now=None)
+        _consolidation = compute_consolidation_tightness(_best_bars)
+        _gap_fill     = compute_gap_fill_probability(_best_bars)
+
+        # Build full signal dict for this pick
+        _signals = {
+            "momentum":               float(best.momentum_score or 5),
+            "volume":                 float(best.liquidity_score or 5),
+            "technical":              float(best.technical_score or 5),
+            "catalyst":               float(best.catalyst_score or 5),
+            "sentiment":              float(best.sentiment_score or 5),
+            "risk_structure":         float(best.risk_structure_score or 5),
+            "upside":                 float(best.upside_score or 5),
+            "premover":               float(best.premover_score_0_10 or 5),
+            "edge_score":             float(best.edge_score_0_10 or 0),
+            "news_score":             float(best.news_score or 5),
+            "liquidity":              float(best.liquidity_score or 5),
+            "volatility":             float(best.volatility_score_0_10 or 5),
+            "second_deriv_momentum":  _second_deriv,
+            "rsi_divergence":         _rsi_div,
+            "consolidation_tightness": _consolidation,
+            "gap_fill_prob":          _gap_fill,
+        }
+
+        # Apply learned weights to final score
+        _weights        = get_weights(_regime_str)
+        _weighted_score = sum(
+            _signals.get(k, 5.0) * _weights.get(k, 1.0)
+            for k in _signals
+        ) / max(len(_signals), 1)
+        # Blend learned score with original (60/40) — prevents wild swings early on
+        _orig_score = float(out.get("ai_score_0_10") or best.ai_score or 5.0)
+        _evolved_score = 0.6 * _orig_score + 0.4 * _weighted_score
+        _evolved_score = max(0.0, min(10.0, _evolved_score))
+
+        # Calibration multiplier (score bucket reliability)
+        _cal_mult = get_calibration_multiplier(_evolved_score)
+        _evolved_score = max(0.0, min(10.0, _evolved_score * _cal_mult))
+
+        # Macro event penalty
+        _macro_pen = get_macro_conviction_penalty()
+        _evolved_score = max(0.0, _evolved_score - _macro_pen)
+
+        # Winner fingerprint similarity boost/penalty
+        _fp_sim = get_fingerprint_similarity(_signals)
+        _fp_boost = (_fp_sim - 0.5) * 1.0  # -0.5 to +0.5 on 0-10 scale
+        _evolved_score = max(0.0, min(10.0, _evolved_score + _fp_boost))
+
+        # Multi-agent debate
+        _debate = multi_agent_score(_signals)
+        # If agents strongly disagree, slightly reduce confidence
+        if _debate["disagreement"] > 2.0:
+            _evolved_score = max(0.0, _evolved_score - 0.3)
+
+        # Dynamic conviction thresholds
+        _thresholds = get_dynamic_thresholds()
+
+        # Kelly position sizing (overrides fixed tiers)
+        _kelly_size = get_kelly_position_size(_regime_str)
+
+        # Update out dict with evolved values
+        out["ai_score_evolved"]       = round(_evolved_score, 3)
+        out["ai_score_0_10_evolved"]  = round(_evolved_score, 3)
+        out["fingerprint_similarity"] = round(_fp_sim, 3)
+        out["multi_agent_debate"]     = _debate
+        out["conviction_thresholds"]  = _thresholds
+        out["kelly_position_size"]    = round(_kelly_size, 1)
+        out["macro_penalty"]          = _macro_pen
+        out["signal_weights_applied"] = True
+
+        # Update conviction label using dynamic thresholds + evolved score
+        _s100 = _evolved_score * 10
+        if _s100 < _thresholds["low"]:       _evo_conv = "LOW"
+        elif _s100 < _thresholds["moderate"]: _evo_conv = "MODERATE"
+        elif _s100 < _thresholds["solid"]:    _evo_conv = "SOLID"
+        elif _s100 < _thresholds["high"]:     _evo_conv = "HIGH"
+        else:                                  _evo_conv = "VERY HIGH"
+        out["conviction"] = _evo_conv
+
+        # Log this pick for future learning (non-blocking)
+        import threading
+        _sym_to_log = str(out.get("symbol") or "")
+        _score_to_log = _evolved_score
+        threading.Thread(
+            target=_log_pick,
+            args=(_sym_to_log, _signals, _regime_str, "", _score_to_log),
+            daemon=True,
+        ).start()
+
+    except Exception as _learn_err:
+        log.warning(f"best_pick_v2: evolution engine error (non-fatal): {_learn_err}")
+    # ──────────────────────────────────────────────────────────────────────────
 
     result = out
 
