@@ -206,7 +206,7 @@ def evaluate_pending_picks(
         with _conn() as db:
             rows = db.execute(
                 """SELECT * FROM picks
-                   WHERE status = 'pending'
+                   WHERE status IN ('pending', 'expired_neutral')
                      AND recorded_at < ?
                    ORDER BY recorded_at ASC
                    LIMIT ?""",
@@ -221,8 +221,8 @@ def evaluate_pending_picks(
 
     symbols = list({row["symbol"] for row in rows})
     try:
-        # Fetch ~10 days to cover the full evaluation window
-        bars_map: Dict[str, List] = _gbatch(symbols, "1Day", 12) or {}
+        # Fetch 30 days to cover picks going back ~6 weeks
+        bars_map: Dict[str, List] = _gbatch(symbols, "1Day", 30) or {}
         bars_map = {str(k).upper(): v for k, v in bars_map.items()}
     except Exception as e:
         log.warning(f"perf_tracker: bar fetch failed: {e}")
@@ -260,6 +260,14 @@ def evaluate_pending_picks(
             if outcome["status"] == "pending":
                 continue
 
+            # Don't downgrade a definitive result back to expired_neutral
+            current_status = str(row["status"])
+            if current_status in ("won", "won_drift", "lost", "lost_drift"):
+                continue
+            # Only upgrade expired_neutral to a decisive result — never re-expire
+            if current_status == "expired_neutral" and outcome["status"] == "expired_neutral":
+                continue
+
             with _conn() as db:
                 db.execute(
                     """UPDATE picks
@@ -279,6 +287,27 @@ def evaluate_pending_picks(
                     ),
                 )
             updated += 1
+
+            # Feed outcome into evolution engine
+            if outcome["status"] in ("won", "won_drift", "lost", "lost_drift"):
+                try:
+                    from learning import settle_outcome as _settle
+                    _ret   = float(outcome["max_return_pct"] or 0)
+                    _dd    = float(outcome["max_drawdown_pct"] or 0)
+                    _days  = int(outcome["days_to_outcome"] or 1)
+                    _tgt_n = 3 if outcome["hit_target"] and _ret > 15 else \
+                             2 if outcome["hit_target"] and _ret > 7  else \
+                             1 if outcome["hit_target"] else 0
+                    _settle(
+                        symbol=sym,
+                        return_pct=_ret,
+                        hit_target_n=_tgt_n,
+                        max_drawdown=_dd,
+                        days_held=_days,
+                        perf_id=int(row["id"]),
+                    )
+                except Exception as _le:
+                    log.warning(f"perf_tracker: learning.settle_outcome failed: {_le}")
 
             # Fire outcome alert in background (won/lost only, not expired)
             if outcome["status"] in ("won", "won_drift", "lost", "lost_drift"):
@@ -319,7 +348,19 @@ def _resolve_outcome(
              "hit_target": False, "hit_stop": False, "days_to_outcome": None}
 
     if not entry or not math.isfinite(float(entry)) or float(entry) <= 0:
-        return {**_null, "status": "expired_neutral", "days_to_outcome": int(age_days)}
+        # No formal entry price — use first future bar's open as synthetic entry.
+        # This lets us track return % for picks that lacked a trade plan.
+        synthetic_entry = None
+        for b in future_bars:
+            v = _sf(b.get("o")) or _sf(b.get("c"))
+            if v and v > 0:
+                synthetic_entry = v
+                break
+        if not synthetic_entry:
+            return {**_null, "status": "expired_neutral", "days_to_outcome": int(age_days)}
+        entry = synthetic_entry
+        stop = None    # no stop without a real trade plan
+        target1 = None  # no target without a real trade plan
 
     entry   = float(entry)
     stop    = float(stop)   if stop   is not None and math.isfinite(float(stop))   else None

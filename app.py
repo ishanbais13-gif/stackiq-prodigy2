@@ -8444,7 +8444,7 @@ def _bg_brain_outcome_loop() -> None:
         log.warning(f"brain_outcome_loop error: {e}")
     try:
         from performance_tracker import evaluate_pending_picks
-        n2 = evaluate_pending_picks()
+        n2 = evaluate_pending_picks(batch_size=80)
         log.info(f"brain_outcome_loop: evaluated {n2} perf_tracker picks")
     except Exception as e:
         log.warning(f"brain_outcome_loop perf_tracker error: {e}")
@@ -10903,84 +10903,6 @@ async def api_chat(req: _ChatRequest, request: Request, _user=_dep_starter):
         log.warning(f"api_chat error: {e}")
         return {"reply": "Sorry, I hit an internal error. Please try again.", "ok": False}
 
-
-@app.get("/public/performance", include_in_schema=True)
-def public_performance():
-    """Public pick history and track record — no auth required."""
-    import sqlite3 as _sq, json as _js
-    _pt_path = os.getenv("PERF_TRACKER_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf_tracker.db"))
-    try:
-        con = _sq.connect(_pt_path, timeout=5)
-        rows = con.execute(
-            """SELECT symbol, recorded_at, entry_price, exit_price,
-                      max_return_pct, max_drawdown_pct, status, edge_signals,
-                      days_to_outcome
-               FROM picks
-               WHERE status NOT IN ('expired_neutral')
-               ORDER BY recorded_at DESC"""
-        ).fetchall()
-        con.close()
-    except Exception:
-        rows = []
-
-    picks = []
-    won_returns, lost_returns = [], []
-    win_count = loss_count = 0
-
-    for row in rows:
-        sym, rec_at, entry, exit_p, max_ret, max_dd, status, sigs_raw, days = row
-        try:
-            signals = _js.loads(sigs_raw or "[]")
-        except Exception:
-            signals = []
-
-        resolved = status in ("won", "won_drift", "lost", "lost_drift")
-        outcome = "won" if status in ("won", "won_drift") else ("lost" if status in ("lost", "lost_drift") else "pending")
-
-        change_pct = None
-        if resolved and max_ret is not None:
-            change_pct = float(max_ret)
-            if outcome == "won":
-                won_returns.append(change_pct)
-                win_count += 1
-            else:
-                lost_returns.append(float(max_dd or max_ret))
-                loss_count += 1
-
-        picks.append({
-            "symbol": sym,
-            "picked_at": int(rec_at) if rec_at else None,
-            "entry_price": float(entry) if entry else None,
-            "exit_price": float(exit_p) if exit_p else None,
-            "change_pct": round(change_pct, 2) if change_pct is not None else None,
-            "outcome": outcome,
-            "signals": signals,
-            "days_to_outcome": days,
-        })
-
-    total = win_count + loss_count
-    win_rate = round(win_count / total * 100, 1) if total > 0 else 0.0
-    avg_winner = round(sum(won_returns) / len(won_returns), 1) if won_returns else 0.0
-    avg_loser  = round(sum(lost_returns) / len(lost_returns), 1) if lost_returns else 0.0
-
-    best = max(picks, key=lambda p: (p["change_pct"] or 0.0), default=None)
-
-    return {
-        "picks": picks,
-        "summary": {
-            "total_resolved": total,
-            "total_picks": len(picks),
-            "win_count": win_count,
-            "loss_count": loss_count,
-            "win_rate_pct": win_rate,
-            "avg_winner_pct": avg_winner,
-            "avg_loser_pct": avg_loser,
-            "best_pick": {
-                "symbol": best["symbol"],
-                "change_pct": best["change_pct"],
-            } if best and best["change_pct"] else None,
-        },
-    }
 
 
 @app.get("/chat", include_in_schema=False)
