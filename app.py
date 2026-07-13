@@ -8341,11 +8341,14 @@ def _bg_v2_scan_once() -> None:
                         _LAST_V2_PICK["pick"]["market_regime"] = fresh_mr
 
                 # Auto-record the top watchlist candidate into performance picks.
-                # Use the best pick (out) if it's a trade, otherwise fall back to
-                # the #1 watchlist candidate.
+                # Only track real trades (HIGH_CONVICTION / LOW_CONVICTION with a
+                # real entry/stop/target). NO_TRADE candidates — including ones
+                # demoted by the weekly quota — are watchlist-only and must not
+                # be recorded into perf_tracker, or they dilute the win-rate
+                # stats with picks that were never actually traded.
                 try:
-                    from performance_tracker import record_pick as _record_pick
                     if bool(out.get("is_trade")) and str(out.get("symbol") or "").strip():
+                        from performance_tracker import record_pick as _record_pick
                         _rp_result = _record_pick(out)
                         # Fire new-pick alert only for fresh inserts (not duplicate suppression)
                         if isinstance(_rp_result, int):
@@ -8354,17 +8357,6 @@ def _bg_v2_scan_once() -> None:
                                 send_new_pick_alert_bg(out)
                             except Exception as _ae:
                                 log.warning(f"bg_scan: new_pick alert failed: {_ae}")
-                    elif isinstance(cands, list) and cands:
-                        top = cands[0]
-                        _record_pick({
-                            "symbol": top.get("symbol") or "",
-                            "trade_plan": {},
-                            "edge_signals": top.get("edge_signals") or [],
-                            "edge_score_0_10": top.get("premover") or 0.0,
-                            "final_score_0_10": top.get("final_score") or 0.0,
-                            "confidence_0_10": top.get("confidence") or 0.0,
-                            "premover_score_0_10": top.get("premover") or 0.0,
-                        })
                 except Exception as _rp_err:
                     log.warning(f"bg_scan: record_pick failed: {_rp_err}")
 

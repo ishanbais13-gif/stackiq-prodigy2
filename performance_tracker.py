@@ -254,6 +254,7 @@ def evaluate_pending_picks(
                 direction   = str(row["direction"] or "long"),
                 age_days    = age_days,
                 max_age_days= max_age_days,
+                symbol      = sym,
             )
 
             # If still pending (too early), don't write
@@ -333,6 +334,15 @@ def evaluate_pending_picks(
     return updated
 
 
+# A pick with no real trade plan gets its return tracked off a synthetic
+# entry (first future bar's open). That price has no sanity-check behind it,
+# so a bad print / stock split / bad ticker match can produce a nonsensical
+# "return" (seen in production: +5,910% and +5,697% on single picks). Cap
+# how far a synthetic-entry outcome is trusted before treating it as a data
+# anomaly rather than a real win/loss.
+_SYNTHETIC_RETURN_SANITY_CAP_PCT = 75.0
+
+
 def _resolve_outcome(
     *,
     future_bars:  List[Dict[str, Any]],
@@ -342,11 +352,13 @@ def _resolve_outcome(
     direction:    str,
     age_days:     float,
     max_age_days: float,
+    symbol:       str = "",
 ) -> Dict[str, Any]:
     """Walk forward through bars and determine win/loss/expired."""
     _null = {"status": "pending", "max_return_pct": None, "max_drawdown_pct": None,
              "hit_target": False, "hit_stop": False, "days_to_outcome": None}
 
+    is_synthetic_entry = False
     if not entry or not math.isfinite(float(entry)) or float(entry) <= 0:
         # No formal entry price — use first future bar's open as synthetic entry.
         # This lets us track return % for picks that lacked a trade plan.
@@ -361,6 +373,7 @@ def _resolve_outcome(
         entry = synthetic_entry
         stop = None    # no stop without a real trade plan
         target1 = None  # no target without a real trade plan
+        is_synthetic_entry = True
 
     entry   = float(entry)
     stop    = float(stop)   if stop   is not None and math.isfinite(float(stop))   else None
@@ -436,6 +449,23 @@ def _resolve_outcome(
         else:
             status = "expired_neutral"
         days_out = int(age_days)
+
+        # Synthetic entries have no real trade plan behind them, so a bad
+        # print (bad ticker match, stock split, corrupted bar) can produce
+        # an implausible "return" instead of a real win/loss. Discard those
+        # as a data anomaly rather than recording a fake blowout number.
+        if is_synthetic_entry and (
+            (max_ret is not None and abs(max_ret) > _SYNTHETIC_RETURN_SANITY_CAP_PCT)
+            or (max_dd is not None and abs(max_dd) > _SYNTHETIC_RETURN_SANITY_CAP_PCT)
+        ):
+            log.warning(
+                "perf_tracker: discarding implausible synthetic-entry outcome "
+                "symbol=%s entry=%.4f max_ret=%s max_dd=%s — likely bad bar data",
+                symbol, entry, max_ret, max_dd,
+            )
+            status  = "expired_neutral"
+            max_ret = None
+            max_dd  = None
     else:
         status = "pending"
 
