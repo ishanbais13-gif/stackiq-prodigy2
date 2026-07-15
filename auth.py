@@ -34,7 +34,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
@@ -1143,6 +1143,109 @@ def admin_get_token(body: AdminGetTokenRequest):
     return {"access_token": token, "plan": plan, "email": email}
 
 
+class AdminReconcileStripeRequest(BaseModel):
+    secret: str
+
+
+@auth_router.post("/admin-reconcile-stripe")
+def admin_reconcile_stripe(body: AdminReconcileStripeRequest):
+    """
+    Cross-check every active Stripe subscription against what our DB thinks
+    that customer's plan/status is. Read-only — makes no writes.
+
+    Surfaces two failure modes:
+      - "mismatches": we know the customer (stripe_customer_id or
+        metadata.user_id resolved to a user row) but their DB plan/status
+        doesn't match what Stripe says they're actively paying for.
+      - "orphans": Stripe has an active subscription for a customer we can't
+        resolve to any user row at all (stripe_customer_id was never saved,
+        and/or metadata.user_id is missing/stale).
+    """
+    if body.secret != _ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if _stripe is None or not STRIPE_SECRET_KEY:
+        raise HTTPException(503, "Stripe not configured")
+
+    mismatches: List[dict] = []
+    orphans: List[dict] = []
+    checked = 0
+    starting_after: Optional[str] = None
+
+    while True:
+        kwargs = {"status": "active", "limit": 100}
+        if starting_after:
+            kwargs["starting_after"] = starting_after
+        page = _stripe.Subscription.list(**kwargs)
+        subs = page.get("data", [])
+        if not subs:
+            break
+
+        for sub in subs:
+            checked += 1
+            d = _stripe_to_dict(sub)
+            customer_id = d.get("customer")
+            sub_id = d.get("id")
+            expected_plan = _plan_from_stripe_sub(d)
+            meta_uid = (d.get("metadata") or {}).get("user_id")
+
+            row = None
+            with _get_db() as conn:
+                if customer_id:
+                    row = conn.execute(
+                        "SELECT id, email, plan, subscription_status FROM users WHERE stripe_customer_id = ?",
+                        (customer_id,),
+                    ).fetchone()
+                if not row and meta_uid:
+                    try:
+                        row = conn.execute(
+                            "SELECT id, email, plan, subscription_status FROM users WHERE id = ?",
+                            (int(meta_uid),),
+                        ).fetchone()
+                    except ValueError:
+                        pass
+
+            if not row:
+                cust_email = None
+                try:
+                    cust = _stripe.Customer.retrieve(customer_id)
+                    cust_email = cust.get("email")
+                except Exception:
+                    pass
+                orphans.append({
+                    "stripe_customer_id": customer_id,
+                    "stripe_subscription_id": sub_id,
+                    "stripe_email": cust_email,
+                    "expected_plan": expected_plan,
+                    "reason": "no user row matched stripe_customer_id or metadata.user_id",
+                })
+                continue
+
+            db_plan = row["plan"]
+            db_status = row["subscription_status"]
+            if db_plan != expected_plan or db_status != "active":
+                mismatches.append({
+                    "user_id": row["id"],
+                    "email": row["email"],
+                    "stripe_customer_id": customer_id,
+                    "stripe_subscription_id": sub_id,
+                    "expected_plan": expected_plan,
+                    "db_plan": db_plan,
+                    "db_subscription_status": db_status,
+                })
+
+        if not page.get("has_more"):
+            break
+        starting_after = subs[-1]["id"]
+
+    return {
+        "checked_active_subscriptions": checked,
+        "mismatches_found": len(mismatches),
+        "orphans_found": len(orphans),
+        "mismatches": mismatches,
+        "orphans": orphans,
+    }
+
+
 class AdminResetPicksRequest(BaseModel):
     secret: str
     email: str
@@ -1529,6 +1632,14 @@ async def stripe_webhook(request: Request):
                 _update_subscription_from_stripe(sub)
             except Exception as exc:
                 log.warning("Failed to retrieve subscription %s: %s", sub_id, exc)
+
+    else:
+        # Catch-all: an event type we don't act on was delivered. Log it so a
+        # misconfigured "events to send" list in the Stripe Dashboard (or a
+        # new event type we should be handling) shows up instead of silently
+        # returning 200 with nothing done — this is exactly what masked the
+        # 2026-07-15 plan-not-upgraded incident.
+        log.warning("stripe webhook: unhandled event type=%s id=%s — no action taken", event_type, event.get("id"))
 
     return {"received": True}
 
