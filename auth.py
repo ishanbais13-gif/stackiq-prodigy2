@@ -1145,17 +1145,16 @@ def admin_get_token(body: AdminGetTokenRequest):
 
 class AdminStripeLookupRequest(BaseModel):
     secret: str
-    customer_id: str
+    customer_id: Optional[str] = None
+    email: Optional[str] = None
 
 
 @auth_router.post("/admin-stripe-lookup")
 def admin_stripe_lookup(body: AdminStripeLookupRequest):
     """
     Diagnostic: does our configured STRIPE_SECRET_KEY see a given customer
-    at all? A "No such customer" error here for a customer ID that's
-    visibly active in the Stripe Dashboard is the signature of a
-    test-mode/live-mode key mismatch between the backend and the dashboard
-    view. Read-only.
+    (or all customers under an email) at all, and what subscriptions +
+    our own DB row do they resolve to? Read-only.
     """
     if body.secret != _ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -1166,29 +1165,52 @@ def admin_stripe_lookup(body: AdminStripeLookupRequest):
         "test" if STRIPE_SECRET_KEY.startswith("sk_test_") else "unknown"
     )
 
-    result = {"configured_key_mode": key_mode, "customer_id": body.customer_id}
-    try:
-        cust = _stripe_to_dict(_stripe.Customer.retrieve(body.customer_id))
-        result["customer_found"] = True
-        result["customer_email"] = cust.get("email")
-        result["customer_livemode"] = cust.get("livemode")
-    except Exception as exc:
-        result["customer_found"] = False
-        result["error"] = str(exc)
-        return result
+    def _customer_report(customer_id: str) -> dict:
+        entry = {"customer_id": customer_id}
+        try:
+            cust = _stripe_to_dict(_stripe.Customer.retrieve(customer_id))
+            entry["customer_found"] = True
+            entry["customer_email"] = cust.get("email")
+            entry["customer_livemode"] = cust.get("livemode")
+            entry["customer_created"] = cust.get("created")
+        except Exception as exc:
+            entry["customer_found"] = False
+            entry["error"] = str(exc)
+            return entry
 
-    try:
-        subs = _stripe_to_dict(_stripe.Subscription.list(customer=body.customer_id, limit=10))
-        result["subscriptions"] = [
-            {
-                "id": s.get("id"),
-                "status": s.get("status"),
-                "livemode": s.get("livemode"),
+        try:
+            subs = _stripe_to_dict(_stripe.Subscription.list(customer=customer_id, limit=10))
+            entry["subscriptions"] = [
+                {"id": s.get("id"), "status": s.get("status"), "livemode": s.get("livemode")}
+                for s in (subs.get("data") or [])
+            ]
+        except Exception as exc:
+            entry["subscriptions_error"] = str(exc)
+
+        with _get_db() as conn:
+            row = conn.execute(
+                "SELECT id, email, plan, subscription_status FROM users WHERE stripe_customer_id = ?",
+                (customer_id,),
+            ).fetchone()
+        entry["matches_db_user"] = dict(row) if row else None
+        return entry
+
+    result = {"configured_key_mode": key_mode}
+
+    if body.customer_id:
+        result["by_customer_id"] = _customer_report(body.customer_id)
+
+    if body.email:
+        try:
+            cust_list = _stripe_to_dict(_stripe.Customer.list(email=body.email, limit=20))
+            customers = cust_list.get("data") or []
+            result["by_email"] = {
+                "email_searched": body.email,
+                "customers_found": len(customers),
+                "customers": [_customer_report(_stripe_to_dict(c).get("id")) for c in customers],
             }
-            for s in (subs.get("data") or [])
-        ]
-    except Exception as exc:
-        result["subscriptions_error"] = str(exc)
+        except Exception as exc:
+            result["by_email_error"] = str(exc)
 
     return result
 
