@@ -1228,22 +1228,40 @@ def admin_stripe_lookup(body: AdminStripeLookupRequest):
 
     if body.subscription_id:
         try:
-            sub = _stripe_to_dict(_stripe.Subscription.retrieve(body.subscription_id))
-            cust_id = sub.get("customer")
+            raw_sub = _stripe.Subscription.retrieve(body.subscription_id)
+
+            # Bypass _stripe_to_dict entirely -- diagnosing whether it's
+            # silently losing data against the installed SDK version.
+            # __getitem__ / direct attribute access is more primitive and
+            # less likely to be broken by an SDK version drift than the
+            # to_dict_recursive()/dict() fallback chain _stripe_to_dict uses.
+            def _safe_field(obj, key):
+                try:
+                    return obj[key]
+                except Exception:
+                    try:
+                        return getattr(obj, key)
+                    except Exception:
+                        return "<unreadable>"
+
+            converted = _stripe_to_dict(raw_sub)
+
+            cust_id = _safe_field(raw_sub, "customer")
             with _get_db() as conn:
                 row = conn.execute(
                     "SELECT id, email, plan, subscription_status, stripe_customer_id FROM users WHERE stripe_customer_id = ?",
                     (cust_id,),
                 ).fetchone()
+
             result["by_subscription_id"] = {
                 "subscription_id": body.subscription_id,
                 "found": True,
-                "status": sub.get("status"),
-                "livemode": sub.get("livemode"),
-                "customer": cust_id,
-                "metadata": sub.get("metadata"),
-                "expected_plan": _plan_from_stripe_sub(sub),
-                "current_period_end": sub.get("current_period_end"),
+                "raw_type": type(raw_sub).__name__,
+                "status_raw": _safe_field(raw_sub, "status"),
+                "livemode_raw": _safe_field(raw_sub, "livemode"),
+                "customer_raw": cust_id,
+                "current_period_end_raw": _safe_field(raw_sub, "current_period_end"),
+                "stripe_to_dict_keys_count": len(converted) if isinstance(converted, dict) else "not_a_dict",
                 "matches_db_user": dict(row) if row else None,
             }
         except Exception as exc:
