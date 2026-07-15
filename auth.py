@@ -1147,6 +1147,7 @@ class AdminStripeLookupRequest(BaseModel):
     secret: str
     customer_id: Optional[str] = None
     email: Optional[str] = None
+    subscription_id: Optional[str] = None
 
 
 @auth_router.post("/admin-stripe-lookup")
@@ -1224,6 +1225,29 @@ def admin_stripe_lookup(body: AdminStripeLookupRequest):
             result["db_users_matching_email_ci"] = [dict(r) for r in db_rows]
         except Exception as exc:
             result["db_lookup_error"] = str(exc)
+
+    if body.subscription_id:
+        try:
+            sub = _stripe_to_dict(_stripe.Subscription.retrieve(body.subscription_id))
+            cust_id = sub.get("customer")
+            with _get_db() as conn:
+                row = conn.execute(
+                    "SELECT id, email, plan, subscription_status, stripe_customer_id FROM users WHERE stripe_customer_id = ?",
+                    (cust_id,),
+                ).fetchone()
+            result["by_subscription_id"] = {
+                "subscription_id": body.subscription_id,
+                "found": True,
+                "status": sub.get("status"),
+                "livemode": sub.get("livemode"),
+                "customer": cust_id,
+                "metadata": sub.get("metadata"),
+                "expected_plan": _plan_from_stripe_sub(sub),
+                "current_period_end": sub.get("current_period_end"),
+                "matches_db_user": dict(row) if row else None,
+            }
+        except Exception as exc:
+            result["by_subscription_id"] = {"subscription_id": body.subscription_id, "found": False, "error": str(exc)}
 
     return result
 
