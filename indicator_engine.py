@@ -180,14 +180,39 @@ def calculate_indicators(candles: List[Dict[str, Any]]) -> Dict[str, int]:
     except Exception:
         vol_avg = 0.0
 
-    vol_ratio = 1.0
+    # BUG (fixed 2026-07-15): this used to be "today's volume vs. this
+    # stock's own recent average" -- never referencing price or absolute
+    # volume at all. A stock that always trades almost nothing (e.g. a
+    # $0.80 name doing ~5,000 shares/day, ~$4k/day dollar volume) sits
+    # consistently near its own thin average and scored a normal 50 here,
+    # indistinguishable from a genuinely liquid mega-cap. Any downstream
+    # safety gate trusting this value to mean "is this actually tradable"
+    # was silently defeated. Replaced with the same absolute-dollar-volume,
+    # log-scaled formula already proven and live in indicators.py's
+    # calculate_liquidity() -- both for correctness and so this file stops
+    # disagreeing with the sibling indicator engine on the same input data.
     try:
-        if vol_avg > 0:
-            vol_ratio = float(vols[-1]) / float(vol_avg)
+        last_price = float(closes[-1])
     except Exception:
-        vol_ratio = 1.0
+        last_price = 0.0
+    dollar_vol = max(0.0, vol_avg * last_price)
 
-    liquidity = _clamp_0_100(50.0 + (min(3.0, max(0.0, vol_ratio)) - 1.0) * 25.0)
+    if dollar_vol > 0:
+        liquidity = 15.0 + 20.0 * math.log10(dollar_vol / 1_000_000.0 + 1.0)
+        try:
+            tail5 = vols[-5:] if len(vols) >= 5 else vols
+            avg_vol5 = sum(tail5) / float(len(tail5) or 1)
+            vol_trend = (avg_vol5 / vol_avg) if vol_avg > 0 else 1.0
+            liquidity += (vol_trend - 1.0) * 20.0
+        except Exception:
+            pass
+        liquidity = _clamp_0_100(liquidity)
+    else:
+        # No usable volume data at all -- neutral, consistent with how
+        # every other metric in this function defaults on missing data
+        # (momentum/trend/macd_norm/slope_norm/ema_align all fall back to
+        # 50.0), not favorable and not punitive.
+        liquidity = 50.0
 
     risk = _clamp_0_100(100.0 - ((0.35 * momentum) + (0.35 * trend) + (0.15 * volatility) + (0.15 * liquidity)))
 

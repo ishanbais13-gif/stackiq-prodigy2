@@ -8614,11 +8614,27 @@ async def best_pick(
     except Exception:
         pass
 
-    # Persistent cache: return last scan result even if TTL cache expired.
+    # Persistent cache: return last scan result even if the fast TTL cache
+    # expired, but only within a bounded window.
+    #
+    # BUG (fixed 2026-07-15): this had NO age check at all -- unlike the
+    # 3s TTL cache directly above it, this block returned _BEST_PICK_PERSIST
+    # unconditionally as long as it existed and cleared the score floor.
+    # Nothing in the codebase ever calls this route with refresh=True, so
+    # once a single scan succeeded, /best_pick would serve that exact
+    # frozen symbol/entry/stop/targets forever -- a customer polling "pick
+    # of the day" got the same increasingly-stale price levels presented
+    # as current, indefinitely, with no way for the system to self-correct.
+    #
+    # 3 minutes balances staying fast for the common case (repeated
+    # requests within a short window shouldn't each pay the 8-18s scan
+    # cost) against not letting live trade levels drift meaningfully stale.
+    _BEST_PICK_PERSIST_TTL_SECONDS = 180.0
     try:
         if not bool(refresh):
             cached_p = _BEST_PICK_PERSIST.get("resp") if isinstance(_BEST_PICK_PERSIST, dict) else None
-            if isinstance(cached_p, dict) and cached_p.get("symbol"):
+            ts_p = float(_BEST_PICK_PERSIST.get("ts") or 0.0) if isinstance(_BEST_PICK_PERSIST, dict) else 0.0
+            if isinstance(cached_p, dict) and cached_p.get("symbol") and (time.time() - ts_p) <= _BEST_PICK_PERSIST_TTL_SECONDS:
                 try:
                     scp = float(cached_p.get("score_0_100")) if cached_p.get("score_0_100") is not None else float(cached_p.get("ai_score_0_100") or 0.0)
                 except Exception:
@@ -8981,12 +8997,20 @@ async def best_pick(
             log.warning("best_pick timeout triggered — returning cached pick")
         except Exception:
             pass
+        # Same missing-age-check pattern as the persistent cache above,
+        # fixed the same way: serving a scan-failure fallback is reasonable
+        # (better than erroring out), but only within a bounded window --
+        # an indefinitely-old cached pick presented as the result of "we
+        # just tried to scan and timed out" would be misleading regardless
+        # of how the timeout happened to be reached.
         cached = None
+        ts_c = 0.0
         try:
             cached = _BEST_PICK_CACHE.get("resp")
+            ts_c = float(_BEST_PICK_CACHE.get("ts") or 0.0)
         except Exception:
             cached = None
-        if isinstance(cached, dict) and cached.get("symbol"):
+        if isinstance(cached, dict) and cached.get("symbol") and (time.time() - ts_c) <= _BEST_PICK_PERSIST_TTL_SECONDS:
             return _best_pick_contract(cached)
 
         # Degraded fallback (SPY)
