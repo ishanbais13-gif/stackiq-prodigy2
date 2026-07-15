@@ -1143,6 +1143,56 @@ def admin_get_token(body: AdminGetTokenRequest):
     return {"access_token": token, "plan": plan, "email": email}
 
 
+class AdminStripeLookupRequest(BaseModel):
+    secret: str
+    customer_id: str
+
+
+@auth_router.post("/admin-stripe-lookup")
+def admin_stripe_lookup(body: AdminStripeLookupRequest):
+    """
+    Diagnostic: does our configured STRIPE_SECRET_KEY see a given customer
+    at all? A "No such customer" error here for a customer ID that's
+    visibly active in the Stripe Dashboard is the signature of a
+    test-mode/live-mode key mismatch between the backend and the dashboard
+    view. Read-only.
+    """
+    if body.secret != _ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if _stripe is None or not STRIPE_SECRET_KEY:
+        raise HTTPException(503, "Stripe not configured")
+
+    key_mode = "live" if STRIPE_SECRET_KEY.startswith("sk_live_") else (
+        "test" if STRIPE_SECRET_KEY.startswith("sk_test_") else "unknown"
+    )
+
+    result = {"configured_key_mode": key_mode, "customer_id": body.customer_id}
+    try:
+        cust = _stripe_to_dict(_stripe.Customer.retrieve(body.customer_id))
+        result["customer_found"] = True
+        result["customer_email"] = cust.get("email")
+        result["customer_livemode"] = cust.get("livemode")
+    except Exception as exc:
+        result["customer_found"] = False
+        result["error"] = str(exc)
+        return result
+
+    try:
+        subs = _stripe_to_dict(_stripe.Subscription.list(customer=body.customer_id, limit=10))
+        result["subscriptions"] = [
+            {
+                "id": s.get("id"),
+                "status": s.get("status"),
+                "livemode": s.get("livemode"),
+            }
+            for s in (subs.get("data") or [])
+        ]
+    except Exception as exc:
+        result["subscriptions_error"] = str(exc)
+
+    return result
+
+
 class AdminReconcileStripeRequest(BaseModel):
     secret: str
 
