@@ -6,6 +6,13 @@ def _clamp_0_100(v: Any) -> float:
         x = float(v)
     except Exception:
         x = 0.0
+    # NaN guard (fixed 2026-07-15): `nan < 0.0` and `nan > 100.0` are both
+    # False in Python, so a NaN input previously passed through unclamped.
+    # indicators.py's equivalent _clamp() already had this check; this file
+    # (and execution_engine.py, indicator_engine.py, which share this same
+    # helper) didn't.
+    if x != x:
+        return 50.0
     if x < 0.0:
         x = 0.0
     if x > 100.0:

@@ -585,12 +585,24 @@ def _get_sec_8k_filers(lookback_days: int = 2) -> Set[str]:
             title = (entry.findtext("atom:title", default="", namespaces=ns) or "").upper()
             # Title format: "8-K - COMPANY NAME (TICKER) (CIK)"
             # Extract ticker from parentheses
+            # BUG (fixed 2026-07-15): taking the FIRST 1-5 char alpha token
+            # in parens and breaking immediately can grab a state-of-
+            # incorporation code (e.g. "(DE)", "(NV)") that appears in the
+            # company name before the actual ticker, misattributing this
+            # 8-K -- and the has_8k catalyst signal it feeds (worth 15/100
+            # points, the largest single catalyst signal) -- to the wrong
+            # symbol. Per the stated title format "COMPANY NAME (TICKER)
+            # (CIK)", the CIK is always numeric and always last, so the
+            # ticker is the LAST alpha token before it, not the first alpha
+            # token overall. Collect all candidates and take the last one.
             parts = title.split("(")
+            candidates: List[str] = []
             for part in parts[1:]:  # skip first split (before first paren)
                 tok = part.split(")")[0].strip()
                 if tok and 1 <= len(tok) <= 5 and tok.isalpha():
-                    filers.add(tok)
-                    break
+                    candidates.append(tok)
+            if candidates:
+                filers.add(candidates[-1])
     except Exception as e:
         log.debug(f"sec_8k: fetch error: {e}")
 
@@ -686,7 +698,19 @@ def _score_symbol(
 
     day_open = _sf(db.get("o"))
     day_close = _sf(db.get("c") or db.get("vw"))
-    prev_close = closes[-2] if len(closes) >= 2 else None
+    # BUG (fixed 2026-07-15): `bars` comes from get_bars_batch(..., "1Day", 30),
+    # which always ends at the last COMPLETED trading session (see
+    # data_fetcher._last_trading_day_eod()) -- during market hours,
+    # closes[-1] IS yesterday's close, not today's. closes[-2] was
+    # therefore the close from two trading days ago, not yesterday, so
+    # today_chg_pct below mixed a live today-price with a 2-day-stale
+    # reference and mislabeled the result as "today's change." This feeds
+    # the already-running penalty and the "quiet accumulation" signal
+    # (worth up to 25/100 points, the largest single signal in this
+    # scorer). The separate intraday_chg calc a few lines above already
+    # correctly avoids this exact bars-vs-snapshot mismatch (see its
+    # comment) -- this fix applies the same fix here.
+    prev_close = closes[-1] if len(closes) >= 1 else None
 
     cur_vol: Optional[float] = _sf(db.get("v"))
     if cur_vol is None and vols:
@@ -722,6 +746,7 @@ def _score_symbol(
             raw_score -= penalty
             signals["already_running"] = {"penalty": round(-penalty, 1), "today_chg_pct": round(chg * 100, 1)}
     except Exception:
+        log.debug("_score_symbol: already_running signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # --- 1) Quiet accumulation (25 pts) — THE PRE-SURGE SIGNAL ---
@@ -752,6 +777,7 @@ def _score_symbol(
                 raw_score += partial
                 signals["vol_surge"] = {"pts": round(partial, 1), "ratio": round(vol_ratio, 2)}
     except Exception:
+        log.debug("_score_symbol: quiet_accumulation/vol_surge signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # --- 2) Float-adjusted volume (30 pts) — THE KEY SIGNAL ---
@@ -773,6 +799,7 @@ def _score_symbol(
                 "float_shares_m": round(float_shares / 1_000_000, 2),
             }
     except Exception:
+        log.debug("_score_symbol: float_rotation signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # --- 3) Short squeeze potential (20 pts) ---
@@ -793,6 +820,7 @@ def _score_symbol(
                 "days_to_cover": _sf(fd.get("short_ratio")),
             }
     except Exception:
+        log.debug("_score_symbol: squeeze_potential signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # --- 4) ATR compression (20 pts) ---
@@ -807,6 +835,7 @@ def _score_symbol(
                 raw_score += compress_pts
                 signals["atr_compression"] = {"pts": round(compress_pts, 1), "atr5_atr20": round(ratio_atr, 3)}
     except Exception:
+        log.debug("_score_symbol: atr_compression signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # --- 5) Close near high of day (10 pts) ---
@@ -823,6 +852,7 @@ def _score_symbol(
                 raw_score += close_pts
                 signals["close_strength"] = {"pts": round(close_pts, 1), "position_in_range": round(pos, 3)}
     except Exception:
+        log.debug("_score_symbol: close_strength signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # --- 6) Near 20-day high (10 pts) ---
@@ -836,6 +866,7 @@ def _score_symbol(
                 raw_score += breakout_pts
                 signals["near_high"] = {"pts": round(breakout_pts, 1), "pct_from_20d_high": round(pct_from_high * 100, 2)}
     except Exception:
+        log.debug("_score_symbol: near_high signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # --- 7) SEC 8-K catalyst or news (15 pts) ---
@@ -850,6 +881,7 @@ def _score_symbol(
             raw_score += cat_pts
             signals["catalyst"] = {"pts": round(cat_pts, 1), "type": "news"}
     except Exception:
+        log.debug("_score_symbol: catalyst signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # --- 8) RS vs SPY 3-day (5 pts) ---
@@ -863,6 +895,7 @@ def _score_symbol(
             raw_score += rs_pts
             signals["rs_vs_spy"] = {"pts": round(rs_pts, 1), "alpha_3d_pct": round(alpha * 100, 2)}
     except Exception:
+        log.debug("_score_symbol: rs_vs_spy signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # Entry zone and invalidation
@@ -893,6 +926,7 @@ def _score_symbol(
             raw_score += micro_bonus
             signals["micro_float_bonus"] = {"pts": round(micro_bonus, 1), "float_m": round(float_shares_b / 1_000_000, 2)}
     except Exception:
+        log.debug("_score_symbol: micro_float_bonus signal failed for %s, skipping", symbol, exc_info=True)
         pass
 
     # Normalize: always use 75 as the base max (non-float signals).
@@ -1072,7 +1106,15 @@ def _run_premover_scan_inner(
         vol = _sf(db.get("v"))
         if not vol or vol <= 0:
             continue
-        prev_vol = _sf(db.get("pv"))
+        # BUG (fixed 2026-07-15): "pv" is not a real key anywhere in the
+        # snapshot schema -- prev_vol was always None, so ratio always
+        # defaulted to 1.0 and this "volume-surge pre-filter" silently
+        # did nothing but re-sort by that constant (a stable sort, so it
+        # just preserved whatever order the universe list already had).
+        # The real previous-day volume lives under prevDailyBar.v, the
+        # same key used consistently everywhere else in this codebase.
+        prev_db = snap.get("prevDailyBar") or {}
+        prev_vol = _sf(prev_db.get("v"))
         ratio = (vol / max(prev_vol, 1.0)) if prev_vol and prev_vol > 0 else 1.0
         vol_scored.append((ratio, sym, snap))
 

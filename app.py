@@ -9855,10 +9855,19 @@ def watchlist_live():
     return {"items": out, "updated_at": now_iso()}
 
 @app.get("/recommend/top")
-def recommend_top(n: int = 10):
+async def recommend_top(n: int = 10, _user=_dep_starter):
     """Compatibility endpoint for the frontend. Never throws; returns {items: []}."""
+    # BUG (fixed 2026-07-15): this was a sync `def` calling the async
+    # `best_pick()` without `await` -- `bp` was always an un-awaited
+    # coroutine object, `isinstance(bp, dict)` was always False, so this
+    # endpoint always silently returned {"items": []} regardless of real
+    # data (and leaked a "coroutine was never awaited" runtime warning).
+    # Fixing the await alone would have reopened the exact paywall bypass
+    # fixed earlier tonight on /best_pick and friends -- this route had no
+    # auth at all, which was harmless only because it never actually
+    # returned data. Added the same _dep_starter gate as its siblings.
     try:
-        bp = best_pick(max_scan=200)
+        bp = await best_pick(max_scan=200)
         items: List[Dict[str, Any]] = []
         if isinstance(bp, dict):
             pick = bp.get("pick") or bp.get("best_pick")
