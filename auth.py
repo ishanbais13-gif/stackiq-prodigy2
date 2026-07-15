@@ -503,6 +503,23 @@ _otp_resend_attempts: dict[str, list[float]] = {}  # email → list of epoch tim
 _OTP_RESEND_MAX = 5
 _OTP_RESEND_WINDOW = 600  # 10 minutes
 
+_login_attempts: dict[str, list[float]] = {}  # email → list of epoch timestamps
+_LOGIN_MAX = 10
+_LOGIN_WINDOW = 900  # 15 minutes
+
+
+def _login_rate_ok(email: str) -> bool:
+    """Every other sensitive auth flow in this file is throttled -- login itself
+    previously wasn't, leaving password brute-forcing limited only by bcrypt's
+    cost factor with no lockout."""
+    now = _time.time()
+    timestamps = [t for t in _login_attempts.get(email, []) if now - t < _LOGIN_WINDOW]
+    _login_attempts[email] = timestamps
+    if len(timestamps) >= _LOGIN_MAX:
+        return False
+    _login_attempts[email].append(now)
+    return True
+
 
 def _pw_reset_rate_ok(email: str) -> bool:
     now = _time.time()
@@ -703,6 +720,25 @@ def require_plan(min_plan: str):
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=f"PLAN_UPGRADE_REQUIRED:{min_plan}",
             )
+        # A paid `plan` value is only real access if the underlying Stripe
+        # subscription is actually active. Previously only `plan` was
+        # checked here, relying entirely on `plan`/`subscription_status`
+        # always being written together -- which is exactly what a silent
+        # webhook failure (already happened once) or a manual DB edit could
+        # break, leaving a canceled/past-due account with paid access
+        # indefinitely. `_update_subscription_from_stripe` always writes
+        # both columns together, so this never fires for a legitimately
+        # active account.
+        if PLAN_RANK.get(user_plan, 0) > 0:
+            try:
+                sub_status = user["subscription_status"]
+            except (IndexError, KeyError):
+                sub_status = None
+            if sub_status != "active":
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"PLAN_UPGRADE_REQUIRED:{min_plan}",
+                )
         return user
     return _dep
 
@@ -798,9 +834,13 @@ def signup(body: SignupRequest, response: Response):
 
 @auth_router.post("/login")
 def login(body: LoginRequest, response: Response):
+    email_lower = body.email.lower()
+    if not _login_rate_ok(email_lower):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
+
     with _get_db() as conn:
         user = conn.execute(
-            "SELECT * FROM users WHERE LOWER(email) = ?", (body.email.lower(),)
+            "SELECT * FROM users WHERE LOWER(email) = ?", (email_lower,)
         ).fetchone()
 
     if user is None or not verify_password(body.password, user["password_hash"]):
@@ -1115,8 +1155,24 @@ def reset_password(body: ResetPasswordRequest):
     return {"ok": True}
 
 
-_ADMIN_SECRET = os.getenv("ADMIN_SECRET", "aurexis_admin_2026")
+_ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
 _VALID_PLANS = {"free", "starter", "pro", "elite"}
+
+
+def _check_admin_secret(provided: str) -> None:
+    """
+    Fail closed: if ADMIN_SECRET isn't configured, admin endpoints are
+    unreachable rather than falling back to a guessable hardcoded value.
+    A previous version of this code defaulted to a literal string
+    ("aurexis_admin_2026") when the env var was unset -- since that string
+    was committed to source control, an unset env var meant every admin
+    endpoint (including one that mints a valid session for ANY account by
+    email alone) was a live, unauthenticated backdoor. Never repeat that.
+    """
+    if not _ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="Admin endpoints not configured")
+    if not hmac.compare_digest(provided or "", _ADMIN_SECRET):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 class AdminGetTokenRequest(BaseModel):
@@ -1127,8 +1183,7 @@ class AdminGetTokenRequest(BaseModel):
 @auth_router.post("/admin-get-token")
 def admin_get_token(body: AdminGetTokenRequest):
     """Dev-only: issue a JWT for any account using admin secret. For curl testing."""
-    if body.secret != _ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    _check_admin_secret(body.secret)
     email = body.email.strip().lower()
     with _get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE LOWER(email) = ?", (email,)).fetchone()
@@ -1157,8 +1212,7 @@ def admin_stripe_lookup(body: AdminStripeLookupRequest):
     (or all customers under an email) at all, and what subscriptions +
     our own DB row do they resolve to? Read-only.
     """
-    if body.secret != _ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    _check_admin_secret(body.secret)
     if _stripe is None or not STRIPE_SECRET_KEY:
         raise HTTPException(503, "Stripe not configured")
 
@@ -1296,8 +1350,7 @@ def admin_reconcile_stripe(body: AdminReconcileStripeRequest):
         and/or metadata.user_id is missing/stale) -- these need manual
         review, apply=true does not touch them.
     """
-    if body.secret != _ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    _check_admin_secret(body.secret)
     if _stripe is None or not STRIPE_SECRET_KEY:
         raise HTTPException(503, "Stripe not configured")
 
@@ -1397,8 +1450,7 @@ class AdminResetPicksRequest(BaseModel):
 @auth_router.post("/admin-reset-picks")
 def admin_reset_picks(body: AdminResetPicksRequest):
     """Dev-only: clear pick_usage rows for a user so weekly limit resets."""
-    if body.secret != _ADMIN_SECRET:
-        raise HTTPException(status_code=403, detail="Forbidden")
+    _check_admin_secret(body.secret)
     with _get_db() as conn:
         row = conn.execute("SELECT id FROM users WHERE LOWER(email) = ?", (body.email.strip().lower(),)).fetchone()
         if not row:
@@ -1457,12 +1509,40 @@ def create_checkout_session(
     if not customer_id:
         customer = _stripe.Customer.create(email=user["email"])
         customer_id = customer["id"]
+        # Guard against a concurrent duplicate request (double-click, retry
+        # on timeout) also creating a customer for this same user: only
+        # write if the column is still empty, and if a concurrent request
+        # already won, use ITS customer id instead of ours so we don't
+        # orphan one of the two Stripe customer objects.
         with _get_db() as conn:
             conn.execute(
-                "UPDATE users SET stripe_customer_id = ? WHERE id = ?",
+                "UPDATE users SET stripe_customer_id = ? WHERE id = ? AND stripe_customer_id IS NULL",
                 (customer_id, user["id"]),
             )
             conn.commit()
+            row = conn.execute(
+                "SELECT stripe_customer_id FROM users WHERE id = ?", (user["id"],)
+            ).fetchone()
+            if row and row["stripe_customer_id"]:
+                customer_id = row["stripe_customer_id"]
+
+    # Refuse to open a second parallel subscription for a customer who
+    # already has one active/trialing -- previously nothing checked this,
+    # so a duplicate click or a retried request could double-bill a
+    # customer with two independent Stripe subscriptions.
+    try:
+        existing = _stripe.Subscription.list(customer=customer_id, limit=10)
+        for sub in _stripe_to_dict(existing).get("data") or []:
+            sub_d = _stripe_to_dict(sub)
+            if sub_d.get("status") in ("active", "trialing"):
+                raise HTTPException(
+                    409,
+                    "You already have an active subscription. Use the billing portal to change plans.",
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("create_checkout_session: existing-subscription check failed for user_id=%s: %s", user["id"], exc)
 
     success_url, cancel_url = body.validated_urls()
     session = _stripe.checkout.Session.create(
@@ -1484,10 +1564,18 @@ def cancel_subscription(user: sqlite3.Row = Depends(get_current_user)):
     customer_id = user["stripe_customer_id"]
     if not customer_id:
         raise HTTPException(400, "No Stripe customer on file")
-    subs = _stripe.Subscription.list(customer=customer_id, status="active", limit=1)
-    if not subs.data:
+    # Stripe's `status` list filter is an exact match, and "trialing" is a
+    # distinct status from "active" -- a customer still in their trial
+    # period would 404 here even though _SUB_STATUS_MAP already treats
+    # trialing as active/paid internally. List without a status filter
+    # (Stripe excludes canceled subs by default) and check both statuses.
+    subs = _stripe.Subscription.list(customer=customer_id, limit=10)
+    target = next(
+        (s for s in subs.data if s.get("status") in ("active", "trialing")), None
+    )
+    if not target:
         raise HTTPException(404, "No active subscription found")
-    sub = _stripe.Subscription.modify(subs.data[0].id, cancel_at_period_end=True)
+    sub = _stripe.Subscription.modify(target.id, cancel_at_period_end=True)
     _update_subscription_from_stripe(sub)
     raw_end = sub.get("current_period_end")
     period_end_iso = (
@@ -1671,8 +1759,18 @@ def _plan_from_stripe_sub(stripe_sub) -> str:
             price_id = price_d.get("id", "")
             if price_id in _PRICE_TO_PLAN:
                 return _PRICE_TO_PLAN[price_id]
-    except Exception:
-        pass
+        # A subscription with real line items but none matching any
+        # configured price -- e.g. STRIPE_PRICE_* env vars drifted from
+        # what's actually in Stripe -- silently downgrades a paying
+        # customer to free with zero trace unless logged here.
+        if items:
+            log.warning(
+                "_plan_from_stripe_sub: subscription %s has line items but none match "
+                "_PRICE_TO_PLAN (%s) -- falling back to free. Check STRIPE_PRICE_* env vars.",
+                d.get("id"), list(_PRICE_TO_PLAN.keys()),
+            )
+    except Exception as exc:
+        log.warning("_plan_from_stripe_sub: failed to parse plan from subscription, falling back to free: %s", exc)
     return "free"
 
 
@@ -1794,7 +1892,21 @@ async def stripe_webhook(request: Request):
         "customer.subscription.updated",
         "customer.subscription.deleted",
     ):
-        _update_subscription_from_stripe(data_obj)
+        # Stripe doesn't guarantee webhook delivery order. Trusting the
+        # payload embedded in this specific event risks a delayed/retried
+        # "updated" event re-applying stale data after a later "deleted"
+        # event has already been processed -- silently un-canceling an
+        # account Stripe has actually terminated. Re-fetch the subscription
+        # fresh (its current, true state) instead of trusting the snapshot
+        # in this event, the same way invoice.payment_failed/succeeded
+        # already do below.
+        sub_id = data_obj.get("id")
+        try:
+            fresh_sub = _stripe.Subscription.retrieve(sub_id) if sub_id else None
+            _update_subscription_from_stripe(fresh_sub if fresh_sub else data_obj)
+        except Exception as exc:
+            log.warning("stripe webhook: failed to re-fetch subscription %s fresh, applying event payload as-is: %s", sub_id, exc)
+            _update_subscription_from_stripe(data_obj)
 
     elif event_type == "invoice.payment_failed":
         sub_id = data_obj.get("subscription")
@@ -2071,6 +2183,11 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
         email = str(info.get("email") or "").strip().lower()
         if not email:
             raise ValueError("no email in Google userinfo")
+        if not info.get("email_verified"):
+            # An unverified email is not a trustworthy identity -- treating
+            # it as one would let someone claim an existing Aurexis account
+            # via OAuth using an email they don't actually control.
+            raise ValueError(f"email not verified by Google: {email}")
         first_name = str(info.get("given_name") or "").strip()
         last_name = str(info.get("family_name") or "").strip()
     except Exception as exc:
