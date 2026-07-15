@@ -214,7 +214,15 @@ def calculate_indicators(candles: List[Dict[str, Any]]) -> Dict[str, int]:
         # 50.0), not favorable and not punitive.
         liquidity = 50.0
 
-    risk = _clamp_0_100(100.0 - ((0.35 * momentum) + (0.35 * trend) + (0.15 * volatility) + (0.15 * liquidity)))
+    # BUG (fixed 2026-07-15): volatility was inside the subtracted sum
+    # alongside momentum/trend/liquidity -- treating it as a "goodness"
+    # signal like the other three, so higher volatility produced a LOWER
+    # risk score. Backwards: a choppier stock is riskier, not safer.
+    # indicators.py's calculate_risk() correctly increases risk with
+    # ATR%/drawdown, confirming this file was the outlier. Fix: momentum/
+    # trend/liquidity still reduce risk (good fundamentals = safer),
+    # volatility now adds to risk instead of subtracting from it.
+    risk = _clamp_0_100(100.0 - ((0.35 * momentum) + (0.35 * trend) + (0.15 * liquidity)) + (0.15 * volatility))
 
     return {
         "momentum": int(round(momentum)),
