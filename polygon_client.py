@@ -80,7 +80,15 @@ def _request_json(path: str, params: Optional[Dict[str, Any]] = None, timeout_s:
 
     url = f"{_POLYGON_BASE_URL}{path}"
     q = dict(params or {})
-    q["apiKey"] = key
+    # Auth via header, not a URL query param: requests/urllib3 embed the
+    # full request URL -- query string included -- in connection-error and
+    # timeout exception text, and that text was being logged verbatim on
+    # every network hiccup. Polygon supports Bearer-token auth on the same
+    # endpoints; this closes a real, passive API-key leak with no attacker
+    # interaction required (any DNS blip or timeout would have written the
+    # live key to logs in cleartext under the old apiKey-as-query-param
+    # scheme).
+    headers = {"Authorization": f"Bearer {key}"}
 
     t0 = time.time()
     try:
@@ -89,7 +97,7 @@ def _request_json(path: str, params: Optional[Dict[str, Any]] = None, timeout_s:
         pass
 
     def _do() -> requests.Response:
-        return requests.get(url, params=q, timeout=float(timeout_s))
+        return requests.get(url, params=q, headers=headers, timeout=float(timeout_s))
 
     r: Optional[requests.Response] = None
     try:

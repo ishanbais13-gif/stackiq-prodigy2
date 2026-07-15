@@ -577,7 +577,14 @@ def _polygon_request(path: str, params: Optional[dict] = None) -> dict:
     if not key:
         raise AlpacaAuthError("POLYGON_API_KEY not configured")
     url = f"https://api.polygon.io{path}"
-    all_params: dict = {"apiKey": key}
+    # Auth via header, not a URL query param -- requests/urllib3 embed the
+    # full request URL (query string included) in connection-error and
+    # timeout exception text, which line 594 below logs verbatim. Any
+    # network hiccup was writing the live POLYGON_API_KEY to logs in
+    # cleartext with no attacker interaction required. Polygon supports
+    # Bearer-token auth on the same endpoints.
+    all_params: dict = {}
+    auth_headers = {"Authorization": f"Bearer {key}"}
     if params:
         all_params.update(params)
     try:
@@ -589,7 +596,7 @@ def _polygon_request(path: str, params: Optional[dict] = None) -> dict:
     last_err: Optional[Exception] = None
     for attempt in range(len(_POLYGON_RATE_BACKOFF_SECONDS) + 1):
         try:
-            r = requests.get(url, params=all_params, timeout=(connect_t, read_t))
+            r = requests.get(url, params=all_params, headers=auth_headers, timeout=(connect_t, read_t))
         except requests.RequestException as e:
             raise AlpacaRequestError(f"Network error calling Polygon: {e}")
         if r.status_code in (401, 403):
