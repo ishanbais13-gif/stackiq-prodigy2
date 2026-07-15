@@ -1175,7 +1175,7 @@ def admin_reconcile_stripe(body: AdminReconcileStripeRequest):
         kwargs = {"status": "active", "limit": 100}
         if starting_after:
             kwargs["starting_after"] = starting_after
-        page = _stripe.Subscription.list(**kwargs)
+        page = _stripe_to_dict(_stripe.Subscription.list(**kwargs))
         subs = page.get("data", [])
         if not subs:
             break
