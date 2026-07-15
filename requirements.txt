@@ -63,7 +63,15 @@ alpaca-py==0.43.2
 # >=0.2.0,<0.2.40 keeps it on the same major.minor line that resolves
 # cleanly alongside alpaca-trade-api instead of leaving it fully unpinned.
 yfinance>=0.2.0,<0.2.40
-python-jose[cryptography]==3.3.0
+# 3.3.0 had 3 known CVEs: PYSEC-2024-232 (algorithm-confusion with ECDSA
+# keys -- not practically exploitable here since auth.py always pins
+# algorithms=["HS256"], a single symmetric algorithm, on every decode) and
+# PYSEC-2024-233/PYSEC-2025-185 (JWE decompression-bomb DoS -- not
+# exploitable here since this codebase only imports jose.jwt, never
+# jose.jwe). Upgraded anyway since this is the JWT library gating every
+# session in the app and a fix exists with no known breaking change for
+# our usage (jwt.encode/decode signature unchanged).
+python-jose[cryptography]==3.5.0
 stripe==10.12.0
 email-validator==2.2.0
 bcrypt==4.0.1
