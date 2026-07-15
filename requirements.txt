@@ -55,7 +55,14 @@ numpy>=1.24.0
 
 alpaca-trade-api==3.2.0
 alpaca-py==0.43.2
-yfinance==1.2.0
+# yfinance left loose (not pinned exact): yfinance==1.2.0 requires
+# websockets>=13.0, which conflicts with alpaca-trade-api's websockets<11
+# requirement -- a fresh `pip install -r requirements.txt` cannot resolve
+# that combination. The local dev venv only had both installed
+# simultaneously because it was never forced through a full resolve.
+# >=0.2.0,<0.2.40 keeps it on the same major.minor line that resolves
+# cleanly alongside alpaca-trade-api instead of leaving it fully unpinned.
+yfinance>=0.2.0,<0.2.40
 python-jose[cryptography]==3.3.0
 stripe==10.12.0
 email-validator==2.2.0
