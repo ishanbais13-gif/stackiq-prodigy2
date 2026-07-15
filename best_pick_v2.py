@@ -132,7 +132,12 @@ def _weekly_picks_so_far() -> int:
         ).fetchone()
         con.close()
         return int(row[0]) if row else 0
-    except Exception:
+    except Exception as exc:
+        # Fails open (0 = quota untouched) rather than blocking all new
+        # picks on a DB hiccup -- reasonable, but silent before this: a
+        # persistent DB issue would disable the weekly regime-based pick
+        # cap indefinitely with no trace anywhere it happened.
+        log.warning("_weekly_picks_so_far: DB read failed, treating quota as unused this week: %s", exc)
         return 0
 
 
@@ -634,6 +639,22 @@ def _swing_low(bars: List[Dict[str, Any]], lookback: int = 10) -> Optional[float
     return float(min(lows))
 
 
+def _swing_high(bars: List[Dict[str, Any]], lookback: int = 10) -> Optional[float]:
+    if not isinstance(bars, list) or len(bars) < lookback:
+        return None
+    highs: List[float] = []
+    for b in bars[-lookback:]:
+        if not isinstance(b, dict):
+            continue
+        h = _safe_f(b.get("h"))
+        if h is None:
+            continue
+        highs.append(float(h))
+    if not highs:
+        return None
+    return float(max(highs))
+
+
 @dataclass
 class _Candidate:
     symbol: str
@@ -660,6 +681,13 @@ class _Candidate:
     atr_pct: Optional[float] = None
 
     stop: Optional[float] = None
+    # Direction-blind bug fix: `stop` above is always computed strictly
+    # below current price (correct for a long, wrong for a short -- a
+    # short's stop must sit ABOVE entry to cap loss on a rally). `direction`
+    # isn't decided until after candidates are scored, so a mirrored
+    # short-direction stop candidate is computed and carried alongside the
+    # long one; whichever direction wins picks the matching stop.
+    stop_short: Optional[float] = None
     stop_distance_pct: Optional[float] = None
     expected_move_5d: Optional[float] = None
     upside_ratio: Optional[float] = None
@@ -1211,8 +1239,14 @@ def _score_premover_v2(c: "_Candidate") -> float:
         except Exception:
             pass
 
-        if raw_pts <= 0.0:
+        if raw_pts == 0.0:
             return 5.0
+        # BUG (fixed): this used to treat any raw_pts <= 0.0 as neutral
+        # (5.0), which masked genuinely negative signals (e.g. RSI
+        # overbought with nothing offsetting it) as "no signal" instead of
+        # bearish. Only a true zero (no signals fired either way) is
+        # neutral; negative points now flow through the normal clamp below
+        # and floor at 1.0, correctly reflecting a bearish read.
 
         # Normalize: 100 raw pts → 10.0 final score
         final = _clamp(raw_pts / 10.0, 1.0, 10.0)
@@ -1832,19 +1866,36 @@ def _trade_plan_from_levels(*, direction: str, last_price: Optional[float], stop
     if stop is not None:
         stop = float(round(stop, 4))
 
+    is_short = direction == "short"
+
     targets: List[Optional[float]] = [None, None, None]
-    _MAX_TGT_PCT = 0.30  # swing-trade target cap: 30% above entry
+    _MAX_TGT_PCT = 0.30  # swing-trade target cap: 30% away from entry
     try:
-        if entry is not None and stop is not None and entry > 0 and float(stop) < float(entry):
-            r = float(entry) - float(stop)  # risk per share (stop guaranteed < entry)
+        # BUG (fixed): this used to be long-only math regardless of
+        # `direction` -- for a short, a correct stop sits ABOVE entry and
+        # targets sit BELOW entry (profit on price falling). The old code
+        # only computed targets when stop < entry, so any short routed
+        # through this fallback path got long-style targets above entry
+        # with a stop below it -- backwards risk management for a short.
+        if is_short:
+            valid_levels = entry is not None and stop is not None and entry > 0 and float(stop) > float(entry)
+        else:
+            valid_levels = entry is not None and stop is not None and entry > 0 and float(stop) < float(entry)
+
+        if valid_levels:
+            r = float(stop) - float(entry) if is_short else float(entry) - float(stop)  # risk per share, always positive
             if r > 0:
+                sign = -1.0 if is_short else 1.0
                 raw_tgts = [
-                    float(round(entry + (1.5 * r), 4)),
-                    float(round(entry + (2.5 * r), 4)),
-                    float(round(entry + (4.0 * r), 4)),
+                    float(round(entry + sign * (1.5 * r), 4)),
+                    float(round(entry + sign * (2.5 * r), 4)),
+                    float(round(entry + sign * (4.0 * r), 4)),
                 ]
-                # Cap targets at 30% above entry; replace oversized targets with % steps
-                capped = [min(t, entry * (1.0 + _MAX_TGT_PCT)) for t in raw_tgts]
+                # Cap targets at 30% away from entry, in the favorable direction
+                if is_short:
+                    capped = [max(t, entry * (1.0 - _MAX_TGT_PCT)) for t in raw_tgts]
+                else:
+                    capped = [min(t, entry * (1.0 + _MAX_TGT_PCT)) for t in raw_tgts]
                 targets = capped
     except Exception:
         targets = [None, None, None]
@@ -2280,6 +2331,35 @@ async def scan_best_pick_v2(
         if stop is not None and last_px is not None and float(stop) >= float(last_px):
             stop = float(last_px) * 0.95
 
+        # Mirror of the above for a short direction: stop above swing high
+        # or SMA20 (whichever higher), small buffer, ATR/pct fallback,
+        # hard guarantee it's strictly above price.
+        swing_high_10 = _swing_high(daily_bars, 10)
+        stop_short = None
+        try:
+            _px_ref_s = float(last_px) if last_px is not None and float(last_px) > 0 else None
+            candidates_stop_short = [
+                x for x in [swing_high_10, sma20]
+                if x is not None and float(x) > 0
+                and (_px_ref_s is None or float(x) > _px_ref_s)
+            ]
+            if candidates_stop_short:
+                stop_short = float(max(candidates_stop_short)) * 1.005
+        except Exception:
+            stop_short = None
+
+        if stop_short is None and last_px is not None and float(last_px) > 0:
+            try:
+                if atr14 is not None and float(atr14) > 0:
+                    stop_short = min(float(last_px) * 1.05, float(last_px) + 1.5 * float(atr14))
+                else:
+                    stop_short = float(last_px) * 1.03
+            except Exception:
+                stop_short = None
+
+        if stop_short is not None and last_px is not None and float(stop_short) <= float(last_px):
+            stop_short = float(last_px) * 1.05
+
         stop_dist_pct = None
         if stop is not None and last_px is not None and float(last_px) > 0:
             stop_dist_pct = (float(last_px) - float(stop)) / float(last_px) * 100.0
@@ -2322,6 +2402,7 @@ async def scan_best_pick_v2(
                 atr14=atr14,
                 atr_pct=atr_pct,
                 stop=stop,
+                stop_short=stop_short,
                 stop_distance_pct=stop_dist_pct,
                 expected_move_5d=expected_move_5d,
                 upside_ratio=upside_ratio,
@@ -2361,7 +2442,13 @@ async def scan_best_pick_v2(
     slope_r = _percentile_ranks([c.slope20 for c in cands])
     dollar_r = _percentile_ranks([c.avg_dollar_vol_30d for c in cands])
     # If spread is missing, treat it as neutral (0.5) rather than a hard failure.
-    spread_r = _percentile_ranks([(-1.0 * float(c.spread_pct_now)) if c.spread_pct_now is not None else 0.0 for c in cands])
+    # BUG (fixed): missing spread used to substitute 0.0 into this ranking
+    # array. Since real spreads are always >=0, -spread is always <=0, so
+    # 0.0 was the MAXIMUM value in the set -- missing data was scored as
+    # the single best spread among all candidates instead of neutral/worst.
+    # None (matching atrp_r/dollar_r below) correctly ranks it 0.0 via
+    # _percentile_ranks' documented "None -> 0" behavior.
+    spread_r = _percentile_ranks([(-1.0 * float(c.spread_pct_now)) if c.spread_pct_now is not None else None for c in cands])
     atrp_r = _percentile_ranks([(-1.0 * float(c.atr_pct)) if c.atr_pct is not None else None for c in cands])
     upside_r = _percentile_ranks([c.upside_ratio for c in cands])
 
@@ -2887,6 +2974,14 @@ async def scan_best_pick_v2(
     except Exception:
         direction = "long"
 
+    # `best.stop` was computed direction-blind (always below price, correct
+    # only for longs). Swap in the mirrored short-direction stop now that
+    # direction is known, so every downstream consumer (live-price path,
+    # fallback trade-plan path, the stop-validation gate) sees a stop that's
+    # actually on the correct side of entry for a short.
+    if direction == "short" and best.stop_short is not None:
+        best.stop = best.stop_short
+
     # ── Live-price level anchoring ────────────────────────────────────────────
     # Fetch live snapshot BEFORE building trade levels so entry/stop/targets
     # reflect the current price, not yesterday's close. Scoring stays on daily bars.
@@ -3137,19 +3232,30 @@ async def scan_best_pick_v2(
     except Exception:
         _earnings_safe = True
 
-    # Validate stop is strictly below entry — never surface a pick with broken levels.
+    # Validate stop is on the correct side of entry for the trade's actual
+    # direction — never surface a pick with broken levels. This used to
+    # unconditionally require stop < entry regardless of direction, which
+    # is backwards for a short (whose stop must be ABOVE entry): it
+    # rejected correctly-computed shorts and let inverted ones through.
     try:
         _tp_entry = _safe_f((trade_plan or {}).get("entry"))
         _tp_stop  = _safe_f((trade_plan or {}).get("stop"))
-        if _tp_entry and _tp_stop and float(_tp_stop) >= float(_tp_entry):
+        _stop_is_broken = (
+            _tp_entry and _tp_stop and (
+                float(_tp_stop) <= float(_tp_entry) if direction == "short"
+                else float(_tp_stop) >= float(_tp_entry)
+            )
+        )
+        if _stop_is_broken:
             _no_trade_reason = (
-                f"invalid_stop_above_entry — stop {_tp_stop:.2f} >= entry {_tp_entry:.2f}"
+                f"invalid_stop_wrong_side_of_entry — direction={direction} "
+                f"stop {_tp_stop:.2f} entry {_tp_entry:.2f}"
             )
             best.trade_decision = "NO_TRADE"
             best.is_trade = False
             log.warning(
-                f"best_pick_v2: invalid_stop_above_entry {best.symbol} "
-                f"stop={_tp_stop:.2f} entry={_tp_entry:.2f}"
+                f"best_pick_v2: invalid_stop_wrong_side_of_entry {best.symbol} "
+                f"direction={direction} stop={_tp_stop:.2f} entry={_tp_entry:.2f}"
             )
     except Exception:
         pass
