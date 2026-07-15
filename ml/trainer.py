@@ -59,8 +59,40 @@ def _fetch_bars_for_pick(symbol: str, pick_ts: float) -> Optional[Dict[str, Any]
     """
     try:
         from data_fetcher import get_bars
-        result = get_bars(symbol, "1Day", 60)
-        candles = result.get("candles") or []
+        # BUG (fixed): this used to call get_bars(symbol, "1Day", 60), which
+        # always anchors its window to *now* -- when training on a pick made
+        # weeks/months ago, that means feature vectors were built from bars
+        # ending today, i.e. AFTER the win/loss outcome already happened.
+        # The model was learning a fake correlation between "what the chart
+        # looks like now" and "what happened after this pick," which is
+        # meaningless in production (look-ahead / label leakage).
+        #
+        # get_bars() has no end-date parameter and many other live-serving
+        # callers depend on its current signature, so rather than changing
+        # it, fetch a wide window (up to ~900 days back) and filter
+        # client-side to only bars at or before pick_ts, then take the last
+        # 60 of those -- i.e. the 60 bars that would actually have been
+        # available at the time this pick was made.
+        result = get_bars(symbol, "1Day", 300)
+        all_candles = result.get("candles") or []
+
+        if pick_ts and all_candles:
+            pick_dt = datetime.fromtimestamp(float(pick_ts), tz=timezone.utc)
+            as_of_candles = []
+            for b in all_candles:
+                t_raw = b.get("t")
+                if not t_raw:
+                    continue
+                try:
+                    bar_dt = datetime.fromisoformat(str(t_raw).replace("Z", "+00:00"))
+                except Exception:
+                    continue
+                if bar_dt <= pick_dt:
+                    as_of_candles.append(b)
+            candles = as_of_candles[-60:]
+        else:
+            candles = all_candles[-60:]
+
         if len(candles) < 10:
             return None
         closes  = [float(b.get("c") or b.get("close") or 0.0) for b in candles]

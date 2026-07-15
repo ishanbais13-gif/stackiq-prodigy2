@@ -487,6 +487,63 @@ def recalibrate_weights() -> Dict[str, float]:
                     + " ".join(f"{k}={v:.2f}x" for k, v in sorted(multipliers.items(), key=lambda x: -x[1])[:6])
                 )
 
+                # Also pull in main scanner signals (MOMENTUM_EXPANSION, VOLATILITY_EXPANSION,
+                # BREAKOUT_STRUCTURE) from perf_tracker.db — these were never tracked before.
+                try:
+                    import sqlite3 as _sql2
+                    _pt_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf_tracker.db")
+                    pt = _sql2.connect(_pt_path, timeout=5)
+                    pt.row_factory = _sql2.Row
+                    # entry_price IS NOT NULL excludes no-plan "watchlist"
+                    # picks (NO_TRADE candidates auto-recorded with no real
+                    # entry/stop/target, resolved via a synthetic entry) --
+                    # without this filter, untaken trades were diluting
+                    # signal win-rate math with noise from picks that were
+                    # never actually traded.
+                    pt_rows = pt.execute("""
+                        SELECT edge_signals, status, max_return_pct
+                        FROM picks
+                        WHERE status IN ('won','won_drift','lost','lost_drift','expired_neutral')
+                          AND entry_price IS NOT NULL AND entry_price > 0
+                    """).fetchall()
+                    pt.close()
+
+                    for pr in pt_rows:
+                        try:
+                            sigs = json.loads(pr["edge_signals"] or "[]")
+                        except Exception:
+                            continue
+                        is_win = pr["status"] in ("won", "won_drift")
+                        for sig in sigs:
+                            appearances[sig] = appearances.get(sig, 0) + 1
+                            if is_win:
+                                wins_by_sig[sig] = wins_by_sig.get(sig, 0) + 1
+
+                    # Re-run multiplier computation with merged data
+                    for sig, count in appearances.items():
+                        sig_wins = wins_by_sig.get(sig, 0)
+                        win_rate = sig_wins / count
+                        if count < MIN_SAMPLES:
+                            mult = 1.0
+                        else:
+                            raw = win_rate / max(baseline, 0.05)
+                            mult = max(0.4, min(2.5, raw))
+                        multipliers[sig] = mult
+                        db.execute("""
+                            INSERT INTO signal_stats
+                                (signal_name, appearances, wins, win_rate, learned_multiplier, last_updated)
+                            VALUES (?,?,?,?,?,?)
+                            ON CONFLICT(signal_name) DO UPDATE SET
+                                appearances=excluded.appearances,
+                                wins=excluded.wins,
+                                win_rate=excluded.win_rate,
+                                learned_multiplier=excluded.learned_multiplier,
+                                last_updated=excluded.last_updated
+                        """, (sig, count, sig_wins, win_rate, mult, now_str))
+                    log.info(f"brain: merged perf_tracker signals — {len(pt_rows)} additional picks")
+                except Exception as _pt_err:
+                    log.warning(f"brain: perf_tracker signal merge failed: {_pt_err}")
+
                 # Kick off NN retraining in a background thread after signal recalibration
                 _maybe_trigger_nn_training()
 
