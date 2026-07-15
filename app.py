@@ -8570,6 +8570,7 @@ async def best_pick(
     tz: Optional[str] = Query(None),
     stream: bool = Query(False),
     min_score_0_100: int = Query(85, ge=0, le=100),
+    _user=_dep_starter,
 ):
     _ = max_scan
     _ = stream
@@ -9035,7 +9036,7 @@ async def best_pick(
 
 
 @app.get("/best-pick", response_model=BestPickResponse)
-async def best_pick_alias(max_scan: int = 200, refresh: bool = False, tz: Optional[str] = Query(None), stream: bool = Query(False)):
+async def best_pick_alias(max_scan: int = 200, refresh: bool = False, tz: Optional[str] = Query(None), stream: bool = Query(False), _user=_dep_starter):
     return await best_pick(max_scan=max_scan, refresh=refresh, tz=tz, stream=stream)
 
 
@@ -9561,10 +9562,16 @@ def quote(symbol: str) -> Dict[str, Any]:
 
 
 @app.get("/quotes")
-def quotes(symbols: str = ""):
+def quotes(symbols: str = "", request: Request = None):
     raw = str(symbols or "").strip()
     if not raw:
         return {"items": [], "updated_at": now_iso()}
+    # Unauthenticated 50-symbol-per-request fan-out into the Alpaca quote
+    # layer had no throttling at all -- a real quota-abuse vector. IP-based
+    # (not per-account) since this endpoint doesn't require login.
+    client_ip = (request.headers.get("X-Forwarded-For") or request.client.host or "unknown").split(",")[0].strip() if request else "unknown"
+    if not _rate_limit(f"quotes:{client_ip}", max_calls=30, window_s=60):
+        raise HTTPException(status_code=429, detail="RATE_LIMIT_EXCEEDED")
     syms = [s.strip().upper() for s in raw.split(",") if s and s.strip()]
     syms = [s for s in syms if s][:50]
 
@@ -9637,7 +9644,7 @@ def _ema_last(values: List[float], period: int) -> Optional[float]:
 
 
 @app.get("/trade_plan/{symbol}")
-async def trade_plan(symbol: str):
+async def trade_plan(symbol: str, _user=_dep_starter):
     sd = _symbol_sanitize(symbol, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
     if not bool(sd.get("ok")) or not sym:
@@ -9712,7 +9719,7 @@ async def trade_plan(symbol: str):
 
 
 @app.get("/execution_plan/{symbol}")
-async def execution_plan(symbol: str, timeframe: str = "swing", tz: Optional[str] = Query(None)):
+async def execution_plan(symbol: str, timeframe: str = "swing", tz: Optional[str] = Query(None), _user=_dep_starter):
     sd = _symbol_sanitize(symbol, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
     if not bool(sd.get("ok")) or not sym:
@@ -10485,8 +10492,18 @@ async def save_alerts_prefs(body: _AlertPrefsBody, _user=Depends(_get_current_us
 
 
 @app.get("/account", include_in_schema=True)
-def account():
-    """Frontend-friendly account summary. Must never 404 or hard-500."""
+def account(_: None = Depends(_require_debug)):
+    """
+    Internal ops view of the firm's own Alpaca brokerage account (cash,
+    equity, buying power) -- not per-customer data. This was previously
+    fully unauthenticated; gated behind the same debug-only check used for
+    /debug/* endpoints since this has nothing to do with any customer plan
+    tier. `trade_client` is not currently defined/imported anywhere in this
+    file, so this always falls through to the except branch today -- that
+    NameError was previously masked as a generic "OFFLINE" response with
+    the raw exception text exposed; still returning a safe fallback shape,
+    but no longer leaking exception internals to the caller.
+    """
     try:
         client = trade_client()
         a = client.get_account()
@@ -10499,6 +10516,7 @@ def account():
             "updated_at": now_iso(),
         }
     except Exception as e:
+        log.warning("account: trade_client unavailable: %s", e)
         return {
             "mode": "OFFLINE",
             "cash": 0.0,
@@ -10506,7 +10524,6 @@ def account():
             "buying_power": 0.0,
             "account_value": 0.0,
             "updated_at": now_iso(),
-            "error": f"Alpaca error: {str(e)}",
         }
 
 
@@ -10673,7 +10690,7 @@ async def scan_brain_backfill(_user=_dep_elite):
 
 
 @app.get("/scan/brain_stats", include_in_schema=True)
-async def scan_brain_stats():
+async def scan_brain_stats(_user=_dep_elite):
     """
     Returns the scanner's self-learning brain stats:
     - Overall win rate across all tracked picks
@@ -10716,7 +10733,7 @@ async def scan_train_nn(
 
 
 @app.get("/scan/nn_status", include_in_schema=True)
-async def scan_nn_status():
+async def scan_nn_status(_user=_dep_elite):
     """
     Returns the status of the neural network scorer:
     - Whether a trained model exists
@@ -10857,9 +10874,16 @@ async def api_chat(req: _ChatRequest, request: Request, _user=_dep_starter):
     returns the AI assistant's reply.  Backed by GPT-4o-mini with live
     system context (recent picks, performance, NN status).
     """
-    # Rate limit: 20 messages per minute per IP
-    client_ip = (request.headers.get("X-Forwarded-For") or request.client.host or "unknown").split(",")[0].strip()
-    if not _rate_limit(f"chat:{client_ip}", max_calls=20, window_s=60):
+    # Rate limit: 20 messages per minute per account. Previously keyed on
+    # X-Forwarded-For, a client-supplied header with no trusted-proxy
+    # validation -- trivially bypassed by sending a new spoofed value on
+    # every request. Keying on the authenticated user id closes that.
+    try:
+        _uid = _user["id"]
+    except Exception:
+        _uid = None
+    rl_key = f"chat:user:{_uid}" if _uid is not None else f"chat:ip:{(request.headers.get('X-Forwarded-For') or request.client.host or 'unknown').split(',')[0].strip()}"
+    if not _rate_limit(rl_key, max_calls=20, window_s=60):
         raise HTTPException(status_code=429, detail="RATE_LIMIT_EXCEEDED")
 
     try:
@@ -10895,6 +10919,100 @@ async def api_chat(req: _ChatRequest, request: Request, _user=_dep_starter):
         log.warning(f"api_chat error: {e}")
         return {"reply": "Sorry, I hit an internal error. Please try again.", "ok": False}
 
+
+@app.get("/public/performance", include_in_schema=True)
+def public_performance():
+    """
+    Public pick history and track record — no auth required.
+
+    Restored after an unrelated commit accidentally deleted it. Also fixed
+    on restore:
+      - `exit_price` no longer exists on the `picks` table schema (this
+        query would have silently returned zero rows via the bare except
+        below); dropped from the SELECT, kept as a static null in the
+        response for API-shape stability.
+      - Added `entry_price IS NOT NULL` so no-plan "watchlist" picks (no
+        real trade plan) don't dilute the public win-rate/return numbers.
+      - Clamped returns to +/-75% before averaging so a legacy corrupted
+        synthetic-entry row can't skew the public-facing stats.
+    """
+    import sqlite3 as _sq, json as _js
+    _pt_path = os.getenv("PERF_TRACKER_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf_tracker.db"))
+    _RETURN_CAP = 75.0
+    try:
+        con = _sq.connect(_pt_path, timeout=5)
+        rows = con.execute(
+            """SELECT symbol, recorded_at, entry_price, NULL as exit_price,
+                      max_return_pct, max_drawdown_pct, status, edge_signals,
+                      days_to_outcome
+               FROM picks
+               WHERE status NOT IN ('expired_neutral')
+                 AND entry_price IS NOT NULL AND entry_price > 0
+               ORDER BY recorded_at DESC"""
+        ).fetchall()
+        con.close()
+    except Exception:
+        rows = []
+
+    picks = []
+    won_returns, lost_returns = [], []
+    win_count = loss_count = 0
+
+    for row in rows:
+        sym, rec_at, entry, exit_p, max_ret, max_dd, status, sigs_raw, days = row
+        try:
+            signals = _js.loads(sigs_raw or "[]")
+        except Exception:
+            signals = []
+
+        resolved = status in ("won", "won_drift", "lost", "lost_drift")
+        outcome = "won" if status in ("won", "won_drift") else ("lost" if status in ("lost", "lost_drift") else "pending")
+
+        change_pct = None
+        if resolved and max_ret is not None:
+            change_pct = max(-_RETURN_CAP, min(_RETURN_CAP, float(max_ret)))
+            if outcome == "won":
+                won_returns.append(change_pct)
+                win_count += 1
+            else:
+                raw_loss = float(max_dd if max_dd is not None else max_ret)
+                lost_returns.append(max(-_RETURN_CAP, min(_RETURN_CAP, raw_loss)))
+                loss_count += 1
+
+        picks.append({
+            "symbol": sym,
+            "picked_at": int(rec_at) if rec_at else None,
+            "entry_price": float(entry) if entry else None,
+            "exit_price": float(exit_p) if exit_p else None,
+            "change_pct": round(change_pct, 2) if change_pct is not None else None,
+            "outcome": outcome,
+            "signals": signals,
+            "days_to_outcome": days,
+        })
+
+    total = win_count + loss_count
+    win_rate = round(win_count / total * 100, 1) if total > 0 else 0.0
+    avg_winner = round(sum(won_returns) / len(won_returns), 1) if won_returns else 0.0
+    avg_loser  = round(sum(lost_returns) / len(lost_returns), 1) if lost_returns else 0.0
+
+    best = max(picks, key=lambda p: (p["change_pct"] or 0.0), default=None)
+
+    return {
+        "picks": picks,
+        "summary": {
+            "total_resolved": total,
+            "total_picks": len(picks),
+            "win_count": win_count,
+            "loss_count": loss_count,
+            "win_rate_pct": win_rate,
+            "avg_winner_pct": avg_winner,
+            "avg_loser_pct": avg_loser,
+            "best_pick": {
+                "symbol": best["symbol"],
+                "change_pct": best["change_pct"],
+            } if best and best["change_pct"] else None,
+        },
+    }
 
 
 @app.get("/chat", include_in_schema=False)
