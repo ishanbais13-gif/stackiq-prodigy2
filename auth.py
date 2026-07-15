@@ -1272,13 +1272,20 @@ def admin_stripe_lookup(body: AdminStripeLookupRequest):
 
 class AdminReconcileStripeRequest(BaseModel):
     secret: str
+    apply: bool = False
 
 
 @auth_router.post("/admin-reconcile-stripe")
 def admin_reconcile_stripe(body: AdminReconcileStripeRequest):
     """
     Cross-check every active Stripe subscription against what our DB thinks
-    that customer's plan/status is. Read-only — makes no writes.
+    that customer's plan/status is.
+
+    Default (apply=False) is read-only. Pass apply=true to also backfill
+    every mismatch found by running it through the same
+    _update_subscription_from_stripe() the webhook uses — i.e. do exactly
+    what the webhook should have done, for every account it silently
+    missed.
 
     Surfaces two failure modes:
       - "mismatches": we know the customer (stripe_customer_id or
@@ -1286,7 +1293,8 @@ def admin_reconcile_stripe(body: AdminReconcileStripeRequest):
         doesn't match what Stripe says they're actively paying for.
       - "orphans": Stripe has an active subscription for a customer we can't
         resolve to any user row at all (stripe_customer_id was never saved,
-        and/or metadata.user_id is missing/stale).
+        and/or metadata.user_id is missing/stale) -- these need manual
+        review, apply=true does not touch them.
     """
     if body.secret != _ADMIN_SECRET:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -1350,15 +1358,23 @@ def admin_reconcile_stripe(body: AdminReconcileStripeRequest):
             db_plan = row["plan"]
             db_status = row["subscription_status"]
             if db_plan != expected_plan or db_status != "active":
-                mismatches.append({
+                entry = {
                     "user_id": row["id"],
                     "email": row["email"],
                     "stripe_customer_id": customer_id,
                     "stripe_subscription_id": sub_id,
                     "expected_plan": expected_plan,
-                    "db_plan": db_plan,
-                    "db_subscription_status": db_status,
-                })
+                    "db_plan_before": db_plan,
+                    "db_subscription_status_before": db_status,
+                }
+                if body.apply:
+                    try:
+                        _update_subscription_from_stripe(sub)
+                        entry["applied"] = True
+                    except Exception as exc:
+                        entry["applied"] = False
+                        entry["apply_error"] = str(exc)
+                mismatches.append(entry)
 
         if not page.get("has_more"):
             break
@@ -1588,17 +1604,55 @@ _SUB_STATUS_MAP = {
 
 
 def _stripe_to_dict(obj) -> dict:
-    """Safely convert a Stripe SDK object (StripeObject) or plain dict to a regular dict."""
+    """
+    Safely convert a Stripe SDK object (StripeObject) or plain dict to a
+    regular dict.
+
+    Tries multiple strategies because Stripe SDK internals differ across
+    versions -- to_dict_recursive() and dict(obj) can both run without
+    raising while silently returning {} against an SDK version this wasn't
+    tested against. That exact failure mode caused every subscription
+    webhook to silently no-op in production (2026-07-15 incident): payloads
+    got converted to {}, so customer/subscription IDs read back as None and
+    the handler had nothing to act on -- with no exception, no log line,
+    just a quiet 200. Manual key-by-key reconstruction via __getitem__ is
+    the most primitive fallback and is tried before giving up; if every
+    strategy still comes back empty for an object that isn't actually
+    empty, that's logged instead of returned silently.
+    """
     if isinstance(obj, dict):
         return obj
+
+    candidates: List[dict] = []
     try:
-        return obj.to_dict_recursive()
-    except AttributeError:
+        candidates.append(obj.to_dict_recursive())
+    except Exception:
         pass
     try:
-        return dict(obj)
+        candidates.append(dict(obj))
     except Exception:
-        return {}
+        pass
+    try:
+        keys = list(obj.keys())
+        if keys:
+            candidates.append({k: obj[k] for k in keys})
+    except Exception:
+        pass
+
+    for c in candidates:
+        if isinstance(c, dict) and c:
+            return c
+
+    try:
+        if list(obj.keys()):
+            log.warning(
+                "_stripe_to_dict: all conversion strategies returned empty for a non-empty %s -- "
+                "Stripe SDK version drift is the likely cause",
+                type(obj).__name__,
+            )
+    except Exception:
+        pass
+    return {}
 
 
 def _plan_from_stripe_sub(stripe_sub) -> str:
