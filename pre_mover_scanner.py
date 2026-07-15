@@ -215,9 +215,17 @@ def build_smallcap_universe(
                 if price < 0.10 or price > 20.0:
                     continue
                 dollar_vol = price * vol
-                # Tiered liquidity floor: pennies need less, small-caps need more
-                min_dvol = 50_000 if price < 1.0 else 200_000
-                if dollar_vol < min_dvol:
+                # Raised from a tiered $50k/$200k floor to a flat $5,000,000
+                # (2026-07-15), matching the floor best_pick_v2.py already
+                # enforces on its candidates -- same reasoning: a pick should
+                # reflect a stock with real tradable volume behind it, not a
+                # thin name that looks good on paper but can't be executed
+                # cleanly. Note this measures a single day's dollar volume
+                # (today's price x today's volume), not a 30-day average like
+                # best_pick_v2.py's floor -- this pipeline stage only has
+                # snapshot data at this point, not historical bars.
+                MIN_DOLLAR_VOL = 5_000_000.0
+                if dollar_vol < MIN_DOLLAR_VOL:
                     continue
                 # Normal-vol filter: prevDailyBar.v (Alpaca) or dailyBar.v (Polygon)
                 # both represent a complete trading day's volume — use as proxy for
