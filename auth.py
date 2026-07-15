@@ -1212,6 +1212,19 @@ def admin_stripe_lookup(body: AdminStripeLookupRequest):
         except Exception as exc:
             result["by_email_error"] = str(exc)
 
+        # Case-insensitive DB lookup, showing the *raw* stored email so any
+        # whitespace/typo/case mismatch against the searched address is visible.
+        try:
+            with _get_db() as conn:
+                db_rows = conn.execute(
+                    "SELECT id, email, plan, subscription_status, stripe_customer_id, created_at "
+                    "FROM users WHERE LOWER(TRIM(email)) = LOWER(TRIM(?))",
+                    (body.email,),
+                ).fetchall()
+            result["db_users_matching_email_ci"] = [dict(r) for r in db_rows]
+        except Exception as exc:
+            result["db_lookup_error"] = str(exc)
+
     return result
 
 
