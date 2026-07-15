@@ -2216,12 +2216,25 @@ async def scan_best_pick_v2(
         # When avg_dollar_vol_30d is None it means the feed didn't provide volume data (e.g. IEX
         # returning v=0 for all daily bars). In that case pass through with a penalty flag rather
         # than blindly rejecting every stock in the universe.
-        # Symbols confirmed as today's top movers bypass this gate — their intraday liquidity is
-        # already proven by today's volume and a 30-day average would unfairly exclude them.
-        _is_top_mover = bool(top_movers_set) and sym in top_movers_set
+        #
+        # Raised from $100k to $5,000,000 (2026-07-15): matches the floor
+        # _passes_final_validation already enforced on the *winning* pick
+        # (line ~2879) -- previously a candidate could clear this early
+        # gate, get fully scored, and even appear in the user-visible
+        # watchlist "close candidates" list on as little as $100k/day
+        # average dollar volume, only to be silently disqualified if it
+        # ever won. Gating at the same bar up front means nothing thin
+        # enough to be unexecutable gets scored or surfaced at all.
+        #
+        # The previous top-mover bypass (today's proven intraday volume
+        # exempting a symbol from the 30-day average check) was removed by
+        # the same decision -- a thin-on-paper, hot-today name is exactly
+        # the "looks good on paper, can't execute cleanly" case this floor
+        # exists to filter out, not an exception to it.
+        MIN_DOLLAR_VOL_30D = 5_000_000.0
         gate_flags: List[str] = []
         try:
-            if not _is_top_mover and avg_dollar_vol_30d is not None and float(avg_dollar_vol_30d) < 100_000.0:
+            if avg_dollar_vol_30d is not None and float(avg_dollar_vol_30d) < MIN_DOLLAR_VOL_30D:
                 skipped_count += 1
                 continue
             if avg_dollar_vol_30d is None:
