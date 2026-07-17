@@ -1521,6 +1521,31 @@ def _ensure_stripe():
         raise HTTPException(503, "STRIPE_SECRET_KEY not configured")
 
 
+def _existing_active_subscription(customer_id: str) -> Optional[dict]:
+    """
+    Return the customer's active/trialing Stripe subscription, if any.
+
+    Shared by every place that creates a new Stripe Checkout session for an
+    existing customer, so this can't drift out of sync again the way it did
+    (2026-07-18 incident): create_checkout_session had this check,
+    google_callback's separate inline checkout-creation block did not, and
+    an existing Elite subscriber logging in via a Google link that carried
+    a stale plan= parameter got routed into a brand-new Starter checkout --
+    which, if completed, would have created a second, independent
+    subscription and charged them for both, while the webhook for the new
+    one downgraded their plan in our DB to the lower tier.
+    """
+    try:
+        subs = _stripe.Subscription.list(customer=customer_id, limit=10)
+        for sub in _stripe_to_dict(subs).get("data") or []:
+            sub_d = _stripe_to_dict(sub)
+            if sub_d.get("status") in ("active", "trialing"):
+                return sub_d
+    except Exception as exc:
+        log.warning("_existing_active_subscription: check failed for customer=%s: %s", customer_id, exc)
+    return None
+
+
 @stripe_router.post("/create-checkout-session")
 def create_checkout_session(
     body: CheckoutRequest,
@@ -1558,22 +1583,12 @@ def create_checkout_session(
                 customer_id = row["stripe_customer_id"]
 
     # Refuse to open a second parallel subscription for a customer who
-    # already has one active/trialing -- previously nothing checked this,
-    # so a duplicate click or a retried request could double-bill a
-    # customer with two independent Stripe subscriptions.
-    try:
-        existing = _stripe.Subscription.list(customer=customer_id, limit=10)
-        for sub in _stripe_to_dict(existing).get("data") or []:
-            sub_d = _stripe_to_dict(sub)
-            if sub_d.get("status") in ("active", "trialing"):
-                raise HTTPException(
-                    409,
-                    "You already have an active subscription. Use the billing portal to change plans.",
-                )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.warning("create_checkout_session: existing-subscription check failed for user_id=%s: %s", user["id"], exc)
+    # already has one active/trialing.
+    if _existing_active_subscription(customer_id):
+        raise HTTPException(
+            409,
+            "You already have an active subscription. Use the billing portal to change plans.",
+        )
 
     success_url, cancel_url = body.validated_urls()
     session = _stripe.checkout.Session.create(
@@ -2235,7 +2250,20 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
 
     log.info("google_callback: email=%s is_new=%s selected_plan=%s origin=%s", user["email"], is_new, selected_plan, callback_origin)
 
-    if selected_plan in ("starter", "pro", "elite") and _stripe and STRIPE_SECRET_KEY:
+    # BUG (fixed 2026-07-18): this used to route to a brand-new Stripe
+    # checkout for ANY login carrying a plan= parameter, with no regard for
+    # whether the user was a first-time signup or an existing subscriber --
+    # an existing Elite customer logging in via a Google link that still
+    # had ?plan=starter attached got silently pushed into a second,
+    # independent Starter checkout. If completed, this would have double-
+    # billed them (two live subscriptions on the same customer) and their
+    # plan would have been downgraded in our DB by the new subscription's
+    # webhook. This routing only makes sense for a genuine first-time
+    # signup choosing a plan -- `is_new` gates that now, and the existing-
+    # subscription check (shared with create_checkout_session, so it can't
+    # drift out of sync between the two again) is a second layer in case
+    # is_new is ever wrong for some other reason.
+    if is_new and selected_plan in ("starter", "pro", "elite") and _stripe and STRIPE_SECRET_KEY:
         price_id = PLAN_PRICES.get(selected_plan, "")
         log.info("google_callback: routing to Stripe plan=%s price_id=%s", selected_plan, price_id)
         if price_id:
@@ -2250,34 +2278,46 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
                             (customer_id, user["id"]),
                         )
                         conn.commit()
-                plan = _user_plan(user)
-                sid = _new_session(user["id"])
-                token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
-                success_url = f"{callback_origin}/app?token={urllib.parse.quote(token)}"
-                if is_new:
-                    success_url += "&new_user=1"
-                cancel_url = f"{callback_origin}/signup?plan={selected_plan}"
-                session = _stripe.checkout.Session.create(
-                    customer=customer_id,
-                    payment_method_types=["card"],
-                    mode="subscription",
-                    line_items=[{"price": price_id, "quantity": 1}],
-                    success_url=success_url,
-                    cancel_url=cancel_url,
-                    metadata={"user_id": str(user["id"])},
-                    subscription_data={"metadata": {"user_id": str(user["id"])}},
-                )
-                checkout_url = session.get("url") or session.get("checkout_url", "")
-                log.info("google_callback: redirecting to Stripe checkout url=%s", checkout_url[:60] if checkout_url else "NONE")
-                if checkout_url:
-                    return RedirectResponse(url=checkout_url, status_code=302)
-                log.warning("google_callback: Stripe session had no url, falling through")
+
+                existing_sub = _existing_active_subscription(customer_id)
+                if existing_sub:
+                    log.warning(
+                        "google_callback: refusing to open a second checkout for user_id=%s -- "
+                        "already has subscription %s (status=%s)",
+                        user["id"], existing_sub.get("id"), existing_sub.get("status"),
+                    )
+                else:
+                    plan = _user_plan(user)
+                    sid = _new_session(user["id"])
+                    token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
+                    success_url = f"{callback_origin}/app?token={urllib.parse.quote(token)}"
+                    if is_new:
+                        success_url += "&new_user=1"
+                    cancel_url = f"{callback_origin}/signup?plan={selected_plan}"
+                    session = _stripe.checkout.Session.create(
+                        customer=customer_id,
+                        payment_method_types=["card"],
+                        mode="subscription",
+                        line_items=[{"price": price_id, "quantity": 1}],
+                        success_url=success_url,
+                        cancel_url=cancel_url,
+                        metadata={"user_id": str(user["id"])},
+                        subscription_data={"metadata": {"user_id": str(user["id"])}},
+                    )
+                    checkout_url = session.get("url") or session.get("checkout_url", "")
+                    log.info("google_callback: redirecting to Stripe checkout url=%s", checkout_url[:60] if checkout_url else "NONE")
+                    if checkout_url:
+                        return RedirectResponse(url=checkout_url, status_code=302)
+                    log.warning("google_callback: Stripe session had no url, falling through")
             except Exception as exc:
                 log.warning("google_callback stripe checkout error: %s", exc, exc_info=True)
         else:
             log.warning("google_callback: no price_id for plan=%s PLAN_PRICES=%s", selected_plan, PLAN_PRICES)
     else:
-        log.info("google_callback: skipping Stripe — plan=%s stripe=%s key=%s", selected_plan, bool(_stripe), bool(STRIPE_SECRET_KEY))
+        log.info(
+            "google_callback: skipping Stripe — is_new=%s plan=%s stripe=%s key=%s",
+            is_new, selected_plan, bool(_stripe), bool(STRIPE_SECRET_KEY),
+        )
 
     return _redirect_to_app(user, is_new=is_new, origin=callback_origin)
 
