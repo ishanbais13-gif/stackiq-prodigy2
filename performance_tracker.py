@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS picks (
     max_drawdown_pct    REAL,
     hit_target          INTEGER DEFAULT 0,
     hit_stop            INTEGER DEFAULT 0,
-    days_to_outcome     INTEGER
+    days_to_outcome     INTEGER,
+    alert_sent_at       REAL    -- unix timestamp; NULL until a new-pick alert has actually fired for this row
 );
 CREATE INDEX IF NOT EXISTS idx_pt_status   ON picks(status);
 CREATE INDEX IF NOT EXISTS idx_pt_symbol   ON picks(symbol);
@@ -75,6 +76,12 @@ def _ensure_schema() -> None:
     try:
         with _conn() as db:
             db.executescript(_SCHEMA)
+            # Non-destructive migration for DBs that predate alert_sent_at.
+            try:
+                db.execute("ALTER TABLE picks ADD COLUMN alert_sent_at REAL")
+                db.commit()
+            except Exception:
+                pass  # column already exists
     except Exception as e:
         log.warning(f"perf_tracker: schema init failed: {e}")
 
@@ -122,18 +129,32 @@ def record_pick(pick: Dict[str, Any]):
         _cutoff_ts = _now_ts - _dedup_window_seconds
         with _conn() as db:
             _existing = db.execute(
-                "SELECT id, recorded_at FROM picks WHERE symbol = ? AND recorded_at >= ? ORDER BY recorded_at DESC LIMIT 1",
+                "SELECT id, recorded_at, alert_sent_at FROM picks WHERE symbol = ? AND recorded_at >= ? ORDER BY recorded_at DESC LIMIT 1",
                 (symbol_upper, _cutoff_ts),
             ).fetchone()
         if _existing:
             _existing_id = int(_existing[0])
             _existing_ts = float(_existing[1])
             _age_hours   = (_now_ts - _existing_ts) / 3600
+            # BUG (fixed 2026-07-17): alert-firing used to be gated purely on
+            # "did this call insert a fresh row" -- so a pick that got
+            # deduped here NEVER got an alert, even if its original insert
+            # (for whatever reason -- a code path with no alert wiring, a
+            # transient failure, anything) never actually resulted in one
+            # either. needs_alert lets a duplicate still get its one alert
+            # if the existing row was never marked as alerted, while a
+            # true repeat (already alerted) stays suppressed as before.
+            _needs_alert = _existing[2] is None
             log.info(
-                "perf_tracker: duplicate suppressed symbol=%s existing_id=%d age=%.1fh (within 24h window)",
-                symbol_upper, _existing_id, _age_hours,
+                "perf_tracker: duplicate suppressed symbol=%s existing_id=%d age=%.1fh (within 24h window) needs_alert=%s",
+                symbol_upper, _existing_id, _age_hours, _needs_alert,
             )
-            return {"status": "duplicate_suppressed", "existing_id": _existing_id, "age_hours": _age_hours}
+            return {
+                "status": "duplicate_suppressed",
+                "existing_id": _existing_id,
+                "age_hours": _age_hours,
+                "needs_alert": _needs_alert,
+            }
 
         sym = symbol_upper  # alias used in the rest of the function
 
@@ -176,6 +197,21 @@ def record_pick(pick: Dict[str, Any]):
     except Exception as e:
         log.warning(f"perf_tracker: record_pick failed: {e}")
         return None
+
+
+def mark_alert_sent(pick_id: int) -> None:
+    """
+    Call after actually firing a new-pick alert for a row (fresh insert or
+    a needs_alert duplicate) so record_pick's dedup guard can tell "already
+    alerted" apart from "already exists" -- see needs_alert above.
+    Safe to call from asyncio.to_thread; never raises.
+    """
+    try:
+        with _conn() as db:
+            db.execute("UPDATE picks SET alert_sent_at = ? WHERE id = ?", (time.time(), int(pick_id)))
+            db.commit()
+    except Exception as e:
+        log.warning(f"perf_tracker: mark_alert_sent failed for id={pick_id}: {e}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -8350,13 +8350,7 @@ def _bg_v2_scan_once() -> None:
                     if bool(out.get("is_trade")) and str(out.get("symbol") or "").strip():
                         from performance_tracker import record_pick as _record_pick
                         _rp_result = _record_pick(out)
-                        # Fire new-pick alert only for fresh inserts (not duplicate suppression)
-                        if isinstance(_rp_result, int):
-                            try:
-                                from alerts import send_new_pick_alert_bg
-                                send_new_pick_alert_bg(out)
-                            except Exception as _ae:
-                                log.warning(f"bg_scan: new_pick alert failed: {_ae}")
+                        _fire_new_pick_alert_if_needed(_rp_result, out, source="bg_scan")
                 except Exception as _rp_err:
                     log.warning(f"bg_scan: record_pick failed: {_rp_err}")
 
@@ -8377,8 +8371,56 @@ def _bg_v2_scan_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pre-mover background scan
+# Shared new-pick alert trigger (used by both the best_pick_v2 and
+# pre-mover background scanners)
 # ---------------------------------------------------------------------------
+
+def _fire_new_pick_alert_if_needed(rp_result: Any, pick_dict: Dict[str, Any], *, source: str) -> None:
+    """
+    rp_result is whatever performance_tracker.record_pick() returned:
+      int  -> fresh insert, always alert.
+      dict -> duplicate within the 24h window; alert only if the existing
+              row was never actually alerted (needs_alert=True) -- e.g. the
+              premover auto-recorder had no alert code at all until today,
+              so old duplicate-suppressed rows would otherwise never get
+              their one alert. A true repeat (already alerted) stays
+              suppressed.
+      None -> record_pick skipped or errored; nothing to do.
+    """
+    alert_target_id: Optional[int] = None
+    if isinstance(rp_result, int):
+        alert_target_id = rp_result
+    elif isinstance(rp_result, dict) and rp_result.get("needs_alert"):
+        try:
+            alert_target_id = int(rp_result.get("existing_id"))
+        except Exception:
+            alert_target_id = None
+
+    if alert_target_id is None:
+        return
+
+    try:
+        from alerts import send_new_pick_alert_bg
+        send_new_pick_alert_bg(pick_dict)
+        from performance_tracker import mark_alert_sent
+        mark_alert_sent(alert_target_id)
+    except Exception as _ae:
+        log.warning(f"{source}: new_pick alert failed: {_ae}")
+
+
+def _parse_premover_price(v: Any) -> Optional[float]:
+    """
+    entry_zone/invalidation come as display strings like "$12.34 – $12.96"
+    or "$11.20" (see pre_mover_scanner.py), not numbers. Take the first
+    numeric value found.
+    """
+    try:
+        s = str(v or "").split("–")[0].split("-")[0]
+        s = s.replace("$", "").replace(",", "").strip()
+        return float(s) if s else None
+    except Exception:
+        return None
+
 
 def _bg_premover_scan_once() -> None:
     """Run the small-cap pre-mover scan and persist results to module cache."""
@@ -8400,15 +8442,32 @@ def _bg_premover_scan_once() -> None:
             top = result["results"][0] if result["results"] else None
             if top and float(top.get("score") or 0.0) >= 75.0:
                 try:
-                    _record_pick({
+                    # BUG (fixed 2026-07-17): entry_zone/invalidation are
+                    # display strings ("$12.34 - $12.96"), not numbers --
+                    # record_pick's own float() coercion silently failed on
+                    # them, so every premover pick was stored with
+                    # entry_price=NULL regardless of this fix. Parse real
+                    # numbers so the DB row and the alert email both show
+                    # actual prices instead of blanks.
+                    premover_pick = {
                         "symbol": top.get("symbol") or "",
-                        "trade_plan": {"entry": top.get("entry_zone"), "stop": top.get("invalidation")},
+                        "trade_plan": {
+                            "entry": _parse_premover_price(top.get("entry_zone")),
+                            "stop": _parse_premover_price(top.get("invalidation")),
+                        },
+                        "trade_decision": "PRE_MOVER",
                         "edge_signals": [k for k in (top.get("signals") or {})],
                         "edge_score_0_10": float(top.get("score") or 0.0) / 10.0,
                         "final_score_0_10": float(top.get("score") or 0.0) / 10.0,
                         "confidence_0_10": float(top.get("score") or 0.0) / 10.0,
                         "premover_score_0_10": float(top.get("score") or 0.0) / 10.0,
-                    })
+                    }
+                    _rp_result = _record_pick(premover_pick)
+                    # BUG (fixed 2026-07-17): this auto-recorder never sent
+                    # a new-pick alert at all, for any pick, since the day
+                    # it was introduced (2026-05-27) -- it recorded into
+                    # perf_tracker and stopped.
+                    _fire_new_pick_alert_if_needed(_rp_result, premover_pick, source="bg_premover")
                 except Exception as _rp_err:
                     log.warning(f"bg_premover: record_pick failed: {_rp_err}")
     except Exception as _e:
