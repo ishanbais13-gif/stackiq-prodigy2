@@ -1198,6 +1198,37 @@ def admin_get_token(body: AdminGetTokenRequest):
     return {"access_token": token, "plan": plan, "email": email}
 
 
+class AdminSetPlanRequest(BaseModel):
+    secret: str
+    email: str
+    plan: str
+
+
+@auth_router.post("/admin-set-plan")
+def admin_set_plan(body: AdminSetPlanRequest):
+    """
+    Manually override a user's plan in the DB. Does NOT touch
+    subscription_status or Stripe -- this is a one-off override, not a
+    substitute for an actual Stripe subscription change. If the user has
+    a real Stripe subscription, the next webhook event for it (renewal,
+    payment method update, etc.) will recompute `plan` from what they're
+    actually subscribed to and silently overwrite this override.
+    """
+    _check_admin_secret(body.secret)
+    plan = body.plan.strip().lower()
+    if plan not in _VALID_PLANS:
+        raise HTTPException(status_code=400, detail=f"Invalid plan '{body.plan}'. Choose: {sorted(_VALID_PLANS)}")
+    email = body.email.strip().lower()
+    with _get_db() as conn:
+        row = conn.execute("SELECT id FROM users WHERE LOWER(email) = ?", (email,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+        conn.execute("UPDATE users SET plan = ? WHERE id = ?", (plan, row["id"]))
+        conn.commit()
+    log.info("admin_set_plan: email=%s -> plan=%s", email, plan)
+    return {"ok": True, "email": email, "plan": plan}
+
+
 class AdminStripeLookupRequest(BaseModel):
     secret: str
     customer_id: Optional[str] = None
