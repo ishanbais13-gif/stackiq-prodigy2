@@ -2426,6 +2426,7 @@ try:
         get_current_user as _get_current_user,
         require_active_subscription as _require_subscription,
         require_plan as _require_plan,
+        _check_admin_secret,
     )
     app.include_router(auth_router)
     app.include_router(stripe_router)
@@ -2444,6 +2445,8 @@ except Exception as _auth_err:
         def _dep():
             raise HTTPException(status_code=503, detail="Auth module not available")
         return _dep
+    def _check_admin_secret(_provided: str) -> None:  # type: ignore[misc]
+        raise HTTPException(status_code=503, detail="Auth module not available")
     _dep_starter = Depends(_require_plan("starter"))
     _dep_pro     = Depends(_require_plan("pro"))
     _dep_elite   = Depends(_require_plan("elite"))
@@ -3132,15 +3135,53 @@ def _db_init() -> None:
     try:
         conn = _db_connect()
         cur = conn.cursor()
+
+        # portfolio / watchlist / saved_picks originally had no user_id column at
+        # all (`symbol`/`id` was the sole primary key), so every customer shared
+        # one global row per symbol and the GET routes had no auth. There is no
+        # way to attribute an existing row to a user under the old schema, so
+        # old data is preserved under a `_legacy_unscoped` name rather than
+        # dropped, and each table is recreated scoped by user_id.
+        def _needs_user_id_migration(table: str) -> tuple:
+            try:
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+                exists = cur.fetchone() is not None
+            except Exception:
+                exists = False
+            if not exists:
+                return False, False
+            cur.execute(f"PRAGMA table_info({table})")
+            has_user_id = any(r[1] == "user_id" for r in cur.fetchall())
+            return exists, not has_user_id
+
+        exists, needs_migration = _needs_user_id_migration("portfolio")
+        if exists and needs_migration:
+            cur.execute("ALTER TABLE portfolio RENAME TO portfolio_legacy_unscoped")
         cur.execute(
-            "CREATE TABLE IF NOT EXISTS portfolio (symbol TEXT PRIMARY KEY, shares REAL, avg_price REAL, added_at TEXT)"
+            "CREATE TABLE IF NOT EXISTS portfolio "
+            "(user_id INTEGER NOT NULL, symbol TEXT NOT NULL, shares REAL, avg_price REAL, added_at TEXT, "
+            "PRIMARY KEY (user_id, symbol))"
         )
+
+        exists, needs_migration = _needs_user_id_migration("watchlist")
+        if exists and needs_migration:
+            cur.execute("ALTER TABLE watchlist RENAME TO watchlist_legacy_unscoped")
         cur.execute(
-            "CREATE TABLE IF NOT EXISTS watchlist (symbol TEXT PRIMARY KEY, added_at TEXT)"
+            "CREATE TABLE IF NOT EXISTS watchlist "
+            "(user_id INTEGER NOT NULL, symbol TEXT NOT NULL, added_at TEXT, "
+            "PRIMARY KEY (user_id, symbol))"
         )
+
+        exists, needs_migration = _needs_user_id_migration("saved_picks")
+        if exists and needs_migration:
+            cur.execute("ALTER TABLE saved_picks RENAME TO saved_picks_legacy_unscoped")
         cur.execute(
-            "CREATE TABLE IF NOT EXISTS saved_picks (id TEXT PRIMARY KEY, symbol TEXT, side TEXT, entry REAL, stop_loss REAL, targets_json TEXT, opened_at TEXT, closed_at TEXT, close_price REAL, score REAL, confidence REAL, reason TEXT, source TEXT, status TEXT)"
+            "CREATE TABLE IF NOT EXISTS saved_picks "
+            "(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, symbol TEXT, side TEXT, entry REAL, stop_loss REAL, "
+            "targets_json TEXT, opened_at TEXT, closed_at TEXT, close_price REAL, score REAL, confidence REAL, "
+            "reason TEXT, source TEXT, status TEXT)"
         )
+
         conn.commit()
         conn.close()
     except Exception:
@@ -9895,8 +9936,8 @@ async def execution_plan(symbol: str, timeframe: str = "swing", tz: Optional[str
 
 
 @app.get("/watchlist/live")
-def watchlist_live():
-    wl = watchlist_get()
+def watchlist_live(_user=_dep_starter):
+    wl = watchlist_get(user_id=int(_user["id"]))
     items = wl.get("items") if isinstance(wl, dict) else []
     if not isinstance(items, list):
         items = []
@@ -9985,12 +10026,34 @@ Context:
     except Exception:
         return None
 
+@app.post("/admin/table-stats", include_in_schema=False)
+def admin_table_stats(payload: Dict[str, Any] = Body(...)):
+    """Diagnostic: row/distinct-user counts for the unscoped legacy tables. Read-only."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    conn = _db_connect()
+    cur = conn.cursor()
+    out: Dict[str, Any] = {}
+    for t in ("portfolio", "watchlist", "saved_picks"):
+        try:
+            cur.execute(f"SELECT COUNT(*) AS c FROM {t}")
+            row = cur.fetchone()
+            out[t] = {"row_count": int(row["c"] if row and row["c"] is not None else 0)}
+        except Exception as e:
+            out[t] = {"error": str(e)}
+    conn.close()
+    return out
+
+
 @app.get("/portfolio", include_in_schema=True)
-def portfolio():
+def portfolio(_user=_dep_pro):
+    uid = int(_user["id"])
     try:
         conn = _db_connect()
         cur = conn.cursor()
-        cur.execute("SELECT symbol, shares, avg_price, added_at FROM portfolio ORDER BY added_at DESC")
+        cur.execute(
+            "SELECT symbol, shares, avg_price, added_at FROM portfolio WHERE user_id = ? ORDER BY added_at DESC",
+            (uid,),
+        )
         rows = cur.fetchall() or []
         conn.close()
     except Exception:
@@ -10090,11 +10153,19 @@ def portfolio():
     return _no_nulls(out)
 
 
-def watchlist_get() -> Dict[str, Any]:
+def watchlist_get(user_id: Optional[int] = None) -> Dict[str, Any]:
+    """user_id=None returns every user's watchlist rows combined -- only for
+    internal scan-universe building, never for an HTTP-exposed route."""
     try:
         conn = _db_connect()
         cur = conn.cursor()
-        cur.execute("SELECT symbol, added_at FROM watchlist ORDER BY added_at DESC")
+        if user_id is None:
+            cur.execute("SELECT symbol, added_at FROM watchlist ORDER BY added_at DESC")
+        else:
+            cur.execute(
+                "SELECT symbol, added_at FROM watchlist WHERE user_id = ? ORDER BY added_at DESC",
+                (int(user_id),),
+            )
         rows = cur.fetchall() or []
         conn.close()
     except Exception:
@@ -10149,7 +10220,9 @@ def watchlist_get() -> Dict[str, Any]:
     return {"status": "ok", "items": items, "updated_at": now_iso()}
 
 
-def _saved_picks_list(limit: int = 200) -> List[Dict[str, Any]]:
+def _saved_picks_list(limit: int = 200, user_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """user_id=None returns every user's saved picks combined -- only for
+    internal scan-universe building, never for an HTTP-exposed route."""
     try:
         lim = int(limit or 200)
     except Exception:
@@ -10160,11 +10233,17 @@ def _saved_picks_list(limit: int = 200) -> List[Dict[str, Any]]:
     try:
         conn = _db_connect()
         cur = conn.cursor()
-        cur.execute(
-            "SELECT id, symbol, side, entry, stop_loss, targets_json, opened_at, closed_at, close_price, score, confidence, reason, source, status "
-            "FROM saved_picks ORDER BY opened_at DESC LIMIT ?",
-            (lim,),
+        cols = (
+            "id, symbol, side, entry, stop_loss, targets_json, opened_at, closed_at, "
+            "close_price, score, confidence, reason, source, status"
         )
+        if user_id is None:
+            cur.execute(f"SELECT {cols} FROM saved_picks ORDER BY opened_at DESC LIMIT ?", (lim,))
+        else:
+            cur.execute(
+                f"SELECT {cols} FROM saved_picks WHERE user_id = ? ORDER BY opened_at DESC LIMIT ?",
+                (int(user_id), lim),
+            )
         rows = cur.fetchall() or []
         conn.close()
     except Exception:
@@ -10224,8 +10303,8 @@ def _saved_picks_list(limit: int = 200) -> List[Dict[str, Any]]:
 
 
 @app.get("/portfolio/picks", include_in_schema=True)
-def portfolio_picks():
-    items = _saved_picks_list(limit=250)
+def portfolio_picks(_user=_dep_pro):
+    items = _saved_picks_list(limit=250, user_id=int(_user["id"]))
     out: List[Dict[str, Any]] = []
     for it in items:
         if not isinstance(it, dict):
@@ -10275,9 +10354,9 @@ def portfolio_picks():
 
 
 @app.get("/watchlist", include_in_schema=True)
-def watchlist():
+def watchlist(_user=_dep_starter):
     try:
-        wl = watchlist_get()
+        wl = watchlist_get(user_id=int(_user["id"]))
         items = wl.get("items") if isinstance(wl, dict) else []
         if not isinstance(items, list):
             items = []
@@ -10315,6 +10394,7 @@ def watchlist():
 
 @app.post("/watchlist/add", include_in_schema=True)
 def watchlist_add(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
+    uid = int(_user["id"])
     sym_raw = str((payload or {}).get("symbol") or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
@@ -10325,8 +10405,8 @@ def watchlist_add(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
         conn = _db_connect()
         cur = conn.cursor()
         cur.execute(
-            "INSERT OR REPLACE INTO watchlist(symbol, added_at) VALUES(?, ?)",
-            (sym, now_iso()),
+            "INSERT OR REPLACE INTO watchlist(user_id, symbol, added_at) VALUES(?, ?, ?)",
+            (uid, sym, now_iso()),
         )
         conn.commit()
         conn.close()
@@ -10340,6 +10420,7 @@ def watchlist_add(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
 
 @app.delete("/watchlist/remove/{symbol}", include_in_schema=True)
 def watchlist_remove(symbol: str, _user=_dep_starter):
+    uid = int(_user["id"])
     sym_raw = str(symbol or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
@@ -10348,7 +10429,7 @@ def watchlist_remove(symbol: str, _user=_dep_starter):
     try:
         conn = _db_connect()
         cur = conn.cursor()
-        cur.execute("DELETE FROM watchlist WHERE symbol = ?", (sym,))
+        cur.execute("DELETE FROM watchlist WHERE user_id = ? AND symbol = ?", (uid, sym))
         conn.commit()
         conn.close()
     except Exception:
@@ -10361,6 +10442,7 @@ def watchlist_remove(symbol: str, _user=_dep_starter):
 
 @app.post("/portfolio/add", include_in_schema=True)
 def portfolio_add(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
+    uid = int(_user["id"])
     sym_raw = str((payload or {}).get("symbol") or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
@@ -10384,8 +10466,8 @@ def portfolio_add(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
         conn = _db_connect()
         cur = conn.cursor()
         cur.execute(
-            "INSERT OR REPLACE INTO portfolio(symbol, shares, avg_price, added_at) VALUES(?, ?, ?, ?)",
-            (sym, float(shares), float(avg_price), now_iso()),
+            "INSERT OR REPLACE INTO portfolio(user_id, symbol, shares, avg_price, added_at) VALUES(?, ?, ?, ?, ?)",
+            (uid, sym, float(shares), float(avg_price), now_iso()),
         )
         conn.commit()
         conn.close()
@@ -10400,6 +10482,7 @@ def portfolio_add(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
 
 @app.delete("/portfolio/remove/{symbol}", include_in_schema=True)
 def portfolio_remove(symbol: str, _user=_dep_pro):
+    uid = int(_user["id"])
     sym_raw = str(symbol or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     sym = str(sd.get("symbol") or "").strip().upper()
@@ -10408,7 +10491,7 @@ def portfolio_remove(symbol: str, _user=_dep_pro):
     try:
         conn = _db_connect()
         cur = conn.cursor()
-        cur.execute("DELETE FROM portfolio WHERE symbol = ?", (sym,))
+        cur.execute("DELETE FROM portfolio WHERE user_id = ? AND symbol = ?", (uid, sym))
         conn.commit()
         conn.close()
     except Exception:
@@ -10421,6 +10504,7 @@ def portfolio_remove(symbol: str, _user=_dep_pro):
 
 @app.post("/portfolio/save_pick")
 def portfolio_save_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
+    uid = int(_user["id"])
     sym_raw = str((payload or {}).get("symbol") or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
     if not bool(sd.get("ok")):
@@ -10483,9 +10567,9 @@ def portfolio_save_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
         conn = _db_connect()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO saved_picks (id, symbol, side, entry, stop_loss, targets_json, opened_at, closed_at, close_price, score, confidence, reason, source, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, 'OPEN')",
-            (pid, sym, side, float(entry_f), float(stop_f), tjson, opened_at, float(sc), float(cf), reason, source),
+            "INSERT INTO saved_picks (id, user_id, symbol, side, entry, stop_loss, targets_json, opened_at, closed_at, close_price, score, confidence, reason, source, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, 'OPEN')",
+            (pid, uid, sym, side, float(entry_f), float(stop_f), tjson, opened_at, float(sc), float(cf), reason, source),
         )
         conn.commit()
         conn.close()
@@ -10501,13 +10585,17 @@ def portfolio_save_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
 
 @app.post("/portfolio/close_pick")
 def portfolio_close_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
+    uid = int(_user["id"])
     pid = str((payload or {}).get("id") or "").strip()
     if not pid:
         raise HTTPException(status_code=400, detail="MISSING_ID")
     try:
         conn = _db_connect()
         cur = conn.cursor()
-        cur.execute("SELECT id, symbol, side, entry FROM saved_picks WHERE id = ? AND status = 'OPEN'", (pid,))
+        cur.execute(
+            "SELECT id, symbol, side, entry FROM saved_picks WHERE id = ? AND user_id = ? AND status = 'OPEN'",
+            (pid, uid),
+        )
         row = cur.fetchone()
         if row is None:
             conn.close()
@@ -10523,8 +10611,8 @@ def portfolio_close_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
             close_px = entry
 
         cur.execute(
-            "UPDATE saved_picks SET status = 'CLOSED', closed_at = ?, close_price = ? WHERE id = ?",
-            (now_iso(), float(close_px), pid),
+            "UPDATE saved_picks SET status = 'CLOSED', closed_at = ?, close_price = ? WHERE id = ? AND user_id = ?",
+            (now_iso(), float(close_px), pid, uid),
         )
         conn.commit()
         conn.close()
