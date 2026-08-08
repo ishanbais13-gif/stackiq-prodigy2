@@ -3131,6 +3131,22 @@ def _db_connect() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_perf_tracker_schema() -> None:
+    """
+    performance_tracker is only ever imported lazily elsewhere in this
+    codebase (never at module load), so its schema migrations aren't
+    guaranteed to have run yet the first time a route here queries
+    perf_tracker.db directly via a raw sqlite3 connection. Call this first
+    in any such route rather than relying on some other code path having
+    happened to import the module already.
+    """
+    try:
+        import performance_tracker as _pt_mod
+        _pt_mod._ensure_schema()
+    except Exception:
+        pass
+
+
 def _db_init() -> None:
     try:
         conn = _db_connect()
@@ -10054,6 +10070,7 @@ def admin_picks_raw(payload: Dict[str, Any] = Body(...)):
     for forensic auditing of outcomes and gate correctness, not display.
     """
     _check_admin_secret(str((payload or {}).get("secret") or ""))
+    _ensure_perf_tracker_schema()
     import sqlite3 as _sq
     _pt = os.getenv("PERF_TRACKER_DB", os.path.join(os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
     since_ts = (payload or {}).get("since_ts")
@@ -10064,7 +10081,7 @@ def admin_picks_raw(payload: Dict[str, Any] = Body(...)):
         q = (
             "SELECT id, symbol, direction, entry_price, stop, target1, target2, target3, "
             "edge_score, final_score, confidence, recorded_at, status, evaluated_at, "
-            "max_return_pct, max_drawdown_pct, hit_target, hit_stop, days_to_outcome "
+            "max_return_pct, max_drawdown_pct, exit_return_pct, hit_target, hit_stop, days_to_outcome "
             "FROM picks WHERE 1=1"
         )
         params: List[Any] = []
@@ -10749,15 +10766,24 @@ def account(_: None = Depends(_require_debug)):
 
 @app.get("/performance", include_in_schema=True)
 def performance_summary():
+    _ensure_perf_tracker_schema()
     import sqlite3 as _sq
     db_path = os.environ.get("PERF_TRACKER_DB", os.path.join(
         os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
+    _RETURN_CAP = 75.0
     try:
         con = _sq.connect(db_path)
         con.row_factory = _sq.Row
         cur = con.cursor()
+        # entry_price IS NOT NULL excludes synthetic-entry rows -- picks with
+        # no real trade plan, tracked off a first-bar-open guess. Without
+        # this filter, legacy rows predating the synthetic-entry sanity cap
+        # (real production examples: WOK +5910%, PAVS +5697%, both
+        # entry_price=NULL) blow up avg_return_pct. /public/performance has
+        # had this filter since it was restored; this endpoint never did.
         cur.execute(
-            "SELECT status, max_return_pct FROM picks WHERE status != 'pending'"
+            "SELECT status, max_return_pct, exit_return_pct FROM picks "
+            "WHERE status != 'pending' AND entry_price IS NOT NULL AND entry_price > 0"
         )
         rows = cur.fetchall() or []
         con.close()
@@ -10769,7 +10795,14 @@ def performance_summary():
     losses = sum(1 for r in rows if str(r["status"] or "").startswith("lost") or str(r["status"] or "").startswith("expired"))
     contested = wins + losses
     win_rate = round(wins / contested * 100.0, 1) if contested > 0 else 0.0
-    returns = [float(r["max_return_pct"]) for r in rows if r["max_return_pct"] is not None]
+    # Prefer exit_return_pct (realized at close-out) over max_return_pct
+    # (peak reached during the hold) where available. Clamped to +/-75% as
+    # a second layer of protection against any other data anomaly.
+    returns = [
+        max(-_RETURN_CAP, min(_RETURN_CAP, float(r["exit_return_pct"] if r["exit_return_pct"] is not None else r["max_return_pct"])))
+        for r in rows
+        if r["exit_return_pct"] is not None or r["max_return_pct"] is not None
+    ]
     avg_return_pct = round(sum(returns) / len(returns), 2) if returns else 0.0
     return {
         "total_picks": total_picks,
@@ -10782,6 +10815,7 @@ def performance_summary():
 
 @app.get("/performance/picks", include_in_schema=True)
 def performance_picks():
+    _ensure_perf_tracker_schema()
     import sqlite3 as _sq, datetime as _dt, json as _json
     db_path = os.environ.get("PERF_TRACKER_DB", os.path.join(
         os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
@@ -10790,14 +10824,19 @@ def performance_picks():
         con = _sq.connect(db_path)
         con.row_factory = _sq.Row
         cur = con.cursor()
-        cur.execute("SELECT symbol, status, entry_price, max_return_pct, edge_signals, recorded_at, hit_target, hit_stop FROM picks ORDER BY recorded_at DESC LIMIT 50")
+        cur.execute("SELECT symbol, status, entry_price, max_return_pct, exit_return_pct, edge_signals, recorded_at, hit_target, hit_stop FROM picks ORDER BY recorded_at DESC LIMIT 50")
         for row in cur.fetchall():
             try:
                 date_str = _dt.datetime.utcfromtimestamp(row["recorded_at"]).strftime("%Y-%m-%d")
             except:
                 date_str = ""
             status = row["status"] or "pending"
-            pct = row["max_return_pct"] or 0.0
+            # Prefer exit_return_pct (realized at close-out) over
+            # max_return_pct (peak reached during the hold) where available.
+            # Clamped +/-75% against synthetic-entry data anomalies (see
+            # /performance's comment for the real WOK/PAVS examples).
+            pct = row["exit_return_pct"] if row["exit_return_pct"] is not None else (row["max_return_pct"] or 0.0)
+            pct = max(-75.0, min(75.0, float(pct)))
             if status == "lost" or row["hit_stop"]:
                 outcome = "lost"
             elif status == "won" or row["hit_target"]:
@@ -10981,6 +11020,7 @@ async def scan_nn_status(_user=_dep_elite):
 def _chat_build_context(user_id: Optional[int] = None) -> str:
     """Pull live system context to include in the chatbot system prompt."""
     lines = []
+    _ensure_perf_tracker_schema()
 
     # Recent picks from perf_tracker
     try:
@@ -10990,7 +11030,7 @@ def _chat_build_context(user_id: Optional[int] = None) -> str:
         con.row_factory = _sq.Row
         rows = con.execute(
             "SELECT symbol, status, edge_signals, edge_score, final_score, "
-            "max_return_pct, recorded_at FROM picks ORDER BY recorded_at DESC LIMIT 8"
+            "max_return_pct, exit_return_pct, recorded_at FROM picks ORDER BY recorded_at DESC LIMIT 8"
         ).fetchall()
         con.close()
         if rows:
@@ -11002,7 +11042,21 @@ def _chat_build_context(user_id: Optional[int] = None) -> str:
             lines.append("RECENT PICKS (last 8 -- most recent activity, NOT the full track record; many will show pending simply because they're new):")
             for r in rows:
                 sig = r["edge_signals"] or "[]"
-                ret = f"{r['max_return_pct']:+.1f}%" if r["max_return_pct"] is not None else "pending"
+                # exit_return_pct is what was actually realized at close-out;
+                # max_return_pct is the best point reached at any time during
+                # the hold, which overstates a drift outcome that reversed
+                # before the position actually closed. Prefer the real
+                # number; older rows recorded before this fix only have the
+                # peak, so fall back to it but label it honestly as a peak.
+                # Clamped +/-75% against synthetic-entry data anomalies --
+                # real production examples: WOK +5910%, PAVS +5697%, both
+                # from before the synthetic-entry sanity cap existed.
+                if r["exit_return_pct"] is not None:
+                    ret = f"{max(-75.0, min(75.0, r['exit_return_pct'])):+.1f}%"
+                elif r["max_return_pct"] is not None:
+                    ret = f"{max(-75.0, min(75.0, r['max_return_pct'])):+.1f}% (peak reached, pre-fix data -- real close-out return not recorded)"
+                else:
+                    ret = "pending"
                 lines.append(
                     f"  {r['symbol']:6s} status={r['status']:15s} score={r['final_score'] or r['edge_score'] or 0:.1f}/10 "
                     f"return={ret} signals={sig}"
@@ -11021,18 +11075,25 @@ def _chat_build_context(user_id: Optional[int] = None) -> str:
         con2.row_factory = _sq.Row
         row2 = con2.execute(
             "SELECT COUNT(*) as total, "
-            "SUM(CASE WHEN status IN ('won','won_drift') THEN 1 ELSE 0 END) as wins, "
-            "SUM(CASE WHEN status IN ('lost','lost_drift') THEN 1 ELSE 0 END) as losses, "
+            "SUM(CASE WHEN status='won' THEN 1 ELSE 0 END) as clean_wins, "
+            "SUM(CASE WHEN status='won_drift' THEN 1 ELSE 0 END) as drift_wins, "
+            "SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) as clean_losses, "
+            "SUM(CASE WHEN status='lost_drift' THEN 1 ELSE 0 END) as drift_losses, "
             "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending "
             "FROM picks"
         ).fetchone()
         con2.close()
         if row2:
-            wr = int(row2["wins"]) / max(int(row2["wins"]) + int(row2["losses"]), 1) * 100
+            clean_wins, drift_wins = int(row2["clean_wins"]), int(row2["drift_wins"])
+            clean_losses, drift_losses = int(row2["clean_losses"]), int(row2["drift_losses"])
+            wins, losses = clean_wins + drift_wins, clean_losses + drift_losses
+            wr = wins / max(wins + losses, 1) * 100
             lines.append(
                 f"\nPERFORMANCE SUMMARY (all-time, authoritative for win-rate questions): {row2['total']} total | "
-                f"{row2['wins']} wins | {row2['losses']} losses | {row2['pending']} pending | "
-                f"win rate {wr:.0f}%"
+                f"{wins} wins ({clean_wins} hit target cleanly, {drift_wins} closed positive after the hold "
+                f"window expired without hitting target or stop) | "
+                f"{losses} losses ({clean_losses} hit stop cleanly, {drift_losses} closed negative after the hold "
+                f"window expired) | {row2['pending']} pending | win rate {wr:.0f}% (blended, all outcome types)"
             )
     except Exception:
         pass
@@ -11252,7 +11313,17 @@ def public_performance():
         real trade plan) don't dilute the public win-rate/return numbers.
       - Clamped returns to +/-75% before averaging so a legacy corrupted
         synthetic-entry row can't skew the public-facing stats.
+      - Per-pick change_pct and the win/loss averages now use
+        exit_return_pct (the return actually realized at close-out) when
+        available. Previously every pick's change_pct -- wins AND losses --
+        was max_return_pct, the best point reached at any time during the
+        hold: a loss would show its best favorable excursion before it
+        reversed, not the actual loss, and a won_drift pick would show its
+        peak rather than what was left when the position actually closed.
+        Falls back to max_return_pct/max_drawdown_pct for picks resolved
+        before exit_return_pct started being tracked.
     """
+    _ensure_perf_tracker_schema()
     import sqlite3 as _sq, json as _js
     _pt_path = os.getenv("PERF_TRACKER_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf_tracker.db"))
     _RETURN_CAP = 75.0
@@ -11260,8 +11331,8 @@ def public_performance():
         con = _sq.connect(_pt_path, timeout=5)
         rows = con.execute(
             """SELECT symbol, recorded_at, entry_price, NULL as exit_price,
-                      max_return_pct, max_drawdown_pct, status, edge_signals,
-                      days_to_outcome
+                      max_return_pct, max_drawdown_pct, exit_return_pct, status,
+                      edge_signals, days_to_outcome
                FROM picks
                WHERE status NOT IN ('expired_neutral')
                  AND entry_price IS NOT NULL AND entry_price > 0
@@ -11274,9 +11345,10 @@ def public_performance():
     picks = []
     won_returns, lost_returns = [], []
     win_count = loss_count = 0
+    clean_win_count = drift_win_count = clean_loss_count = drift_loss_count = 0
 
     for row in rows:
-        sym, rec_at, entry, exit_p, max_ret, max_dd, status, sigs_raw, days = row
+        sym, rec_at, entry, exit_p, max_ret, max_dd, exit_ret, status, sigs_raw, days = row
         try:
             signals = _js.loads(sigs_raw or "[]")
         except Exception:
@@ -11286,15 +11358,20 @@ def public_performance():
         outcome = "won" if status in ("won", "won_drift") else ("lost" if status in ("lost", "lost_drift") else "pending")
 
         change_pct = None
-        if resolved and max_ret is not None:
-            change_pct = max(-_RETURN_CAP, min(_RETURN_CAP, float(max_ret)))
-            if outcome == "won":
-                won_returns.append(change_pct)
-                win_count += 1
-            else:
-                raw_loss = float(max_dd if max_dd is not None else max_ret)
-                lost_returns.append(max(-_RETURN_CAP, min(_RETURN_CAP, raw_loss)))
-                loss_count += 1
+        if resolved:
+            realized = exit_ret if exit_ret is not None else (max_ret if outcome == "won" else max_dd)
+            if realized is not None:
+                change_pct = max(-_RETURN_CAP, min(_RETURN_CAP, float(realized)))
+                if outcome == "won":
+                    won_returns.append(change_pct)
+                    win_count += 1
+                    clean_win_count += (status == "won")
+                    drift_win_count += (status == "won_drift")
+                else:
+                    lost_returns.append(change_pct)
+                    loss_count += 1
+                    clean_loss_count += (status == "lost")
+                    drift_loss_count += (status == "lost_drift")
 
         picks.append({
             "symbol": sym,
@@ -11321,6 +11398,10 @@ def public_performance():
             "total_picks": len(picks),
             "win_count": win_count,
             "loss_count": loss_count,
+            "clean_win_count": clean_win_count,
+            "drift_win_count": drift_win_count,
+            "clean_loss_count": clean_loss_count,
+            "drift_loss_count": drift_loss_count,
             "win_rate_pct": win_rate,
             "avg_winner_pct": avg_winner,
             "avg_loser_pct": avg_loser,

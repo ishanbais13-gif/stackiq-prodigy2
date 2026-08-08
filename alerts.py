@@ -19,7 +19,7 @@ import threading
 import urllib.request as _ur
 import urllib.error
 import urllib.parse
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("stackiq")
 
@@ -244,13 +244,34 @@ def _new_pick_html(symbol: str, decision: str, score: float,
 </html>"""
 
 
+def _outcome_labels(status: str) -> Tuple[bool, str, str]:
+    """
+    Returns (is_win, email_headline_text, sms_result_text) for an outcome
+    status. "won"/"lost" mean the pick actually hit its target/stop --
+    honest to say so. "won_drift"/"lost_drift" mean the position expired
+    after its hold window without hitting either level and closed out
+    positive/negative on a 2%+ drift threshold -- a real outcome, but not
+    a target hit, so it must not be described as one.
+    """
+    s = (status or "").lower()
+    if s == "won":
+        return True, "hit its target!", "HIT TARGET"
+    if s == "won_drift":
+        return True, "closed higher (no clean target hit)", "CLOSED UP"
+    if s == "lost":
+        return False, "stopped out", "Stopped out"
+    if s == "lost_drift":
+        return False, "closed lower (no stop hit)", "CLOSED DOWN"
+    return ("won" in s), "closed", "CLOSED"
+
+
 def _outcome_html(symbol: str, status: str, return_pct: Optional[float],
                   entry: Optional[float], first_name: str = "") -> str:
     greeting = f"Hey {first_name}," if first_name else "Hey,"
-    is_win   = "won" in status.lower()
+    is_win, headline_text, _ = _outcome_labels(status)
     color    = "#00b450" if is_win else "#ef4444"
     icon     = "✅" if is_win else "❌"
-    headline = f"${symbol} hit its target!" if is_win else f"${symbol} stopped out"
+    headline = f"${symbol} {headline_text}"
     ret_str  = f"{'+' if (return_pct or 0) >= 0 else ''}{return_pct:.1f}%" if return_pct is not None else ""
     entry_str = f"${entry:.2f}" if entry else ""
 
@@ -309,9 +330,8 @@ def _new_pick_sms(symbol: str, decision: str, score: float,
 
 
 def _outcome_sms(symbol: str, status: str, return_pct: Optional[float]) -> str:
-    is_win  = "won" in status.lower()
+    is_win, _, result = _outcome_labels(status)
     icon    = "✅" if is_win else "❌"
-    result  = "HIT TARGET" if is_win else "Stopped out"
     ret_str = f" {'+' if (return_pct or 0) >= 0 else ''}{return_pct:.1f}%" if return_pct is not None else ""
     return f"{icon} Aurexis — ${symbol} {result}{ret_str}\n{_FRONTEND_URL}"
 
@@ -388,9 +408,9 @@ def _fire_outcome(symbol: str, status: str, return_pct: Optional[float],
         email   = str(u.get("email") or "")
         phone   = str(u.get("phone") or "")
 
-        is_win  = "won" in status.lower()
-        subject = f"${symbol} hit its target! {('+' + f'{return_pct:.1f}%') if return_pct else ''}" \
-                  if is_win else f"${symbol} stopped out"
+        _, headline_text, _ = _outcome_labels(status)
+        ret_suffix = f" {'+' if return_pct >= 0 else ''}{return_pct:.1f}%" if return_pct is not None else ""
+        subject = f"${symbol} {headline_text}{ret_suffix}"
 
         if channel in ("email", "both") and email:
             html = _outcome_html(symbol, status, return_pct, entry, name)

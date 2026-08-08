@@ -46,7 +46,11 @@ CREATE TABLE IF NOT EXISTS picks (
     hit_target          INTEGER DEFAULT 0,
     hit_stop            INTEGER DEFAULT 0,
     days_to_outcome     INTEGER,
-    alert_sent_at       REAL    -- unix timestamp; NULL until a new-pick alert has actually fired for this row
+    alert_sent_at       REAL,   -- unix timestamp; NULL until a new-pick alert has actually fired for this row
+    exit_return_pct     REAL    -- the return actually realized at close-out: target/stop level for won/lost,
+                                 -- final price vs entry for won_drift/lost_drift/expired_neutral. Distinct from
+                                 -- max_return_pct, which is the best point reached at any time during the hold
+                                 -- and can meaningfully overstate what a drift-classified pick actually banked.
 );
 CREATE INDEX IF NOT EXISTS idx_pt_status   ON picks(status);
 CREATE INDEX IF NOT EXISTS idx_pt_symbol   ON picks(symbol);
@@ -79,6 +83,12 @@ def _ensure_schema() -> None:
             # Non-destructive migration for DBs that predate alert_sent_at.
             try:
                 db.execute("ALTER TABLE picks ADD COLUMN alert_sent_at REAL")
+                db.commit()
+            except Exception:
+                pass  # column already exists
+            # Non-destructive migration for DBs that predate exit_return_pct.
+            try:
+                db.execute("ALTER TABLE picks ADD COLUMN exit_return_pct REAL")
                 db.commit()
             except Exception:
                 pass  # column already exists
@@ -309,7 +319,7 @@ def evaluate_pending_picks(
                 db.execute(
                     """UPDATE picks
                        SET status=?, evaluated_at=?,
-                           max_return_pct=?, max_drawdown_pct=?,
+                           max_return_pct=?, max_drawdown_pct=?, exit_return_pct=?,
                            hit_target=?, hit_stop=?, days_to_outcome=?
                        WHERE id=?""",
                     (
@@ -317,6 +327,7 @@ def evaluate_pending_picks(
                         now,
                         outcome["max_return_pct"],
                         outcome["max_drawdown_pct"],
+                        outcome["exit_return_pct"],
                         int(bool(outcome["hit_target"])),
                         int(bool(outcome["hit_stop"])),
                         outcome["days_to_outcome"],
@@ -325,11 +336,14 @@ def evaluate_pending_picks(
                 )
             updated += 1
 
-            # Feed outcome into evolution engine
+            # Feed outcome into evolution engine. Use the realized exit
+            # return, not the peak -- a drift win/loss that reversed before
+            # close-out shouldn't teach the model a stronger signal than it
+            # actually delivered.
             if outcome["status"] in ("won", "won_drift", "lost", "lost_drift"):
                 try:
                     from learning import settle_outcome as _settle
-                    _ret   = float(outcome["max_return_pct"] or 0)
+                    _ret   = float(outcome["exit_return_pct"] if outcome["exit_return_pct"] is not None else (outcome["max_return_pct"] or 0))
                     _dd    = float(outcome["max_drawdown_pct"] or 0)
                     _days  = int(outcome["days_to_outcome"] or 1)
                     _tgt_n = 3 if outcome["hit_target"] and _ret > 15 else \
@@ -346,14 +360,17 @@ def evaluate_pending_picks(
                 except Exception as _le:
                     log.warning(f"perf_tracker: learning.settle_outcome failed: {_le}")
 
-            # Fire outcome alert in background (won/lost only, not expired)
+            # Fire outcome alert in background (won/lost only, not expired).
+            # Uses the realized exit return, not the peak -- see alerts.py's
+            # _outcome_labels() for why a drift outcome's email/SMS text and
+            # number both need to be honest about what actually happened.
             if outcome["status"] in ("won", "won_drift", "lost", "lost_drift"):
                 try:
                     from alerts import send_outcome_alert_bg
                     send_outcome_alert_bg(
                         symbol     = sym,
                         status     = outcome["status"],
-                        return_pct = outcome["max_return_pct"],
+                        return_pct = outcome["exit_return_pct"] if outcome["exit_return_pct"] is not None else outcome["max_return_pct"],
                         entry      = _sf(row["entry_price"]),
                     )
                 except Exception as _ae:
@@ -392,7 +409,7 @@ def _resolve_outcome(
 ) -> Dict[str, Any]:
     """Walk forward through bars and determine win/loss/expired."""
     _null = {"status": "pending", "max_return_pct": None, "max_drawdown_pct": None,
-             "hit_target": False, "hit_stop": False, "days_to_outcome": None}
+             "exit_return_pct": None, "hit_target": False, "hit_stop": False, "days_to_outcome": None}
 
     is_synthetic_entry = False
     if not entry or not math.isfinite(float(entry)) or float(entry) <= 0:
@@ -460,6 +477,7 @@ def _resolve_outcome(
             break
 
     # Determine final status
+    final_ret: Optional[float] = None
     if hit_tgt:
         status = "won"
     elif hit_stop:
@@ -499,14 +517,31 @@ def _resolve_outcome(
                 "symbol=%s entry=%.4f max_ret=%s max_dd=%s — likely bad bar data",
                 symbol, entry, max_ret, max_dd,
             )
-            status  = "expired_neutral"
-            max_ret = None
-            max_dd  = None
+            status    = "expired_neutral"
+            max_ret   = None
+            max_dd    = None
+            final_ret = None
     else:
         status = "pending"
 
+    # exit_return_pct is what was actually realized at close-out, distinct
+    # from max_return_pct (the best point reached at any time during the
+    # hold). For won/lost, that's the target/stop-triggering excursion
+    # itself -- already a real, achieved price, not a peak that reversed.
+    # For the drift/expired path it's the final-vs-entry price at the
+    # moment the time-stop closed the position.
+    if status == "won":
+        exit_return_pct = max_ret
+    elif status == "lost":
+        exit_return_pct = max_dd
+    elif final_ret is not None:
+        exit_return_pct = final_ret
+    else:
+        exit_return_pct = None
+
     return {
         "status":          status,
+        "exit_return_pct": round(exit_return_pct, 2) if exit_return_pct is not None else None,
         "max_return_pct":  round(max_ret, 2) if max_ret is not None else None,
         "max_drawdown_pct": round(max_dd, 2) if max_dd  is not None else None,
         "hit_target":      hit_tgt,
@@ -703,8 +738,8 @@ def reclassify_expired_picks() -> int:
 
             with _conn() as db:
                 db.execute(
-                    "UPDATE picks SET status=?, evaluated_at=? WHERE id=? AND status='expired'",
-                    (new_status, now, row["id"]),
+                    "UPDATE picks SET status=?, evaluated_at=?, exit_return_pct=? WHERE id=? AND status='expired'",
+                    (new_status, now, round(final_ret, 2), row["id"]),
                 )
             updated += 1
             log.info(
