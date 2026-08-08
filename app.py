@@ -10044,6 +10044,44 @@ def admin_table_stats(payload: Dict[str, Any] = Body(...)):
     return out
 
 
+@app.post("/admin/picks-raw", include_in_schema=False)
+def admin_picks_raw(payload: Dict[str, Any] = Body(...)):
+    """
+    Diagnostic: raw (uncapped) perf_tracker.db pick rows for a recorded_at
+    unix-timestamp range. Read-only. Unlike /public/performance and
+    /performance/picks, this exposes max_drawdown_pct and the trade-plan
+    fields (stop/target1-3/direction) with no clamping and no LIMIT --
+    for forensic auditing of outcomes and gate correctness, not display.
+    """
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    import sqlite3 as _sq
+    _pt = os.getenv("PERF_TRACKER_DB", os.path.join(os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
+    since_ts = (payload or {}).get("since_ts")
+    until_ts = (payload or {}).get("until_ts")
+    try:
+        con = _sq.connect(_pt, timeout=5)
+        con.row_factory = _sq.Row
+        q = (
+            "SELECT id, symbol, direction, entry_price, stop, target1, target2, target3, "
+            "edge_score, final_score, confidence, recorded_at, status, evaluated_at, "
+            "max_return_pct, max_drawdown_pct, hit_target, hit_stop, days_to_outcome "
+            "FROM picks WHERE 1=1"
+        )
+        params: List[Any] = []
+        if since_ts is not None:
+            q += " AND recorded_at >= ?"
+            params.append(float(since_ts))
+        if until_ts is not None:
+            q += " AND recorded_at <= ?"
+            params.append(float(until_ts))
+        q += " ORDER BY recorded_at ASC"
+        rows = con.execute(q, params).fetchall()
+        con.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"picks": [dict(r) for r in rows], "count": len(rows)}
+
+
 @app.get("/portfolio", include_in_schema=True)
 def portfolio(_user=_dep_pro):
     uid = int(_user["id"])
