@@ -178,8 +178,9 @@ def build_smallcap_universe(
 ) -> List[str]:
     """Filter scan universe + seed down to candidates ($0.10-$20, liquid).
 
-    Penny stocks ($0.10-$1): min $50k daily dollar volume (they trade thin).
-    Small-caps ($1-$20): min $200k daily dollar volume.
+    Flat $10,000,000 minimum single-day dollar volume (see MIN_DOLLAR_VOL
+    below) -- this docstring's original tiered $50k/$200k description
+    predates that floor and was never updated when it changed.
     """
     from data_fetcher import get_snapshots_batch
 
@@ -224,7 +225,17 @@ def build_smallcap_universe(
                 # (today's price x today's volume), not a 30-day average like
                 # best_pick_v2.py's floor -- this pipeline stage only has
                 # snapshot data at this point, not historical bars.
-                MIN_DOLLAR_VOL = 5_000_000.0
+                #
+                # Raised again from $5,000,000 to $10,000,000 (2026-08-11),
+                # alongside the matching best_pick_v2.py change. Real-data
+                # impact check against the live scan universe showed this
+                # gate is far less sensitive to the raise than best_pick_v2's
+                # 30-day-average gate: 613 candidates passing at $5M vs 604 at
+                # $10M (-1.5%), vs. best_pick_v2's -38.3% -- this pipeline's
+                # $0.10-$20 small-cap universe is more bimodal (thin names
+                # stay thin, movers already clear $10M), so few candidates
+                # actually sit in the $5M-$10M band.
+                MIN_DOLLAR_VOL = 10_000_000.0
                 if dollar_vol < MIN_DOLLAR_VOL:
                     continue
                 # Normal-vol filter: prevDailyBar.v (Alpaca) or dailyBar.v (Polygon)

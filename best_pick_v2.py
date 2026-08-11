@@ -2231,7 +2231,12 @@ async def scan_best_pick_v2(
         # the same decision -- a thin-on-paper, hot-today name is exactly
         # the "looks good on paper, can't execute cleanly" case this floor
         # exists to filter out, not an exception to it.
-        MIN_DOLLAR_VOL_30D = 5_000_000.0
+        #
+        # Raised again from $5,000,000 to $10,000,000 (2026-08-11): real-data
+        # impact check against the live scan universe showed 1,158 candidates
+        # passing at $5M vs 715 at $10M (-38.3%) -- a large cut, accepted
+        # deliberately for higher-liquidity, more-executable picks.
+        MIN_DOLLAR_VOL_30D = 10_000_000.0
         gate_flags: List[str] = []
         try:
             if avg_dollar_vol_30d is not None and float(avg_dollar_vol_30d) < MIN_DOLLAR_VOL_30D:
@@ -2251,7 +2256,7 @@ async def scan_best_pick_v2(
             stage_price += 1
         if avg_vol_30d is not None and float(avg_vol_30d) >= 300_000.0:
             stage_vol += 1
-        if avg_dollar_vol_30d is not None and float(avg_dollar_vol_30d) >= 5_000_000.0:
+        if avg_dollar_vol_30d is not None and float(avg_dollar_vol_30d) >= MIN_DOLLAR_VOL_30D:
             stage_dollar += 1
         if spread_pct_now is None or (spread_pct_now is not None and float(spread_pct_now) <= 0.35):
             stage_spread += 1
@@ -2889,7 +2894,8 @@ async def scan_best_pick_v2(
         except Exception:
             return False
         try:
-            if cand.avg_dollar_vol_30d is None or float(cand.avg_dollar_vol_30d) < 5_000_000.0:
+            # Kept in sync with MIN_DOLLAR_VOL_30D above (currently $10,000,000).
+            if cand.avg_dollar_vol_30d is None or float(cand.avg_dollar_vol_30d) < 10_000_000.0:
                 return False
         except Exception:
             return False
