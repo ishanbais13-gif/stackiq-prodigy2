@@ -10833,7 +10833,7 @@ async def send_phone_verification_code(body: _PhoneSendCodeBody, _user=Depends(_
         if not phone or len(phone) < 8:
             return JSONResponse({"ok": False, "error": "Enter a valid phone number."}, status_code=400)
 
-        if not phone_otp_resend_rate_ok(_user["id"]):
+        if not phone_otp_resend_rate_ok(_user["id"], phone):
             return JSONResponse({"ok": False, "error": "Too many codes requested. Try again in a few minutes."}, status_code=429)
 
         prefs = get_alert_prefs(_user["id"])

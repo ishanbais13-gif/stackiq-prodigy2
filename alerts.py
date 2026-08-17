@@ -213,7 +213,17 @@ _PHONE_OTP_RESEND_MAX    = 5
 _PHONE_OTP_RESEND_WINDOW = 600  # 10 minutes
 
 
-def phone_otp_resend_rate_ok(user_id: int) -> bool:
+def _rate_limit_exempt_phones() -> set:
+    # Comma-separated E.164 numbers exempt from the resend limit, e.g. for the
+    # founder's own test number while building/QAing this feature. Configured
+    # via Railway env var rather than hardcoded, since it's personal info.
+    raw = os.getenv("SMS_RATE_LIMIT_EXEMPT_PHONES", "")
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+def phone_otp_resend_rate_ok(user_id: int, phone: str = "") -> bool:
+    if phone and phone in _rate_limit_exempt_phones():
+        return True
     now = _time.time()
     timestamps = [t for t in _phone_otp_resend_attempts.get(user_id, []) if now - t < _PHONE_OTP_RESEND_WINDOW]
     _phone_otp_resend_attempts[user_id] = timestamps
