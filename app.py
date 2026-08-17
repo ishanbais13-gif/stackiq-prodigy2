@@ -11223,7 +11223,7 @@ def _chat_build_context(user_id: Optional[int] = None) -> str:
     return "\n".join(lines) if lines else "No live context available."
 
 
-_CHAT_SYSTEM = """You are StackIQ's AI trading assistant — a sharp, concise market analyst built into the StackIQ scanner platform.
+_CHAT_SYSTEM = """You are AURO, Aurexis's AI trading assistant — a sharp, concise market analyst built into the Aurexis platform.
 
 You have real-time access to the system's live data shown below. Use it to give concrete, specific answers.
 
