@@ -1910,26 +1910,35 @@ def _news_and_sentiment(symbol: str, *, allow_llm: bool = True) -> Dict[str, Any
 
 
 def _deterministic_metrics_explainer(
-    *, technicals: Dict[str, Any], ai_score: Optional[float], execution_score: Optional[float]
-) -> str:
+    *, technicals: Dict[str, Any], ai_score: Optional[float], execution_score: Optional[float], trade_plan: Optional[Dict[str, Any]] = None
+) -> Dict[str, str]:
     """Non-LLM fallback for the Advanced Metrics explainer -- used when allow_llm
     is False or the LLM call/parse fails, same role the hardcoded `why`/`confirms`/
-    `breaks` fallbacks above already play for those fields."""
+    `breaks` fallbacks above already play for those fields. Returns the same
+    interpretation/next_steps split the LLM path produces so the frontend never
+    has to special-case which path generated the text."""
     t = technicals or {}
     scores = {k: _safe_f(t.get(k), 50.0) or 50.0 for k in ("momentum", "trend", "volatility", "liquidity", "risk")}
     strong = [k for k, v in scores.items() if v >= 70]
     weak = [k for k, v in scores.items() if v <= 39]
     ai_txt = f"{int(round(ai_score))}/100" if ai_score is not None else "unavailable"
     exec_txt = f"{int(round(execution_score))}/100" if execution_score is not None else "unavailable"
-    parts = [f"AI Score is {ai_txt} and Execution/Confidence is {exec_txt} for this setup."]
+
+    interp_parts = [f"AI Score is {ai_txt} and Execution/Confidence is {exec_txt} for this setup."]
     if strong:
-        parts.append(f"{', '.join(strong)} score{'s are' if len(strong) > 1 else ' is'} notably strong, supporting the setup.")
+        interp_parts.append(f"{', '.join(strong)} score{'s are' if len(strong) > 1 else ' is'} notably strong, supporting the setup.")
     if weak:
-        parts.append(f"{', '.join(weak)} score{'s are' if len(weak) > 1 else ' is'} weak and worth watching closely.")
+        interp_parts.append(f"{', '.join(weak)} score{'s are' if len(weak) > 1 else ' is'} weak and worth watching closely.")
     if not strong and not weak:
-        parts.append("Technical scores are mixed with no single standout factor.")
-    parts.append("Watch the entry window closely and respect the plan's stop level -- a close beyond it invalidates the setup.")
-    return " ".join(parts)
+        interp_parts.append("Technical scores are mixed with no single standout factor.")
+
+    stop = _safe_f((trade_plan or {}).get("stop"))
+    next_steps = (
+        f"Watch price action closely and respect the stop at ${stop:.2f} -- a close beyond it invalidates the setup."
+        if stop is not None
+        else "Watch the entry window closely and respect the plan's stop level -- a close beyond it invalidates the setup."
+    )
+    return {"interpretation": " ".join(interp_parts), "next_steps": next_steps}
 
 
 def _trade_reasoning(
@@ -1944,11 +1953,11 @@ def _trade_reasoning(
 ) -> Dict[str, Any]:
     sym = str(symbol or "").strip().upper()
     if not sym:
-        return {"why": [], "confirms": [], "breaks": [], "metrics_explainer": ""}
+        return {"why": [], "confirms": [], "breaks": [], "metrics_interpretation": "", "metrics_next_steps": ""}
 
     ck = _cache_key("reasoning", sym)
     cached = _REASONING_CACHE.get(ck)
-    if isinstance(cached, dict) and isinstance(cached.get("why"), list) and isinstance(cached.get("metrics_explainer"), str):
+    if isinstance(cached, dict) and isinstance(cached.get("why"), list) and isinstance(cached.get("metrics_next_steps"), str):
         return cached
 
     mom = _safe_f((technicals or {}).get("momentum"), 50.0) or 50.0
@@ -1962,12 +1971,16 @@ def _trade_reasoning(
     ]
     confirms = ["VWAP reclaim and hold", "Volume expansion", "Break of prior high"]
     breaks = ["Loss of VWAP", "Failed breakout", "Sector weakness"]
-    metrics_explainer_fallback = _deterministic_metrics_explainer(
-        technicals=technicals, ai_score=ai_score, execution_score=execution_score
+    metrics_fallback = _deterministic_metrics_explainer(
+        technicals=technicals, ai_score=ai_score, execution_score=execution_score, trade_plan=trade_plan
     )
 
     if not allow_llm:
-        out = {"why": why[:3], "confirms": confirms[:3], "breaks": breaks[:3], "metrics_explainer": metrics_explainer_fallback}
+        out = {
+            "why": why[:3], "confirms": confirms[:3], "breaks": breaks[:3],
+            "metrics_interpretation": metrics_fallback["interpretation"],
+            "metrics_next_steps": metrics_fallback["next_steps"],
+        }
         _REASONING_CACHE.set(ck, out)
         return out
 
@@ -1977,18 +1990,21 @@ def _trade_reasoning(
         system = (
             "You are a trade reasoning engine. Return ONLY valid JSON with keys: "
             "why (array of strings), confirms (array of strings), breaks (array of strings), "
-            "metrics_explainer (string). "
+            "metrics_interpretation (string), metrics_next_steps (string). "
             "Rules for why/confirms/breaks: 2-4 items per array, concise, grounded strictly in "
-            "provided inputs. Rules for metrics_explainer: 3-5 plain-language sentences covering "
-            "(1) what the ai_score and execution_score numbers indicate for this specific pick, "
-            "(2) which of the momentum/trend/volatility/liquidity/risk technical scores are "
-            "notably strong (>=70) or weak (<=39) and why that matters -- IMPORTANT: all five of "
-            "these scores share one uniform 0-100 scale where higher always means stronger/better "
-            "regardless of the metric's name, including risk (a high risk score is favorable here, "
-            "NOT a warning -- do not interpret it as real-world risk level), "
-            "(3) a concrete next step -- "
-            "what to watch for, when the entry window matters most, or what would invalidate the "
-            "setup. Grounded strictly in the provided numbers, no speculation beyond them."
+            "provided inputs. "
+            "Rules for metrics_interpretation: exactly 1-2 plain-language sentences covering what "
+            "the ai_score and execution_score numbers indicate for this specific pick, and which "
+            "of the momentum/trend/volatility/liquidity/risk technical scores are notably strong "
+            "(>=70) or weak (<=39) -- IMPORTANT: all five of these scores share one uniform 0-100 "
+            "scale where higher always means stronger/better regardless of the metric's name, "
+            "including risk (a high risk score is favorable here, NOT a warning -- do not "
+            "interpret it as real-world risk level). "
+            "Rules for metrics_next_steps: a SEPARATE, short, concrete action distinct from "
+            "metrics_interpretation -- what to watch for, when the entry window matters most, or "
+            "the specific price level that would invalidate the setup. This must stand on its own "
+            "as a scannable takeaway, not a continuation of metrics_interpretation's sentences. "
+            "Both fields grounded strictly in the provided numbers, no speculation beyond them."
         )
         user = json.dumps(
             {
@@ -2011,20 +2027,27 @@ def _trade_reasoning(
             wy2 = [str(x).strip() for x in wy if str(x or "").strip()][:4]
             cf2 = [str(x).strip() for x in cf if str(x or "").strip()][:4]
             br2 = [str(x).strip() for x in br if str(x or "").strip()][:4]
-            me = data.get("metrics_explainer")
-            me2 = str(me).strip()[:900] if isinstance(me, str) and str(me).strip() else metrics_explainer_fallback
+            mi = data.get("metrics_interpretation")
+            ns = data.get("metrics_next_steps")
+            mi2 = str(mi).strip()[:600] if isinstance(mi, str) and str(mi).strip() else metrics_fallback["interpretation"]
+            ns2 = str(ns).strip()[:400] if isinstance(ns, str) and str(ns).strip() else metrics_fallback["next_steps"]
             out = {
                 "why": wy2 or why[:3],
                 "confirms": cf2 or confirms[:3],
                 "breaks": br2 or breaks[:3],
-                "metrics_explainer": me2,
+                "metrics_interpretation": mi2,
+                "metrics_next_steps": ns2,
             }
             _REASONING_CACHE.set(ck, out)
             return out
     except Exception:
         pass
 
-    out = {"why": why[:3], "confirms": confirms[:3], "breaks": breaks[:3], "metrics_explainer": metrics_explainer_fallback}
+    out = {
+        "why": why[:3], "confirms": confirms[:3], "breaks": breaks[:3],
+        "metrics_interpretation": metrics_fallback["interpretation"],
+        "metrics_next_steps": metrics_fallback["next_steps"],
+    }
     _REASONING_CACHE.set(ck, out)
     return out
 
@@ -4406,7 +4429,7 @@ def _empty_analyze_response(symbol: str, status: str) -> Dict[str, Any]:
             "headline_items": [],
         },
         "social_sentiment": {"status": "unavailable"},
-        "reasoning": {"why": [], "confirms": [], "breaks": [], "metrics_explainer": ""},
+        "reasoning": {"why": [], "confirms": [], "breaks": [], "metrics_interpretation": "", "metrics_next_steps": ""},
         "market_data": {"last_price": None, "source": "alpaca"},
     }
 
@@ -4885,7 +4908,7 @@ async def analyze(
         execution_score=execution_score_0_100,
     )
     if not isinstance(reasoning, dict):
-        reasoning = {"why": [], "confirms": [], "breaks": [], "metrics_explainer": ""}
+        reasoning = {"why": [], "confirms": [], "breaks": [], "metrics_interpretation": "", "metrics_next_steps": ""}
 
     technicals = {
         "symbol": sym,
@@ -5059,7 +5082,8 @@ async def analyze(
             "why": reasoning.get("why") if isinstance(reasoning.get("why"), list) else [],
             "confirms": reasoning.get("confirms") if isinstance(reasoning.get("confirms"), list) else [],
             "breaks": reasoning.get("breaks") if isinstance(reasoning.get("breaks"), list) else [],
-            "metrics_explainer": str(reasoning.get("metrics_explainer") or ""),
+            "metrics_interpretation": str(reasoning.get("metrics_interpretation") or ""),
+            "metrics_next_steps": str(reasoning.get("metrics_next_steps") or ""),
         },
         "market_data": market_data,
         "market_cap": market_cap,
@@ -5140,7 +5164,7 @@ async def analyze(
     if not isinstance(out.get("news"), dict):
         out["news"] = {"headlines": [], "sentiment": "Neutral", "items": [], "source": "unavailable"}
     if not isinstance(out.get("reasoning"), dict):
-        out["reasoning"] = {"why": [], "confirms": [], "breaks": [], "metrics_explainer": ""}
+        out["reasoning"] = {"why": [], "confirms": [], "breaks": [], "metrics_interpretation": "", "metrics_next_steps": ""}
     if not isinstance(out.get("market_data"), dict):
         out["market_data"] = {"last_price": (float(_round_px(current_px)) if current_px is not None else None), "source": "alpaca"}
 
