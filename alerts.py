@@ -1,12 +1,9 @@
 """
-alerts.py — New-pick and outcome alerts via email (SendGrid) and SMS (Twilio).
+alerts.py — New-pick and outcome alerts via email (SendGrid).
 
 Environment variables needed:
   SENDGRID_API_KEY       — already set (shared with auth.py)
   ALERT_FROM_EMAIL       — already set (shared with auth.py)
-  TWILIO_ACCOUNT_SID     — Twilio Account SID
-  TWILIO_AUTH_TOKEN      — Twilio Auth Token
-  TWILIO_FROM_NUMBER     — Twilio "From" number, E.164 format (e.g. +15551234567)
 """
 
 from __future__ import annotations
@@ -18,7 +15,6 @@ import sqlite3
 import threading
 import urllib.request as _ur
 import urllib.error
-import urllib.parse
 from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("stackiq")
@@ -32,44 +28,31 @@ def _sg_key() -> str:
     return os.getenv("SENDGRID_API_KEY", "")
 
 
-def _twilio_creds():
-    return (
-        os.getenv("TWILIO_ACCOUNT_SID", ""),
-        os.getenv("TWILIO_AUTH_TOKEN", ""),
-        os.getenv("TWILIO_FROM_NUMBER", ""),
-    )
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # DB migration — add alert columns to existing users table
 # ─────────────────────────────────────────────────────────────────────────────
 
 def migrate_alerts_columns() -> None:
-    """Non-destructive migration — safe to call on every startup."""
+    """Non-destructive migration — safe to call on every startup.
+
+    Note: `phone` and `alerts_channel` columns, the `phone_verified` column,
+    and the `phone_otp_tokens` table (from a since-removed SMS alerts
+    feature) are intentionally left alone here rather than dropped --
+    they're unused now but harmless, and a destructive migration isn't
+    worth the risk. Nothing in this module reads or writes them anymore.
+    """
     try:
         conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
         for col, defn in [
             ("phone",            "TEXT"),
-            ("phone_verified",   "INTEGER NOT NULL DEFAULT 0"),
             ("alerts_new_pick",  "INTEGER NOT NULL DEFAULT 1"),
             ("alerts_outcome",   "INTEGER NOT NULL DEFAULT 1"),
-            ("alerts_channel",   "TEXT NOT NULL DEFAULT 'email'"),  # email | sms | both
+            ("alerts_channel",   "TEXT NOT NULL DEFAULT 'email'"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
             except Exception:
                 pass
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS phone_otp_tokens (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id    INTEGER NOT NULL,
-                phone      TEXT    NOT NULL,
-                code       TEXT    NOT NULL,
-                expires_at TEXT    NOT NULL,
-                used       INTEGER NOT NULL DEFAULT 0,
-                attempts   INTEGER NOT NULL DEFAULT 0
-            )
-        """)
         conn.commit()
         conn.close()
     except Exception as e:
@@ -84,16 +67,15 @@ migrate_alerts_columns()
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_opted_in_users(alert_col: str) -> List[Dict[str, Any]]:
-    """Return every user opted in to the given alert column, across all plans.
-    Callers apply their own per-channel gating: email stays paid-only (unchanged),
-    SMS is open to all opted-in + phone-verified users with plan-based content,
-    mirroring push.py's paid-vs-teaser pattern."""
+    """Return active paid users who opted in to the given alert column. Free users never get alerts."""
     try:
         conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            f"SELECT email, first_name, phone, phone_verified, alerts_channel, plan, subscription_status "
-            f"FROM users WHERE {alert_col} = 1"
+            f"SELECT email, first_name FROM users "
+            f"WHERE {alert_col} = 1 "
+            f"AND LOWER(plan) IN ('starter', 'pro', 'elite') "
+            f"AND LOWER(subscription_status) = 'active'"
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -138,160 +120,6 @@ def _send_email(to_email: str, subject: str, html: str) -> bool:
     except Exception as e:
         log.error("alerts.email: unexpected error sending to %s — %s", to_email, e)
         return False
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Low-level SMS/WhatsApp sender (Twilio)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _twilio_send(to_phone: str, body: str) -> Tuple[bool, str]:
-    """Returns (ok, error_message). error_message is human-readable and safe
-    to show a user (Twilio's own message text, or a short local description)."""
-    account_sid, auth_token, from_number = _twilio_creds()
-    if not (account_sid and auth_token and from_number):
-        log.warning("alerts.sms: Twilio creds not set — cannot send SMS to %s", to_phone)
-        return False, "SMS is not configured."
-    if not to_phone or not to_phone.startswith("+"):
-        log.warning("alerts.sms: invalid phone number %r", to_phone)
-        return False, "Invalid phone number."
-    try:
-        import base64
-        url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
-        payload = urllib.parse.urlencode({"To": to_phone, "From": from_number, "Body": body}).encode("utf-8")
-        basic_auth = base64.b64encode(f"{account_sid}:{auth_token}".encode("utf-8")).decode("ascii")
-        req = _ur.Request(
-            url,
-            data=payload,
-            headers={
-                "Authorization": f"Basic {basic_auth}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            method="POST",
-        )
-        with _ur.urlopen(req, timeout=10) as resp:
-            resp_body = json.loads(resp.read().decode("utf-8", errors="replace"))
-            msg_sid = resp_body.get("sid", "")
-            log.info("alerts.sms: sent to %s (HTTP %s, sid=%s)", to_phone, resp.status, msg_sid)
-            ok = resp.status in (200, 201) and bool(msg_sid)
-            return ok, "" if ok else "Twilio did not confirm delivery."
-    except urllib.error.HTTPError as e:
-        err_body = ""
-        try:
-            err_body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        log.error("alerts.sms: HTTP %s sending to %s — %s", e.code, to_phone, err_body)
-        msg = "Couldn't send — check the number and try again."
-        try:
-            msg = json.loads(err_body).get("message") or msg
-        except Exception:
-            pass
-        return False, msg
-    except Exception as e:
-        log.error("alerts.sms: unexpected error sending to %s — %s", to_phone, e)
-        return False, "Couldn't send — try again."
-
-
-def _send_sms(to_phone: str, body: str) -> bool:
-    return _twilio_send(to_phone, body)[0]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phone verification (OTP over SMS) — mirrors auth.py's email OTP pattern
-# ─────────────────────────────────────────────────────────────────────────────
-
-import hmac as _hmac
-import secrets as _secrets
-import time as _time
-from datetime import datetime, timedelta, timezone
-
-_PHONE_OTP_EXPIRE_MINUTES = 10
-_PHONE_OTP_MAX_ATTEMPTS   = 10
-
-_phone_otp_resend_attempts: dict[int, list[float]] = {}  # user_id → list of epoch timestamps
-_PHONE_OTP_RESEND_MAX    = 5
-_PHONE_OTP_RESEND_WINDOW = 600  # 10 minutes
-
-
-def _rate_limit_exempt_phones() -> set:
-    # Comma-separated E.164 numbers exempt from the resend limit, e.g. for the
-    # founder's own test number while building/QAing this feature. Configured
-    # via Railway env var rather than hardcoded, since it's personal info.
-    raw = os.getenv("SMS_RATE_LIMIT_EXEMPT_PHONES", "")
-    return {p.strip() for p in raw.split(",") if p.strip()}
-
-
-def phone_otp_resend_rate_ok(user_id: int, phone: str = "") -> bool:
-    if phone and phone in _rate_limit_exempt_phones():
-        return True
-    now = _time.time()
-    timestamps = [t for t in _phone_otp_resend_attempts.get(user_id, []) if now - t < _PHONE_OTP_RESEND_WINDOW]
-    _phone_otp_resend_attempts[user_id] = timestamps
-    if len(timestamps) >= _PHONE_OTP_RESEND_MAX:
-        return False
-    _phone_otp_resend_attempts[user_id].append(now)
-    return True
-
-
-def _generate_phone_otp(user_id: int, phone: str) -> str:
-    code = f"{_secrets.randbelow(1_000_000):06d}"
-    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=_PHONE_OTP_EXPIRE_MINUTES)).isoformat()
-    conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
-    try:
-        # Invalidate any previous unused codes for this user
-        conn.execute("UPDATE phone_otp_tokens SET used = 1 WHERE user_id = ? AND used = 0", (user_id,))
-        conn.execute(
-            "INSERT INTO phone_otp_tokens (user_id, phone, code, expires_at) VALUES (?, ?, ?, ?)",
-            (user_id, phone, code, expires_at),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-    return code
-
-
-def verify_phone_otp(user_id: int, phone: str, code: str) -> bool:
-    conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        active = conn.execute(
-            "SELECT id, phone, code, expires_at, attempts FROM phone_otp_tokens "
-            "WHERE user_id = ? AND used = 0 ORDER BY id DESC LIMIT 1",
-            (user_id,),
-        ).fetchone()
-        if not active:
-            return False
-        if datetime.fromisoformat(active["expires_at"]) < datetime.now(timezone.utc):
-            conn.execute("UPDATE phone_otp_tokens SET used = 1 WHERE id = ?", (active["id"],))
-            conn.commit()
-            return False
-        attempts = int(active["attempts"] or 0)
-        if attempts >= _PHONE_OTP_MAX_ATTEMPTS:
-            conn.execute("UPDATE phone_otp_tokens SET used = 1 WHERE id = ?", (active["id"],))
-            conn.commit()
-            return False
-        # The code must match AND still be for the phone number currently on file --
-        # guards against a stale code confirming a number the user has since changed.
-        if not _hmac.compare_digest(str(active["code"]), str(code)) or active["phone"] != phone:
-            conn.execute("UPDATE phone_otp_tokens SET attempts = attempts + 1 WHERE id = ?", (active["id"],))
-            conn.commit()
-            return False
-        conn.execute("UPDATE phone_otp_tokens SET used = 1 WHERE id = ?", (active["id"],))
-        conn.execute("UPDATE users SET phone_verified = 1 WHERE id = ?", (user_id,))
-        conn.commit()
-    finally:
-        conn.close()
-    return True
-
-
-def send_phone_otp(user_id: int, phone: str) -> Tuple[bool, str]:
-    """Synchronous, unlike the broadcast alert senders -- this is a single
-    user-initiated send, and the caller needs the real Twilio outcome to
-    show a useful error (invalid number, unverified trial number, etc.)
-    instead of always claiming success."""
-    code = _generate_phone_otp(user_id, phone)
-    body = f"{code} is your Aurexis verification code. Expires in {_PHONE_OTP_EXPIRE_MINUTES} minutes."
-    return _twilio_send(phone, body)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -444,35 +272,6 @@ def _outcome_html(symbol: str, status: str, return_pct: Optional[float],
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SMS body builders
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _new_pick_sms(symbol: str, decision: str, score: float,
-                  entry: Optional[float], stop: Optional[float],
-                  target: Optional[float]) -> str:
-    score_int = int(round(score * 10)) if score <= 10 else int(round(score))
-    dec_short = "HIGH CONVICTION" if "HIGH" in decision else "LOW CONVICTION"
-    parts = [f"Aurexis Pick: ${symbol} — {dec_short} (Score {score_int}/100)"]
-    if entry:  parts.append(f"Entry ${entry:.2f}")
-    if stop:   parts.append(f"Stop ${stop:.2f}")
-    if target: parts.append(f"Target ${target:.2f}")
-    parts.append(_FRONTEND_URL)
-    return "\n".join(parts)
-
-
-def _new_pick_sms_teaser() -> str:
-    # Copy matches push.py's free-tier teaser wording, kept consistent across channels.
-    return f"New pick just dropped \U0001F512 You've used your free pick for this month — upgrade to see it.\n{_FRONTEND_URL}"
-
-
-def _outcome_sms(symbol: str, status: str, return_pct: Optional[float]) -> str:
-    is_win, _, result = _outcome_labels(status)
-    icon    = "✅" if is_win else "❌"
-    ret_str = f" {'+' if (return_pct or 0) >= 0 else ''}{return_pct:.1f}%" if return_pct is not None else ""
-    return f"{icon} Aurexis — ${symbol} {result}{ret_str}\n{_FRONTEND_URL}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Public: fire new-pick alert (background)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -507,28 +306,12 @@ def _fire_new_pick(pick: Dict[str, Any]) -> None:
     log.info(f"alerts.new_pick: {symbol} → {len(users)} opted-in users")
 
     for u in users:
-        channel        = str(u.get("alerts_channel") or "email").lower()
-        name           = str(u.get("first_name") or "")
-        email          = str(u.get("email") or "")
-        phone          = str(u.get("phone") or "")
-        phone_verified = bool(u.get("phone_verified"))
-        plan           = str(u.get("plan") or "free").lower()
-        sub_status     = str(u.get("subscription_status") or "").lower()
-        is_paid        = plan in ("starter", "pro", "elite") and sub_status == "active"
-
-        # Email stays paid-only (unchanged behavior).
-        if channel in ("email", "both") and email and is_paid:
-            html = _new_pick_html(symbol, decision, score, entry, stop, target, signals, name)
-            _send_email(email, f"Aurexis Pick: ${symbol} — {decision.replace('_', ' ').title()}", html)
-
-        # SMS is open to every plan (matches push.py): paid gets the real pick,
-        # free gets a teaser deep-linking to upgrade. Requires a verified number.
-        if channel in ("sms", "both") and phone and phone_verified:
-            body = (
-                _new_pick_sms(symbol, decision, score, entry, stop, target)
-                if is_paid else _new_pick_sms_teaser()
-            )
-            _send_sms(phone, body)
+        name  = str(u.get("first_name") or "")
+        email = str(u.get("email") or "")
+        if not email:
+            continue
+        html = _new_pick_html(symbol, decision, score, entry, stop, target, signals, name)
+        _send_email(email, f"Aurexis Pick: ${symbol} — {decision.replace('_', ' ').title()}", html)
 
 
 def send_new_pick_alert_bg(pick: Dict[str, Any]) -> None:
@@ -549,32 +332,17 @@ def _fire_outcome(symbol: str, status: str, return_pct: Optional[float],
     log.info(f"alerts.outcome: {symbol} {status} → {len(users)} opted-in users")
 
     for u in users:
-        channel        = str(u.get("alerts_channel") or "email").lower()
-        name           = str(u.get("first_name") or "")
-        email          = str(u.get("email") or "")
-        phone          = str(u.get("phone") or "")
-        phone_verified = bool(u.get("phone_verified"))
-        plan           = str(u.get("plan") or "free").lower()
-        sub_status     = str(u.get("subscription_status") or "").lower()
-        is_paid        = plan in ("starter", "pro", "elite") and sub_status == "active"
+        name  = str(u.get("first_name") or "")
+        email = str(u.get("email") or "")
+        if not email:
+            continue
 
         _, headline_text, _ = _outcome_labels(status)
         ret_suffix = f" {'+' if return_pct >= 0 else ''}{return_pct:.1f}%" if return_pct is not None else ""
         subject = f"${symbol} {headline_text}{ret_suffix}"
 
-        # Outcome alerts stay paid-only on every channel -- a free user was never
-        # shown the original pick, so there's nothing to report an outcome on
-        # (push.py has no free-tier teaser for outcomes either; nothing to mirror).
-        if not is_paid:
-            continue
-
-        if channel in ("email", "both") and email:
-            html = _outcome_html(symbol, status, return_pct, entry, name)
-            _send_email(email, f"Aurexis — {subject}", html)
-
-        if channel in ("sms", "both") and phone and phone_verified:
-            body = _outcome_sms(symbol, status, return_pct)
-            _send_sms(phone, body)
+        html = _outcome_html(symbol, status, return_pct, entry, name)
+        _send_email(email, f"Aurexis — {subject}", html)
 
 
 def send_outcome_alert_bg(symbol: str, status: str,
@@ -589,31 +357,6 @@ def send_outcome_alert_bg(symbol: str, status: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phone sanitization (E.164)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def sanitize_phone(raw: Optional[str]) -> Optional[str]:
-    """Normalize user input into E.164. Goes purely by digit count, not
-    whether the user typed a leading '+' -- a stray '+' in front of a bare
-    10-digit US number (e.g. a stale value carried over from a prior save)
-    must still get the '1' country code, or Twilio rejects it as invalid
-    (error 21211: a 10-digit number with '+' looks like a bad international
-    number, not a US one missing its country code)."""
-    if not raw:
-        return None
-    raw = raw.strip()
-    import re
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) == 10:
-        cleaned = "+1" + digits
-    elif len(digits) == 11 and digits.startswith("1"):
-        cleaned = "+" + digits
-    else:
-        cleaned = "+" + digits
-    return cleaned if len(cleaned) >= 8 else None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Public: get / save user alert preferences
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -622,50 +365,28 @@ def get_alert_prefs(user_id: int) -> Dict[str, Any]:
         conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT phone, phone_verified, alerts_new_pick, alerts_outcome, alerts_channel FROM users WHERE id=?",
+            "SELECT alerts_new_pick, alerts_outcome FROM users WHERE id=?",
             (user_id,)
         ).fetchone()
         conn.close()
         if not row:
-            return {"phone": None, "phone_verified": False, "alerts_new_pick": True, "alerts_outcome": True, "alerts_channel": "email"}
+            return {"alerts_new_pick": True, "alerts_outcome": True}
         return {
-            "phone":           row["phone"],
-            "phone_verified":  bool(row["phone_verified"]),
             "alerts_new_pick": bool(row["alerts_new_pick"]),
             "alerts_outcome":  bool(row["alerts_outcome"]),
-            "alerts_channel":  row["alerts_channel"] or "email",
         }
     except Exception as e:
         log.warning(f"alerts.get_prefs: {e}")
-        return {"phone": None, "phone_verified": False, "alerts_new_pick": True, "alerts_outcome": True, "alerts_channel": "email"}
+        return {"alerts_new_pick": True, "alerts_outcome": True}
 
 
-def save_alert_prefs(user_id: int, phone: Optional[str],
-                     alerts_new_pick: bool, alerts_outcome: bool,
-                     alerts_channel: str) -> bool:
-    channel = alerts_channel.lower() if alerts_channel.lower() in ("email", "sms", "both") else "email"
-    phone = sanitize_phone(phone)
+def save_alert_prefs(user_id: int, alerts_new_pick: bool, alerts_outcome: bool) -> bool:
     try:
         conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        # Changing (or clearing) the phone number invalidates any prior verification --
-        # a new/different number must go through send-code/verify-code again.
-        current = conn.execute("SELECT phone FROM users WHERE id=?", (user_id,)).fetchone()
-        phone_changed = not current or current["phone"] != phone
-        if phone_changed:
-            conn.execute(
-                """UPDATE users
-                   SET phone=?, phone_verified=0, alerts_new_pick=?, alerts_outcome=?, alerts_channel=?
-                   WHERE id=?""",
-                (phone, int(alerts_new_pick), int(alerts_outcome), channel, user_id)
-            )
-        else:
-            conn.execute(
-                """UPDATE users
-                   SET alerts_new_pick=?, alerts_outcome=?, alerts_channel=?
-                   WHERE id=?""",
-                (int(alerts_new_pick), int(alerts_outcome), channel, user_id)
-            )
+        conn.execute(
+            "UPDATE users SET alerts_new_pick=?, alerts_outcome=? WHERE id=?",
+            (int(alerts_new_pick), int(alerts_outcome), user_id)
+        )
         conn.commit()
         conn.close()
         return True

@@ -10796,10 +10796,8 @@ async def get_alerts_prefs(request: Request, _user=Depends(_get_current_user)):
 
 
 class _AlertPrefsBody(BaseModel):
-    phone:            Optional[str]  = None
-    alerts_new_pick:  bool           = True
-    alerts_outcome:   bool           = True
-    alerts_channel:   str            = "email"
+    alerts_new_pick:  bool = True
+    alerts_outcome:   bool = True
 
 
 @app.post("/alerts/preferences", include_in_schema=True)
@@ -10809,66 +10807,10 @@ async def save_alerts_prefs(body: _AlertPrefsBody, _user=Depends(_get_current_us
         from alerts import save_alert_prefs
         ok = save_alert_prefs(
             user_id         = _user["id"],
-            phone           = body.phone,
             alerts_new_pick = body.alerts_new_pick,
             alerts_outcome  = body.alerts_outcome,
-            alerts_channel  = body.alerts_channel,
         )
         return JSONResponse({"ok": ok})
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
-
-class _PhoneSendCodeBody(BaseModel):
-    phone: str
-
-
-@app.post("/alerts/phone/send-code", include_in_schema=True)
-async def send_phone_verification_code(body: _PhoneSendCodeBody, _user=Depends(_get_current_user)):
-    """Sanitise + save the phone number as unverified, then text a 6-digit code to it."""
-    try:
-        from alerts import send_phone_otp, phone_otp_resend_rate_ok, save_alert_prefs, get_alert_prefs, sanitize_phone
-
-        phone = sanitize_phone(body.phone)
-        if not phone or len(phone) < 8:
-            return JSONResponse({"ok": False, "error": "Enter a valid phone number."}, status_code=400)
-
-        if not phone_otp_resend_rate_ok(_user["id"], phone):
-            return JSONResponse({"ok": False, "error": "Too many codes requested. Try again in a few minutes."}, status_code=429)
-
-        prefs = get_alert_prefs(_user["id"])
-        save_alert_prefs(
-            user_id         = _user["id"],
-            phone           = phone,
-            alerts_new_pick = prefs["alerts_new_pick"],
-            alerts_outcome  = prefs["alerts_outcome"],
-            alerts_channel  = prefs["alerts_channel"],
-        )
-        sent, err = send_phone_otp(_user["id"], phone)
-        if not sent:
-            return JSONResponse({"ok": False, "error": err or "Couldn't send code."}, status_code=502)
-        return JSONResponse({"ok": True, "phone": phone})
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-
-
-class _PhoneVerifyCodeBody(BaseModel):
-    code: str
-
-
-@app.post("/alerts/phone/verify-code", include_in_schema=True)
-async def verify_phone_verification_code(body: _PhoneVerifyCodeBody, _user=Depends(_get_current_user)):
-    """Confirm the 6-digit code sent to the phone number currently on file."""
-    try:
-        from alerts import verify_phone_otp, get_alert_prefs
-        prefs = get_alert_prefs(_user["id"])
-        phone = prefs.get("phone")
-        if not phone:
-            return JSONResponse({"ok": False, "error": "No phone number on file. Request a code first."}, status_code=400)
-        ok = verify_phone_otp(_user["id"], phone, (body.code or "").strip())
-        if not ok:
-            return JSONResponse({"ok": False, "error": "Incorrect or expired code."}, status_code=400)
-        return JSONResponse({"ok": True, "phone_verified": True})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
