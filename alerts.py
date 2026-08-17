@@ -593,17 +593,18 @@ def send_outcome_alert_bg(symbol: str, status: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def sanitize_phone(raw: Optional[str]) -> Optional[str]:
-    """Normalize user input into E.164. A bare 10-digit number (no + given)
-    is assumed US/Canada and gets a '1' country code prepended -- Twilio
-    rejects anything else as an invalid 'To' number (error 21211)."""
+    """Normalize user input into E.164. Goes purely by digit count, not
+    whether the user typed a leading '+' -- a stray '+' in front of a bare
+    10-digit US number (e.g. a stale value carried over from a prior save)
+    must still get the '1' country code, or Twilio rejects it as invalid
+    (error 21211: a 10-digit number with '+' looks like a bad international
+    number, not a US one missing its country code)."""
     if not raw:
         return None
     raw = raw.strip()
     import re
     digits = re.sub(r"\D", "", raw)
-    if raw.startswith("+"):
-        cleaned = "+" + digits
-    elif len(digits) == 10:
+    if len(digits) == 10:
         cleaned = "+1" + digits
     elif len(digits) == 11 and digits.startswith("1"):
         cleaned = "+" + digits
