@@ -144,14 +144,16 @@ def _send_email(to_email: str, subject: str, html: str) -> bool:
 # Low-level SMS/WhatsApp sender (Twilio)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _send_sms(to_phone: str, body: str) -> bool:
+def _twilio_send(to_phone: str, body: str) -> Tuple[bool, str]:
+    """Returns (ok, error_message). error_message is human-readable and safe
+    to show a user (Twilio's own message text, or a short local description)."""
     account_sid, auth_token, from_number = _twilio_creds()
     if not (account_sid and auth_token and from_number):
         log.warning("alerts.sms: Twilio creds not set — cannot send SMS to %s", to_phone)
-        return False
+        return False, "SMS is not configured."
     if not to_phone or not to_phone.startswith("+"):
         log.warning("alerts.sms: invalid phone number %r", to_phone)
-        return False
+        return False, "Invalid phone number."
     try:
         import base64
         url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
@@ -170,7 +172,8 @@ def _send_sms(to_phone: str, body: str) -> bool:
             resp_body = json.loads(resp.read().decode("utf-8", errors="replace"))
             msg_sid = resp_body.get("sid", "")
             log.info("alerts.sms: sent to %s (HTTP %s, sid=%s)", to_phone, resp.status, msg_sid)
-            return resp.status in (200, 201) and bool(msg_sid)
+            ok = resp.status in (200, 201) and bool(msg_sid)
+            return ok, "" if ok else "Twilio did not confirm delivery."
     except urllib.error.HTTPError as e:
         err_body = ""
         try:
@@ -178,10 +181,19 @@ def _send_sms(to_phone: str, body: str) -> bool:
         except Exception:
             pass
         log.error("alerts.sms: HTTP %s sending to %s — %s", e.code, to_phone, err_body)
-        return False
+        msg = "Couldn't send — check the number and try again."
+        try:
+            msg = json.loads(err_body).get("message") or msg
+        except Exception:
+            pass
+        return False, msg
     except Exception as e:
         log.error("alerts.sms: unexpected error sending to %s — %s", to_phone, e)
-        return False
+        return False, "Couldn't send — try again."
+
+
+def _send_sms(to_phone: str, body: str) -> bool:
+    return _twilio_send(to_phone, body)[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,10 +274,14 @@ def verify_phone_otp(user_id: int, phone: str, code: str) -> bool:
     return True
 
 
-def send_phone_otp_bg(user_id: int, phone: str) -> None:
+def send_phone_otp(user_id: int, phone: str) -> Tuple[bool, str]:
+    """Synchronous, unlike the broadcast alert senders -- this is a single
+    user-initiated send, and the caller needs the real Twilio outcome to
+    show a useful error (invalid number, unverified trial number, etc.)
+    instead of always claiming success."""
     code = _generate_phone_otp(user_id, phone)
     body = f"{code} is your Aurexis verification code. Expires in {_PHONE_OTP_EXPIRE_MINUTES} minutes."
-    threading.Thread(target=_send_sms, args=(phone, body), daemon=True).start()
+    return _twilio_send(phone, body)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -563,6 +579,30 @@ def send_outcome_alert_bg(symbol: str, status: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Phone sanitization (E.164)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def sanitize_phone(raw: Optional[str]) -> Optional[str]:
+    """Normalize user input into E.164. A bare 10-digit number (no + given)
+    is assumed US/Canada and gets a '1' country code prepended -- Twilio
+    rejects anything else as an invalid 'To' number (error 21211)."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    import re
+    digits = re.sub(r"\D", "", raw)
+    if raw.startswith("+"):
+        cleaned = "+" + digits
+    elif len(digits) == 10:
+        cleaned = "+1" + digits
+    elif len(digits) == 11 and digits.startswith("1"):
+        cleaned = "+" + digits
+    else:
+        cleaned = "+" + digits
+    return cleaned if len(cleaned) >= 8 else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public: get / save user alert preferences
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -593,16 +633,7 @@ def save_alert_prefs(user_id: int, phone: Optional[str],
                      alerts_new_pick: bool, alerts_outcome: bool,
                      alerts_channel: str) -> bool:
     channel = alerts_channel.lower() if alerts_channel.lower() in ("email", "sms", "both") else "email"
-    # Sanitise phone: must be E.164 or None
-    if phone:
-        phone = phone.strip()
-        if not phone.startswith("+"):
-            phone = "+" + phone
-        # strip everything except digits and leading +
-        import re
-        phone = re.sub(r"[^\d+]", "", phone)
-        if len(phone) < 7:
-            phone = None
+    phone = sanitize_phone(phone)
     try:
         conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row

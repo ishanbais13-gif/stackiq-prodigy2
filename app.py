@@ -10827,14 +10827,10 @@ class _PhoneSendCodeBody(BaseModel):
 async def send_phone_verification_code(body: _PhoneSendCodeBody, _user=Depends(_get_current_user)):
     """Sanitise + save the phone number as unverified, then text a 6-digit code to it."""
     try:
-        import re
-        from alerts import send_phone_otp_bg, phone_otp_resend_rate_ok, save_alert_prefs, get_alert_prefs
+        from alerts import send_phone_otp, phone_otp_resend_rate_ok, save_alert_prefs, get_alert_prefs, sanitize_phone
 
-        phone = (body.phone or "").strip()
-        if not phone.startswith("+"):
-            phone = "+" + phone
-        phone = re.sub(r"[^\d+]", "", phone)
-        if len(phone) < 7:
+        phone = sanitize_phone(body.phone)
+        if not phone or len(phone) < 8:
             return JSONResponse({"ok": False, "error": "Enter a valid phone number."}, status_code=400)
 
         if not phone_otp_resend_rate_ok(_user["id"]):
@@ -10848,7 +10844,9 @@ async def send_phone_verification_code(body: _PhoneSendCodeBody, _user=Depends(_
             alerts_outcome  = prefs["alerts_outcome"],
             alerts_channel  = prefs["alerts_channel"],
         )
-        send_phone_otp_bg(_user["id"], phone)
+        sent, err = send_phone_otp(_user["id"], phone)
+        if not sent:
+            return JSONResponse({"ok": False, "error": err or "Couldn't send code."}, status_code=502)
         return JSONResponse({"ok": True, "phone": phone})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
