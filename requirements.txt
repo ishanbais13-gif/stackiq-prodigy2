@@ -10,6 +10,7 @@ openai==1.61.0
 # Data + utilities (safe additions for Polygon + sentiment caching)
 pydantic==2.9.2
 httpx==0.27.2
+h2==4.1.0
 tenacity==9.0.0
 
 # Neural network scorer (pure numpy — lightweight, no framework needed)
@@ -76,3 +77,9 @@ stripe==10.12.0
 email-validator==2.2.0
 bcrypt==4.0.1
 boto3~=1.34.0
+# Apple's official server-side JWS verification library for StoreKit 2
+# in-app purchases (auth.py IAP section). Pulls in a newer `cryptography`
+# than was previously installed -- confirmed python-jose's HS256 usage
+# (the only algorithm this app signs its own JWTs with) doesn't touch the
+# cryptography backend at all, so the bump doesn't affect existing auth.
+app-store-server-library==3.1.2

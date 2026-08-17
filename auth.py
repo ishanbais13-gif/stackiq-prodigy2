@@ -51,6 +51,17 @@ try:
 except ImportError:
     _stripe = None  # type: ignore
 
+try:
+    from appstoreserverlibrary.signed_data_verifier import (
+        SignedDataVerifier as _SignedDataVerifier,
+        VerificationException as _AppleVerificationException,
+    )
+    from appstoreserverlibrary.models.Environment import Environment as _AppleEnvironment
+except ImportError:
+    _SignedDataVerifier = None  # type: ignore
+    _AppleVerificationException = Exception  # type: ignore
+    _AppleEnvironment = None  # type: ignore
+
 log = logging.getLogger("stackiq.auth")
 
 # ---------------------------------------------------------------------------
@@ -148,11 +159,22 @@ def init_auth_db() -> None:
             ("current_period_end",   "TEXT"),
             ("free_pick_month",      "TEXT"),
             ("session_id",           "TEXT"),
+            # Which system currently owns this user's subscription --
+            # "stripe" or "apple_iap" -- so the dual-billing guard (Phase 5)
+            # can refuse a second, conflicting source instead of letting a
+            # user end up billed on both.
+            ("billing_source",       "TEXT"),
+            # originalTransactionId groups every renewal/upgrade of one
+            # subscription in Apple's model -- stored so Server Notifications
+            # V2 (Phase 2) can resolve which user a notification is for
+            # without depending on Apple round-tripping our user_id back.
+            ("apple_original_transaction_id", "TEXT"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
             except Exception:
                 pass  # column already exists
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_apple_orig_txn ON users(apple_original_transaction_id)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS pick_usage (
                 user_id  INTEGER NOT NULL,
@@ -175,6 +197,18 @@ def init_auth_db() -> None:
             conn.execute("ALTER TABLE otp_tokens ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass
+        # One row per device (not bolted onto users like session_id) -- a
+        # user can have more than one iOS device registered for push at once.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS device_tokens (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER NOT NULL,
+                device_token  TEXT    NOT NULL UNIQUE,
+                platform      TEXT    NOT NULL DEFAULT 'ios',
+                created_at    TEXT    NOT NULL,
+                last_seen_at  TEXT    NOT NULL
+            )
+        """)
         conn.commit()
     log.info("auth.db initialised")
 
@@ -947,6 +981,53 @@ def disable_2fa(user: sqlite3.Row = Depends(get_current_user)):
 def logout(response: Response):
     """Clear the httpOnly session cookie."""
     response.delete_cookie(key="sq_token", path="/", httponly=True, secure=_IS_PROD, samesite="lax")
+    return {"ok": True}
+
+
+class _DeviceTokenBody(BaseModel):
+    device_token: str
+    platform: str = "ios"
+
+
+@auth_router.post("/device-token")
+def register_device_token(body: _DeviceTokenBody, user: sqlite3.Row = Depends(get_current_user)):
+    """
+    Register (or re-associate) an APNs device token for push notifications.
+    Open to every plan -- push eligibility isn't paid-gated, only the
+    notification *content* differs by plan (see push.py). A token is
+    UNIQUE, not per-user-unique: if the same device previously registered
+    under a different account (e.g. logout -> different login), this
+    re-points it at the current user rather than leaving a stale row.
+    """
+    token = body.device_token.strip()
+    if not token:
+        raise HTTPException(400, "device_token required")
+    now = datetime.now(timezone.utc).isoformat()
+    with _get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO device_tokens (user_id, device_token, platform, created_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(device_token) DO UPDATE SET
+                user_id = excluded.user_id,
+                platform = excluded.platform,
+                last_seen_at = excluded.last_seen_at
+            """,
+            (user["id"], token, body.platform, now, now),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@auth_router.delete("/device-token")
+def unregister_device_token(device_token: str, user: sqlite3.Row = Depends(get_current_user)):
+    """Remove a device token, e.g. on logout so a shared/reset device stops getting this user's pushes."""
+    with _get_db() as conn:
+        conn.execute(
+            "DELETE FROM device_tokens WHERE device_token = ? AND user_id = ?",
+            (device_token, user["id"]),
+        )
+        conn.commit()
     return {"ok": True}
 
 
@@ -1820,6 +1901,43 @@ def _plan_from_stripe_sub(stripe_sub) -> str:
     return "free"
 
 
+def _apply_plan_update(
+    user_id: int,
+    plan: str,
+    status: str,
+    *,
+    cancel_at_period_end: int = 0,
+    current_period_end: Optional[str] = None,
+    billing_source: Optional[str] = None,
+) -> None:
+    """
+    Single source of truth for writing a subscription plan/status change to
+    the users table. Shared by the Stripe webhook and the Apple IAP
+    verify/notifications paths (auth.py IAP section, below) so both billing
+    systems write identical DB semantics instead of two UPDATE statements
+    that can silently drift apart from each other over time.
+
+    billing_source is only written when explicitly passed (not None), so
+    callers that don't care about it (there are none today, but future ones
+    might reasonably want to update status without re-asserting ownership)
+    can't accidentally blank it out.
+    """
+    set_clauses = ["subscription_status = ?", "plan = ?", "cancel_at_period_end = ?", "current_period_end = ?"]
+    params: list = [status, plan, cancel_at_period_end, current_period_end]
+    if billing_source is not None:
+        set_clauses.append("billing_source = ?")
+        params.append(billing_source)
+    params.append(user_id)
+
+    with _get_db() as conn:
+        conn.execute(f"UPDATE users SET {', '.join(set_clauses)} WHERE id = ?", tuple(params))
+        conn.commit()
+    log.info(
+        "plan update: user_id=%s → status=%s plan=%s cancel_at_end=%s billing_source=%s",
+        user_id, status, plan, cancel_at_period_end, billing_source or "(unchanged)",
+    )
+
+
 def _update_subscription_from_stripe(stripe_sub) -> None:
     """Persist subscription status and plan change to the users table."""
     d = _stripe_to_dict(stripe_sub)
@@ -1857,12 +1975,12 @@ def _update_subscription_from_stripe(stripe_sub) -> None:
         if raw_period_end else None
     )
 
-    with _get_db() as conn:
-        conn.execute(
-            "UPDATE users SET subscription_status = ?, plan = ?, cancel_at_period_end = ?, current_period_end = ? WHERE id = ?",
-            (new_status, new_plan, cancel_at_end, period_end_iso, user_id),
-        )
-        conn.commit()
+    _apply_plan_update(
+        user_id, new_plan, new_status,
+        cancel_at_period_end=cancel_at_end,
+        current_period_end=period_end_iso,
+        billing_source="stripe",
+    )
     log.info(
         "subscription %s → status=%s plan=%s cancel_at_end=%s for user_id=%s",
         d.get("id"), new_status, new_plan, cancel_at_end, user_id,
@@ -2057,10 +2175,11 @@ from fastapi.responses import RedirectResponse
 
 GOOGLE_CLIENT_ID     = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-APPLE_CLIENT_ID      = os.getenv("APPLE_CLIENT_ID", "")   # Service ID, e.g. com.aurexis.web
+APPLE_CLIENT_ID      = os.getenv("APPLE_CLIENT_ID", "")   # Service ID, e.g. com.aurexis.web -- web redirect flow only
 APPLE_TEAM_ID        = os.getenv("APPLE_TEAM_ID", "")
 APPLE_KEY_ID         = os.getenv("APPLE_KEY_ID", "")
 APPLE_PRIVATE_KEY    = os.getenv("APPLE_PRIVATE_KEY", "").replace("\\n", "\n")
+APPLE_BUNDLE_ID      = os.getenv("APPLE_BUNDLE_ID", "com.useaurexis.app")  # iOS app id -- audience for native Sign in with Apple tokens
 APP_BASE_URL         = os.getenv("APP_BASE_URL", "https://aurexis-backend-production.up.railway.app").rstrip("/")
 FRONTEND_ORIGIN      = os.getenv("FRONTEND_ORIGIN", "https://useaurexis.com").rstrip("/")
 
@@ -2188,6 +2307,9 @@ def google_redirect(plan: str = "free", origin: str = ""):
         "http://localhost:5173",
         "http://localhost:3000",
         "http://127.0.0.1:5173",
+        # Native iOS app -- custom URL scheme registered in Info.plist so
+        # the in-app browser sheet can hand control back after Google auth.
+        "aurexis://auth",
     }
     clean_origin = origin if origin in _allowed_origins else FRONTEND_ORIGIN
     state = _state_make("google", {"plan": clean_plan, "origin": clean_origin})
@@ -2206,7 +2328,13 @@ def google_redirect(plan: str = "free", origin: str = ""):
 @oauth_router.get("/google/callback")
 def google_callback(code: str = "", state: str = "", error: str = ""):
     if error:
-        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=google_denied", status_code=302)
+        # Google always echoes `state` back, even on denial -- the origin
+        # embedded in it (already validated against _allowed_origins when
+        # google_redirect created it) is what routes the native app's
+        # in-app browser sheet back to it instead of stranding the user
+        # on the marketing site.
+        origin = _state_extras(state).get("origin", FRONTEND_ORIGIN)
+        return RedirectResponse(url=f"{origin}/auth?error=google_denied", status_code=302)
     if not _state_ok(state, "google"):
         raise HTTPException(400, "INVALID_OAUTH_STATE")
     try:
@@ -2238,7 +2366,8 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
         last_name = str(info.get("family_name") or "").strip()
     except Exception as exc:
         log.warning("google_callback error: %s", exc)
-        return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=google_failed", status_code=302)
+        origin = _state_extras(state).get("origin", FRONTEND_ORIGIN)
+        return RedirectResponse(url=f"{origin}/auth?error=google_failed", status_code=302)
 
     user, is_new = _upsert_oauth_user(email, first_name=first_name, last_name=last_name)
     if is_new:
@@ -2398,3 +2527,259 @@ async def apple_callback(request: Request):
 
     user, is_new = _upsert_oauth_user(email)
     return _redirect_to_app(user, is_new=is_new)
+
+
+# ── Apple (native iOS app) ──────────────────────────────────────────────
+#
+# apple_callback above trusts its id_token because it comes from a
+# server-to-server exchange authenticated with our client_secret. The
+# native flow is different: the Capacitor Sign in with Apple plugin hands
+# the device's identity token straight to this endpoint from the client,
+# so it's untrusted input and must be cryptographically verified against
+# Apple's published keys before any claim in it can be believed.
+
+_apple_jwks_cache: dict = {"keys": [], "fetched_at": 0.0}
+
+
+def _apple_jwks() -> list[dict]:
+    """Apple's public signing keys for identity tokens, cached for an hour."""
+    if _time.time() - _apple_jwks_cache["fetched_at"] > 3600 or not _apple_jwks_cache["keys"]:
+        import requests as _req
+        resp = _req.get("https://appleid.apple.com/auth/keys", timeout=10)
+        resp.raise_for_status()
+        _apple_jwks_cache["keys"] = resp.json().get("keys", [])
+        _apple_jwks_cache["fetched_at"] = _time.time()
+    return _apple_jwks_cache["keys"]
+
+
+def _verify_apple_identity_token(identity_token: str) -> dict:
+    header = jwt.get_unverified_header(identity_token)
+    kid = header.get("kid")
+    key = next((k for k in _apple_jwks() if k.get("kid") == kid), None)
+    if not key:
+        # Apple rotates keys occasionally -- force one refresh before giving up.
+        _apple_jwks_cache["fetched_at"] = 0.0
+        key = next((k for k in _apple_jwks() if k.get("kid") == kid), None)
+    if not key:
+        raise ValueError(f"no matching Apple signing key for kid={kid}")
+    # This one endpoint verifies tokens from two different callers with two
+    # different audiences: the native iOS app's identity token has
+    # aud=APPLE_BUNDLE_ID (its Bundle ID), while the web JS SDK's identity
+    # token has aud=APPLE_CLIENT_ID (the Services ID) -- jose's `audience=`
+    # kwarg only ever matches a single expected value, so aud verification
+    # is turned off there and done manually against both accepted values.
+    claims = jwt.decode(
+        identity_token, key, algorithms=["RS256"],
+        issuer="https://appleid.apple.com",
+        options={"verify_aud": False},
+    )
+    accepted_audiences = {a for a in (APPLE_BUNDLE_ID, APPLE_CLIENT_ID) if a}
+    if claims.get("aud") not in accepted_audiences:
+        raise JWTError(f"unexpected audience: {claims.get('aud')!r}")
+    return claims
+
+
+class _AppleNativeSignIn(BaseModel):
+    identity_token: str
+    # Apple only ever sends the user's name on their very first authorization
+    # for this app -- the client must capture and forward it that one time.
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+
+
+@oauth_router.post("/apple/native")
+def apple_native_signin(body: _AppleNativeSignIn):
+    if not APPLE_BUNDLE_ID:
+        raise HTTPException(503, "APPLE_BUNDLE_ID not configured")
+    try:
+        claims = _verify_apple_identity_token(body.identity_token)
+    except JWTError as exc:
+        log.warning("apple_native_signin: invalid identity token: %s", exc)
+        raise HTTPException(401, "INVALID_APPLE_TOKEN")
+    except Exception as exc:
+        log.warning("apple_native_signin: verification error: %s", exc)
+        raise HTTPException(503, "APPLE_VERIFICATION_FAILED")
+
+    email = str(claims.get("email") or "").strip().lower()
+    if not email:
+        # Apple private relay, or a token that omitted email -- fall back to
+        # a stable synthetic address keyed off the immutable subject claim.
+        sub = str(claims.get("sub") or secrets.token_hex(8))
+        email = f"{sub}@privaterelay.appleid.com"
+
+    first_name = (body.first_name or "").strip()
+    last_name = (body.last_name or "").strip()
+
+    user, is_new = _upsert_oauth_user(email, first_name=first_name, last_name=last_name)
+    if is_new:
+        send_welcome_email_bg(email, first_name)
+
+    plan = _user_plan(user)
+    sid = _new_session(user["id"])
+    token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
+    return {
+        "access_token": token,
+        "is_new_user": is_new,
+        "email": user["email"],
+        "first_name": user["first_name"] or first_name or None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Apple In-App Purchase (StoreKit 2) — server-side transaction verification
+# ---------------------------------------------------------------------------
+# Web billing is Stripe (see PLAN_PRICES / stripe_webhook above); native iOS
+# purchases go through StoreKit 2 instead, per App Store policy for digital
+# subscriptions bought in-app. This section verifies signed transactions the
+# iOS app forwards right after a purchase (Phase 1) and, once wired up,
+# Apple's own server-to-server renewal/cancellation notifications (Phase 2).
+# Both write through the same _apply_plan_update() the Stripe webhook uses
+# (defined above, near _update_subscription_from_stripe), so plan-gating
+# logic elsewhere in the app never has to know which billing system a given
+# user is actually on.
+
+APPSTORE_ENVIRONMENT = os.getenv("APPSTORE_ENVIRONMENT", "Sandbox")  # "Sandbox" or "Production"
+APPLE_APP_APPLE_ID = os.getenv("APPLE_APP_APPLE_ID", "")  # numeric App Store ID -- required once environment is Production
+
+# App Store Connect product ID (subscription group "Aurexis Plans") → our
+# internal plan string. Single source of truth for both the verify endpoint
+# below and the Phase 2 notifications webhook, so they can't map a product
+# to a different plan than each other.
+IAP_PRODUCT_TO_PLAN: dict[str, str] = {
+    "com.useaurexis.app.starter.monthly": "starter",
+    "com.useaurexis.app.pro.monthly":     "pro",
+    "com.useaurexis.app.elite.monthly":   "elite",
+}
+
+_APPLE_ROOT_CA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs", "AppleRootCA-G3.cer")
+
+
+def _apple_root_certificates() -> list:
+    try:
+        with open(_APPLE_ROOT_CA_PATH, "rb") as f:
+            return [f.read()]
+    except Exception as exc:
+        log.error("IAP: could not read Apple root CA at %s: %s", _APPLE_ROOT_CA_PATH, exc)
+        return []
+
+
+_signed_data_verifier: Optional["_SignedDataVerifier"] = None
+
+
+def _get_signed_data_verifier():
+    """
+    Lazily build the SignedDataVerifier. Import/construction is deferred to
+    first use (not module import time) so the app still boots if
+    app-store-server-library or the bundled root cert are ever missing --
+    the same defensive pattern _ensure_stripe() uses for the Stripe SDK,
+    just raised here instead of at import.
+    """
+    global _signed_data_verifier
+    if _signed_data_verifier is not None:
+        return _signed_data_verifier
+    if _SignedDataVerifier is None:
+        raise HTTPException(503, "app-store-server-library not installed")
+    root_certs = _apple_root_certificates()
+    if not root_certs:
+        raise HTTPException(503, "Apple root CA not available")
+    env = _AppleEnvironment.PRODUCTION if APPSTORE_ENVIRONMENT.lower() == "production" else _AppleEnvironment.SANDBOX
+    app_apple_id = int(APPLE_APP_APPLE_ID) if APPLE_APP_APPLE_ID.isdigit() else None
+    try:
+        _signed_data_verifier = _SignedDataVerifier(
+            root_certificates=root_certs,
+            enable_online_checks=True,
+            environment=env,
+            bundle_id=APPLE_BUNDLE_ID,
+            app_apple_id=app_apple_id,
+        )
+    except ValueError as exc:
+        # Raised by the library itself if environment=Production but
+        # app_apple_id wasn't supplied -- a config problem, not a per-request one.
+        log.error("IAP: SignedDataVerifier construction failed: %s", exc)
+        raise HTTPException(503, "Apple IAP verification not configured")
+    return _signed_data_verifier
+
+
+iap_router = APIRouter(prefix="/api/iap", tags=["iap"])
+
+
+class _IAPVerifyRequest(BaseModel):
+    signed_transaction_info: str
+
+
+@iap_router.post("/verify")
+def iap_verify(body: _IAPVerifyRequest, user: sqlite3.Row = Depends(get_current_user)):
+    """
+    Verify a StoreKit 2 signed transaction (the JWS string from
+    Transaction.jwsRepresentation, forwarded by the iOS app right after a
+    purchase or a Transaction.updates event) and apply the corresponding
+    plan to the authenticated user.
+
+    This is server-side verification, not client-trust: the JWS signature
+    chain is checked against Apple's bundled root CA by SignedDataVerifier,
+    so a client can't just POST an arbitrary productId and grant itself a
+    plan -- the whole point of this endpoint existing instead of trusting
+    whatever the app claims it purchased.
+    """
+    verifier = _get_signed_data_verifier()
+    try:
+        transaction = verifier.verify_and_decode_signed_transaction(body.signed_transaction_info)
+    except _AppleVerificationException as exc:
+        log.warning("iap_verify: signature verification failed for user_id=%s: %s", user["id"], exc)
+        raise HTTPException(400, "Invalid or unverifiable transaction")
+    except Exception as exc:
+        log.warning("iap_verify: unexpected error decoding transaction for user_id=%s: %s", user["id"], exc, exc_info=True)
+        raise HTTPException(400, "Invalid or unverifiable transaction")
+
+    product_id = transaction.productId
+    plan = IAP_PRODUCT_TO_PLAN.get(product_id or "")
+    if not plan:
+        log.warning("iap_verify: unrecognized productId=%s for user_id=%s", product_id, user["id"])
+        raise HTTPException(400, f"Unrecognized product: {product_id}")
+
+    # Phase 5 dual-billing guard: a user already paying via Stripe must not
+    # also get billed through Apple -- refuse instead of silently letting
+    # both billing sources exist for the same account.
+    try:
+        existing_source = user["billing_source"]
+    except (IndexError, KeyError):
+        existing_source = None
+    if existing_source == "stripe" and user["subscription_status"] == "active" and user["stripe_customer_id"]:
+        raise HTTPException(
+            409,
+            "You're already subscribed via web — manage your plan at useaurexis.com.",
+        )
+
+    revocation_date = transaction.revocationDate
+    expires_date_ms = transaction.expiresDate
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    is_active = revocation_date is None and (expires_date_ms is None or expires_date_ms > now_ms)
+    new_status = "active" if is_active else "cancelled"
+    new_plan = plan if is_active else "free"
+
+    period_end_iso = (
+        datetime.fromtimestamp(expires_date_ms / 1000, tz=timezone.utc).isoformat()
+        if expires_date_ms else None
+    )
+
+    _apply_plan_update(
+        user["id"], new_plan, new_status,
+        cancel_at_period_end=0,
+        current_period_end=period_end_iso,
+        billing_source="apple_iap",
+    )
+
+    original_transaction_id = transaction.originalTransactionId
+    if original_transaction_id:
+        with _get_db() as conn:
+            conn.execute(
+                "UPDATE users SET apple_original_transaction_id = ? WHERE id = ?",
+                (original_transaction_id, user["id"]),
+            )
+            conn.commit()
+
+    log.info(
+        "iap_verify: user_id=%s productId=%s → plan=%s status=%s originalTransactionId=%s",
+        user["id"], product_id, new_plan, new_status, original_transaction_id,
+    )
+    return {"ok": True, "plan": new_plan, "status": new_status}

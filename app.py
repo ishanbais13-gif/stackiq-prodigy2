@@ -2422,7 +2422,7 @@ app = FastAPI(title="StackIQ Prodigy")
 
 try:
     from auth import (
-        auth_router, stripe_router, oauth_router,
+        auth_router, stripe_router, oauth_router, iap_router,
         get_current_user as _get_current_user,
         require_active_subscription as _require_subscription,
         require_plan as _require_plan,
@@ -2431,6 +2431,7 @@ try:
     app.include_router(auth_router)
     app.include_router(stripe_router)
     app.include_router(oauth_router)
+    app.include_router(iap_router)
     _dep_starter = Depends(_require_plan("starter"))
     _dep_pro     = Depends(_require_plan("pro"))
     _dep_elite   = Depends(_require_plan("elite"))
@@ -8465,6 +8466,15 @@ def _fire_new_pick_alert_if_needed(rp_result: Any, pick_dict: Dict[str, Any], *,
         mark_alert_sent(alert_target_id)
     except Exception as _ae:
         log.warning(f"{source}: new_pick alert failed: {_ae}")
+
+    # Push is a separate channel from email/SMS above (open to every plan,
+    # not just paid) -- its own try/except so a push failure can't affect
+    # the email/SMS alert or the mark_alert_sent bookkeeping above it.
+    try:
+        from push import send_new_pick_push_bg
+        send_new_pick_push_bg(pick_dict)
+    except Exception as _pe:
+        log.warning(f"{source}: new_pick push failed: {_pe}")
 
 
 def _parse_premover_price(v: Any) -> Optional[float]:
