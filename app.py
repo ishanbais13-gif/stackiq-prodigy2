@@ -10151,6 +10151,39 @@ def admin_table_stats(payload: Dict[str, Any] = Body(...)):
     return out
 
 
+@app.post("/admin/test-push", include_in_schema=False)
+def admin_test_push(payload: Dict[str, Any] = Body(...)):
+    """Diagnostic: fire a real APNs push to every device registered to the
+    given email, and report the real per-device outcome. Lets push delivery
+    be verified on demand instead of waiting for the next scheduled alert."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    email = str((payload or {}).get("email") or "").strip().lower()
+    if not email:
+        return {"ok": False, "error": "email required"}
+    from push import _send_apns_verbose
+    conn = _db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT d.device_token, d.platform, d.last_seen_at FROM device_tokens d "
+        "JOIN users u ON u.id = d.user_id WHERE LOWER(u.email) = ?",
+        (email,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    if not rows:
+        return {"ok": False, "error": "no device tokens registered for this email"}
+    results = []
+    for r in rows:
+        token = r["device_token"]
+        ok, detail = _send_apns_verbose(
+            token, "Aurexis test push",
+            "If you see this, push delivery is working.",
+            {"type": "test"},
+        )
+        results.append({"token_prefix": token[:12], "platform": r["platform"], "last_seen_at": r["last_seen_at"], "ok": ok, "detail": detail})
+    return {"ok": True, "results": results}
+
+
 @app.post("/admin/picks-raw", include_in_schema=False)
 def admin_picks_raw(payload: Dict[str, Any] = Body(...)):
     """
