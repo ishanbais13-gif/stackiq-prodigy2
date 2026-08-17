@@ -1909,6 +1909,29 @@ def _news_and_sentiment(symbol: str, *, allow_llm: bool = True) -> Dict[str, Any
     return out
 
 
+def _deterministic_metrics_explainer(
+    *, technicals: Dict[str, Any], ai_score: Optional[float], execution_score: Optional[float]
+) -> str:
+    """Non-LLM fallback for the Advanced Metrics explainer -- used when allow_llm
+    is False or the LLM call/parse fails, same role the hardcoded `why`/`confirms`/
+    `breaks` fallbacks above already play for those fields."""
+    t = technicals or {}
+    scores = {k: _safe_f(t.get(k), 50.0) or 50.0 for k in ("momentum", "trend", "volatility", "liquidity", "risk")}
+    strong = [k for k, v in scores.items() if v >= 70]
+    weak = [k for k, v in scores.items() if v <= 39]
+    ai_txt = f"{int(round(ai_score))}/100" if ai_score is not None else "unavailable"
+    exec_txt = f"{int(round(execution_score))}/100" if execution_score is not None else "unavailable"
+    parts = [f"AI Score is {ai_txt} and Execution/Confidence is {exec_txt} for this setup."]
+    if strong:
+        parts.append(f"{', '.join(strong)} score{'s are' if len(strong) > 1 else ' is'} notably strong, supporting the setup.")
+    if weak:
+        parts.append(f"{', '.join(weak)} score{'s are' if len(weak) > 1 else ' is'} weak and worth watching closely.")
+    if not strong and not weak:
+        parts.append("Technical scores are mixed with no single standout factor.")
+    parts.append("Watch the entry window closely and respect the plan's stop level -- a close beyond it invalidates the setup.")
+    return " ".join(parts)
+
+
 def _trade_reasoning(
     *,
     symbol: str,
@@ -1916,14 +1939,16 @@ def _trade_reasoning(
     trade_plan: Dict[str, Any],
     news: Dict[str, Any],
     allow_llm: bool = True,
+    ai_score: Optional[float] = None,
+    execution_score: Optional[float] = None,
 ) -> Dict[str, Any]:
     sym = str(symbol or "").strip().upper()
     if not sym:
-        return {"why": [], "confirms": [], "breaks": []}
+        return {"why": [], "confirms": [], "breaks": [], "metrics_explainer": ""}
 
     ck = _cache_key("reasoning", sym)
     cached = _REASONING_CACHE.get(ck)
-    if isinstance(cached, dict) and isinstance(cached.get("why"), list):
+    if isinstance(cached, dict) and isinstance(cached.get("why"), list) and isinstance(cached.get("metrics_explainer"), str):
         return cached
 
     mom = _safe_f((technicals or {}).get("momentum"), 50.0) or 50.0
@@ -1937,9 +1962,12 @@ def _trade_reasoning(
     ]
     confirms = ["VWAP reclaim and hold", "Volume expansion", "Break of prior high"]
     breaks = ["Loss of VWAP", "Failed breakout", "Sector weakness"]
+    metrics_explainer_fallback = _deterministic_metrics_explainer(
+        technicals=technicals, ai_score=ai_score, execution_score=execution_score
+    )
 
     if not allow_llm:
-        out = {"why": why[:3], "confirms": confirms[:3], "breaks": breaks[:3]}
+        out = {"why": why[:3], "confirms": confirms[:3], "breaks": breaks[:3], "metrics_explainer": metrics_explainer_fallback}
         _REASONING_CACHE.set(ck, out)
         return out
 
@@ -1948,20 +1976,33 @@ def _trade_reasoning(
 
         system = (
             "You are a trade reasoning engine. Return ONLY valid JSON with keys: "
-            "why (array of strings), confirms (array of strings), breaks (array of strings). "
-            "Rules: 2-4 items per array, concise, grounded strictly in provided inputs."
+            "why (array of strings), confirms (array of strings), breaks (array of strings), "
+            "metrics_explainer (string). "
+            "Rules for why/confirms/breaks: 2-4 items per array, concise, grounded strictly in "
+            "provided inputs. Rules for metrics_explainer: 3-5 plain-language sentences covering "
+            "(1) what the ai_score and execution_score numbers indicate for this specific pick, "
+            "(2) which of the momentum/trend/volatility/liquidity/risk technical scores are "
+            "notably strong (>=70) or weak (<=39) and why that matters -- IMPORTANT: all five of "
+            "these scores share one uniform 0-100 scale where higher always means stronger/better "
+            "regardless of the metric's name, including risk (a high risk score is favorable here, "
+            "NOT a warning -- do not interpret it as real-world risk level), "
+            "(3) a concrete next step -- "
+            "what to watch for, when the entry window matters most, or what would invalidate the "
+            "setup. Grounded strictly in the provided numbers, no speculation beyond them."
         )
         user = json.dumps(
             {
                 "symbol": sym,
                 "technicals": technicals,
+                "ai_score": ai_score,
+                "execution_score": execution_score,
                 "trade_plan": {k: trade_plan.get(k) for k in ("entry", "stop", "target_1", "target_2", "rr", "vwap", "atr14")},
                 "volume_trend": trade_plan.get("volume_trend"),
                 "news_sentiment": {"sentiment": news.get("sentiment"), "headlines": (news.get("headlines") or [])[:6]},
             },
             ensure_ascii=False,
         )
-        raw = call_llm_text(system=system, user=user, max_output_tokens=450)
+        raw = call_llm_text(system=system, user=user, max_output_tokens=650)
         data = _json_loads_loose(raw) if isinstance(raw, str) else None
         if isinstance(data, dict):
             wy = data.get("why") if isinstance(data.get("why"), list) else []
@@ -1970,13 +2011,20 @@ def _trade_reasoning(
             wy2 = [str(x).strip() for x in wy if str(x or "").strip()][:4]
             cf2 = [str(x).strip() for x in cf if str(x or "").strip()][:4]
             br2 = [str(x).strip() for x in br if str(x or "").strip()][:4]
-            out = {"why": wy2 or why[:3], "confirms": cf2 or confirms[:3], "breaks": br2 or breaks[:3]}
+            me = data.get("metrics_explainer")
+            me2 = str(me).strip()[:900] if isinstance(me, str) and str(me).strip() else metrics_explainer_fallback
+            out = {
+                "why": wy2 or why[:3],
+                "confirms": cf2 or confirms[:3],
+                "breaks": br2 or breaks[:3],
+                "metrics_explainer": me2,
+            }
             _REASONING_CACHE.set(ck, out)
             return out
     except Exception:
         pass
 
-    out = {"why": why[:3], "confirms": confirms[:3], "breaks": breaks[:3]}
+    out = {"why": why[:3], "confirms": confirms[:3], "breaks": breaks[:3], "metrics_explainer": metrics_explainer_fallback}
     _REASONING_CACHE.set(ck, out)
     return out
 
@@ -4358,7 +4406,7 @@ def _empty_analyze_response(symbol: str, status: str) -> Dict[str, Any]:
             "headline_items": [],
         },
         "social_sentiment": {"status": "unavailable"},
-        "reasoning": {"why": [], "confirms": [], "breaks": []},
+        "reasoning": {"why": [], "confirms": [], "breaks": [], "metrics_explainer": ""},
         "market_data": {"last_price": None, "source": "alpaca"},
     }
 
@@ -4819,18 +4867,26 @@ async def analyze(
     mom_for_window = (indicators or {}).get("momentum")
     system_expectation = _system_expectation_from_momentum(mom_for_window)
 
+    # Computed here (before _trade_reasoning) rather than after, specifically
+    # so the Advanced Metrics explainer it generates can reference the same
+    # ai_score/execution_score the response actually returns below --
+    # previously these were computed after reasoning was built, so reasoning
+    # had no way to see them.
+    ai_score_0_100 = float(round(float(ai_score or 0.0), 1))
+    execution_score_0_100 = float(round(float(_score_execution_0_100(indicators=indicators, execution_factors=execution_factors) or 0.0), 1))
+
     reasoning = _trade_reasoning(
         symbol=sym,
         technicals=indicators,
         trade_plan=trade_plan_modeled,
         news=news0,
         allow_llm=bool(allow_llm),
+        ai_score=ai_score_0_100,
+        execution_score=execution_score_0_100,
     )
     if not isinstance(reasoning, dict):
-        reasoning = {"why": [], "confirms": [], "breaks": []}
+        reasoning = {"why": [], "confirms": [], "breaks": [], "metrics_explainer": ""}
 
-    ai_score_0_100 = float(round(float(ai_score or 0.0), 1))
-    execution_score_0_100 = float(round(float(_score_execution_0_100(indicators=indicators, execution_factors=execution_factors) or 0.0), 1))
     technicals = {
         "symbol": sym,
         "ai_score": ai_score_0_100,
@@ -5003,6 +5059,7 @@ async def analyze(
             "why": reasoning.get("why") if isinstance(reasoning.get("why"), list) else [],
             "confirms": reasoning.get("confirms") if isinstance(reasoning.get("confirms"), list) else [],
             "breaks": reasoning.get("breaks") if isinstance(reasoning.get("breaks"), list) else [],
+            "metrics_explainer": str(reasoning.get("metrics_explainer") or ""),
         },
         "market_data": market_data,
         "market_cap": market_cap,
@@ -5083,7 +5140,7 @@ async def analyze(
     if not isinstance(out.get("news"), dict):
         out["news"] = {"headlines": [], "sentiment": "Neutral", "items": [], "source": "unavailable"}
     if not isinstance(out.get("reasoning"), dict):
-        out["reasoning"] = {"why": [], "confirms": [], "breaks": []}
+        out["reasoning"] = {"why": [], "confirms": [], "breaks": [], "metrics_explainer": ""}
     if not isinstance(out.get("market_data"), dict):
         out["market_data"] = {"last_price": (float(_round_px(current_px)) if current_px is not None else None), "source": "alpaca"}
 
