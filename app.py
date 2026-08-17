@@ -10161,7 +10161,12 @@ def admin_test_push(payload: Dict[str, Any] = Body(...)):
     if not email:
         return {"ok": False, "error": "email required"}
     from push import _send_apns_verbose
-    conn = _db_connect()
+    import sqlite3 as _sq
+    # device_tokens lives in auth.db, a separate file from the main app DB
+    # _db_connect() points to -- same split push.py/auth.py already use.
+    _auth_db = os.getenv("AUTH_DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth.db"))
+    conn = _sq.connect(_auth_db)
+    conn.row_factory = _sq.Row
     cur = conn.cursor()
     cur.execute(
         "SELECT d.device_token, d.platform, d.last_seen_at FROM device_tokens d "
