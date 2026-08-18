@@ -8528,6 +8528,20 @@ def _fire_new_pick_alert_if_needed(rp_result: Any, pick_dict: Dict[str, Any], *,
               suppressed.
       None -> record_pick skipped or errored; nothing to do.
     """
+    # Paused 2026-08-18: PRE_MOVER picks (the small-cap early-momentum
+    # scanner, distinct from best_pick_v2's main daily pick) were sending
+    # real email/push alerts with zero corresponding UI surface anywhere in
+    # the app -- Dashboard only shows the main pick, and Personal Best Pick
+    # Log explicitly filters to HIGH_CONVICTION/LOW_CONVICTION only. Users
+    # had no way to see, in-app, what the alert was even referring to. This
+    # is a pause, not a removal: the scanner and its performance_tracker
+    # recording (the caller's record_pick() call, upstream of this
+    # function) are untouched -- only the alert send is skipped here. The
+    # main daily pick path is unaffected since it never passes this decision.
+    if str(pick_dict.get("trade_decision") or "").upper() == "PRE_MOVER":
+        log.info(f"{source}: skipping alert for PRE_MOVER pick (alerting paused, recording unaffected)")
+        return
+
     alert_target_id: Optional[int] = None
     if isinstance(rp_result, int):
         alert_target_id = rp_result
