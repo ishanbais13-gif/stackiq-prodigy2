@@ -1955,7 +1955,20 @@ def _trade_reasoning(
     if not sym:
         return {"why": [], "confirms": [], "breaks": [], "metrics_interpretation": "", "metrics_next_steps": ""}
 
-    ck = _cache_key("reasoning", sym)
+    # Signature covers the inputs the LLM prose actually references (entry/stop/
+    # target, ai/execution scores). Without it the cache was keyed on symbol
+    # alone, so re-analyzing the same symbol within the 5-min TTL returned prose
+    # citing a stale trade_plan even though the response's own trade_plan field
+    # had just been recomputed fresh -- the two would visibly disagree on the
+    # same page. Rounding to 2dp/1dp matches the precision already displayed.
+    _sig = "|".join([
+        f"e{round(_safe_f((trade_plan or {}).get('entry')) or 0, 2)}",
+        f"s{round(_safe_f((trade_plan or {}).get('stop')) or 0, 2)}",
+        f"t{round(_safe_f((trade_plan or {}).get('target_1')) or 0, 2)}",
+        f"a{round(ai_score or 0, 1)}",
+        f"x{round(execution_score or 0, 1)}",
+    ])
+    ck = _cache_key("reasoning", f"{sym}:{_sig}")
     cached = _REASONING_CACHE.get(ck)
     if isinstance(cached, dict) and isinstance(cached.get("why"), list) and isinstance(cached.get("metrics_next_steps"), str):
         return cached
