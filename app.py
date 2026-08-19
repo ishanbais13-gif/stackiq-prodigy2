@@ -3232,6 +3232,30 @@ def _ensure_perf_tracker_schema() -> None:
         pass
 
 
+def _ensure_visits_schema() -> None:
+    """One row per session_id (client-generated UUID persisted in
+    localStorage) -- INSERTed on first ping, UPDATEd on every heartbeat
+    after. last_seen_at within the last few minutes = currently active."""
+    conn = _db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_visits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL UNIQUE,
+            platform TEXT NOT NULL,
+            email TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_app_visits_last_seen ON app_visits(last_seen_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_app_visits_first_seen ON app_visits(first_seen_at)")
+    conn.commit()
+    conn.close()
+
+
 def _db_init() -> None:
     try:
         conn = _db_connect()
@@ -10159,6 +10183,107 @@ Context:
         return r.choices[0].message.content.strip()
     except Exception:
         return None
+
+
+@app.post("/track/ping", include_in_schema=False)
+def track_ping(payload: Dict[str, Any] = Body(...), request: Request = None):
+    """Public, unauthenticated heartbeat -- fired once on app load and every
+    ~45s thereafter while the tab/app is open. One row per session_id
+    (upserted), not one row per ping, so this stays cheap regardless of how
+    long a session runs. Resolves email from the bearer token when present
+    so /admin/analytics can show who's active, but works anonymously too."""
+    _ensure_visits_schema()
+    sid = str((payload or {}).get("session_id") or "").strip()[:64]
+    platform = str((payload or {}).get("platform") or "").strip().lower()
+    if platform not in ("web", "ios"):
+        platform = "web"
+    if not sid:
+        return {"ok": False}
+
+    email = None
+    auth_header = (request.headers.get("authorization") if request else None) or ""
+    if auth_header.lower().startswith("bearer "):
+        try:
+            from auth import decode_token
+            claims = decode_token(auth_header[7:].strip())
+            email = str(claims.get("email") or "").strip().lower() or None
+        except Exception:
+            email = None
+
+    now = datetime.now(timezone.utc).isoformat()
+    conn = _db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM app_visits WHERE session_id = ?", (sid,))
+    row = cur.fetchone()
+    if row:
+        if email:
+            cur.execute("UPDATE app_visits SET last_seen_at = ?, email = ? WHERE session_id = ?", (now, email, sid))
+        else:
+            cur.execute("UPDATE app_visits SET last_seen_at = ? WHERE session_id = ?", (now, sid))
+    else:
+        cur.execute(
+            "INSERT INTO app_visits (session_id, platform, email, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
+            (sid, platform, email, now, now),
+        )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/admin/analytics", include_in_schema=False)
+def admin_analytics(payload: Dict[str, Any] = Body(...)):
+    """Admin-gated traffic dashboard data: all-time + daily visit counts by
+    platform, and who's currently active (last_seen_at within 3 minutes)."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    _ensure_visits_schema()
+    conn = _db_connect()
+    cur = conn.cursor()
+
+    now = datetime.now(timezone.utc)
+    active_cutoff = (now - timedelta(minutes=3)).isoformat()
+    day24_cutoff = (now - timedelta(hours=24)).isoformat()
+    day7_cutoff = (now - timedelta(days=7)).isoformat()
+    day30_cutoff = (now - timedelta(days=30)).isoformat()
+
+    cur.execute("SELECT platform, COUNT(*) AS c FROM app_visits GROUP BY platform")
+    total_by_platform = {r["platform"]: int(r["c"]) for r in cur.fetchall()}
+    total_visits = sum(total_by_platform.values())
+
+    cur.execute("SELECT COUNT(*) AS c FROM app_visits WHERE last_seen_at >= ?", (day24_cutoff,))
+    active_24h = int(cur.fetchone()["c"])
+    cur.execute("SELECT COUNT(*) AS c FROM app_visits WHERE last_seen_at >= ?", (day7_cutoff,))
+    active_7d = int(cur.fetchone()["c"])
+
+    cur.execute(
+        "SELECT session_id, platform, email, first_seen_at, last_seen_at FROM app_visits "
+        "WHERE last_seen_at >= ? ORDER BY last_seen_at DESC",
+        (active_cutoff,),
+    )
+    currently_active = [dict(r) for r in cur.fetchall()]
+
+    cur.execute(
+        "SELECT substr(first_seen_at, 1, 10) AS day, platform, COUNT(*) AS c "
+        "FROM app_visits WHERE first_seen_at >= ? GROUP BY day, platform ORDER BY day ASC",
+        (day30_cutoff,),
+    )
+    by_day_rows = cur.fetchall()
+    conn.close()
+
+    by_day: Dict[str, Dict[str, int]] = {}
+    for r in by_day_rows:
+        d = by_day.setdefault(r["day"], {"web": 0, "ios": 0})
+        d[str(r["platform"])] = int(r["c"])
+
+    return {
+        "total_visits": total_visits,
+        "total_by_platform": total_by_platform,
+        "active_now": len(currently_active),
+        "active_last_24h": active_24h,
+        "active_last_7d": active_7d,
+        "currently_active": currently_active,
+        "visits_by_day": [{"day": d, **counts} for d, counts in sorted(by_day.items())],
+    }
+
 
 @app.post("/admin/table-stats", include_in_schema=False)
 def admin_table_stats(payload: Dict[str, Any] = Body(...)):
