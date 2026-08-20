@@ -10362,7 +10362,8 @@ def admin_picks_raw(payload: Dict[str, Any] = Body(...)):
         q = (
             "SELECT id, symbol, direction, entry_price, stop, target1, target2, target3, "
             "edge_score, final_score, confidence, recorded_at, status, evaluated_at, "
-            "max_return_pct, max_drawdown_pct, exit_return_pct, hit_target, hit_stop, days_to_outcome "
+            "max_return_pct, max_drawdown_pct, exit_return_pct, hit_target, hit_stop, days_to_outcome, "
+            "alert_sent_at, premover_score "
             "FROM picks WHERE 1=1"
         )
         params: List[Any] = []

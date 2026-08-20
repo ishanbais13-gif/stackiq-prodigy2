@@ -360,11 +360,19 @@ def evaluate_pending_picks(
                 except Exception as _le:
                     log.warning(f"perf_tracker: learning.settle_outcome failed: {_le}")
 
-            # Fire outcome alert in background (won/lost only, not expired).
-            # Uses the realized exit return, not the peak -- see alerts.py's
-            # _outcome_labels() for why a drift outcome's email/SMS text and
-            # number both need to be honest about what actually happened.
-            if outcome["status"] in ("won", "won_drift", "lost", "lost_drift"):
+            # Fire outcome alert in background (won/lost only, not expired) --
+            # but only for picks that actually got a new-pick alert in the
+            # first place. Without this check, any pick that was recorded
+            # but never alerted (a paused PRE_MOVER pick, or any pick whose
+            # new-pick send simply failed) would still email/push users an
+            # outcome for a pick they were never told about. alert_sent_at
+            # is NULL until mark_alert_sent() runs after a confirmed
+            # new-pick send, so it's the exact signal to gate on here.
+            try:
+                _alert_sent = row["alert_sent_at"]
+            except (IndexError, KeyError):
+                _alert_sent = None
+            if outcome["status"] in ("won", "won_drift", "lost", "lost_drift") and _alert_sent is not None:
                 try:
                     from alerts import send_outcome_alert_bg
                     send_outcome_alert_bg(
@@ -375,6 +383,8 @@ def evaluate_pending_picks(
                     )
                 except Exception as _ae:
                     log.warning(f"perf_tracker: outcome alert failed: {_ae}")
+            elif outcome["status"] in ("won", "won_drift", "lost", "lost_drift"):
+                log.info(f"perf_tracker: outcome alert skipped for id={row['id']} {sym} -- no new-pick alert was ever sent for this pick")
 
             log.info(
                 f"perf_tracker: evaluated id={row['id']} {sym} "
