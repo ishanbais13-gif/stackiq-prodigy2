@@ -10185,6 +10185,20 @@ Context:
         return None
 
 
+@app.post("/debug/log", include_in_schema=False)
+def debug_log(payload: Dict[str, Any] = Body(...)):
+    """Temporary diagnostic sink for the iOS session-logout investigation.
+    Frontend [auth] console.log calls also fire-and-forget POST here so the
+    trace can be read from `railway logs` without needing a cable + Safari
+    Web Inspector attached to the device. No auth (device isn't logged in
+    half the time this matters), no persistence -- just surfaces in server
+    logs. Remove once the logout bug is confirmed fixed on a real device."""
+    tag = str((payload or {}).get("tag") or "client")[:40]
+    msg = str((payload or {}).get("message") or "")[:500]
+    log.info(f"[{tag}] {msg}")
+    return {"ok": True}
+
+
 @app.post("/track/ping", include_in_schema=False)
 def track_ping(payload: Dict[str, Any] = Body(...), request: Request = None):
     """Public, unauthenticated heartbeat -- fired once on app load and every
