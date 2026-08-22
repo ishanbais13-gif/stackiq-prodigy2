@@ -10657,7 +10657,7 @@ def _saved_picks_list(limit: int = 200, user_id: Optional[int] = None) -> List[D
 
 
 @app.get("/portfolio/picks", include_in_schema=True)
-def portfolio_picks(_user=_dep_pro):
+def portfolio_picks(_user=_dep_starter):
     items = _saved_picks_list(limit=250, user_id=int(_user["id"]))
     out: List[Dict[str, Any]] = []
     for it in items:
@@ -10857,7 +10857,7 @@ def portfolio_remove(symbol: str, _user=_dep_pro):
 
 
 @app.post("/portfolio/save_pick")
-def portfolio_save_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
+def portfolio_save_pick(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
     uid = int(_user["id"])
     sym_raw = str((payload or {}).get("symbol") or "").strip().upper()
     sd = _symbol_sanitize(sym_raw, allow_extended=False)
@@ -10938,7 +10938,7 @@ def portfolio_save_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
 
 
 @app.post("/portfolio/close_pick")
-def portfolio_close_pick(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
+def portfolio_close_pick(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
     uid = int(_user["id"])
     pid = str((payload or {}).get("id") or "").strip()
     if not pid:
