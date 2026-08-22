@@ -9373,8 +9373,11 @@ def _check_starter_weekly_limit(user) -> None:
         conn.commit()
 
 
-# Analyze daily limits by plan (calls per UTC day)
-_ANALYZE_DAILY_LIMITS = {"free": 10, "starter": 50}  # pro/elite = unlimited
+# Analyze daily limits by plan (calls per UTC day). Free's real intended cap
+# is 3 -- must match ANALYZE_FREE_LIMIT in the frontend (src/App.jsx). This
+# had drifted to 10 here while the frontend separately enforced 3, so free
+# users only ever actually got the frontend's tighter, disconnected number.
+_ANALYZE_DAILY_LIMITS = {"free": 3, "starter": 50}  # pro/elite = unlimited
 
 
 def _check_analyze_daily_limit(user) -> None:
