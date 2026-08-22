@@ -552,6 +552,35 @@ _login_attempts: dict[str, list[float]] = {}  # email → list of epoch timestam
 _LOGIN_MAX = 10
 _LOGIN_WINDOW = 900  # 15 minutes
 
+_admin_secret_failures: list[float] = []  # global, not per-key -- see _admin_secret_locked_out
+_ADMIN_SECRET_MAX = 20
+_ADMIN_SECRET_WINDOW = 300  # 5 minutes
+
+
+def _admin_secret_locked_out() -> bool:
+    """Throttles guessing attempts against ADMIN_SECRET. This gates every
+    /admin-* endpoint including admin-get-token, which mints a valid session
+    for ANY account by email alone -- unlike per-email limits elsewhere in
+    this file, this is a single global bucket (there's no per-account key to
+    throttle on; the thing being brute-forced is one shared secret).
+
+    Only WRONG-secret attempts count against the budget (see
+    _record_admin_secret_failure, called only on a failed comparison) --
+    counting every call regardless of outcome was the first version of this
+    and it self-locked real admin use: the analytics dashboard polls
+    /admin/analytics every 8s with the *correct* secret, which alone exceeds
+    20-per-5min and would have permanently exhausted the budget for
+    admin-get-token too. Counting failures only still stops guessing while
+    never penalizing legitimate, correctly-authenticated traffic."""
+    now = _time.time()
+    global _admin_secret_failures
+    _admin_secret_failures = [t for t in _admin_secret_failures if now - t < _ADMIN_SECRET_WINDOW]
+    return len(_admin_secret_failures) >= _ADMIN_SECRET_MAX
+
+
+def _record_admin_secret_failure() -> None:
+    _admin_secret_failures.append(_time.time())
+
 
 def _login_rate_ok(email: str) -> bool:
     """Every other sensitive auth flow in this file is throttled -- login itself
@@ -1014,8 +1043,12 @@ def disable_2fa(user: sqlite3.Row = Depends(get_current_user)):
 
 
 @auth_router.post("/logout")
-def logout(response: Response):
-    """Clear the httpOnly session cookie."""
+def logout(response: Response, user: sqlite3.Row = Depends(get_current_user)):
+    """Clear the httpOnly session cookie AND rotate the DB session_id, so a
+    bearer token captured before logout (XSS, shared device, etc.) stops
+    passing get_current_user's single-session check immediately instead of
+    staying valid via replay until natural JWT expiry (up to 30 days)."""
+    _new_session(user["id"])
     response.delete_cookie(key="sq_token", path="/", httponly=True, secure=_IS_PROD, samesite="lax")
     return {"ok": True}
 
@@ -1288,7 +1321,10 @@ def _check_admin_secret(provided: str) -> None:
     """
     if not _ADMIN_SECRET:
         raise HTTPException(status_code=503, detail="Admin endpoints not configured")
+    if _admin_secret_locked_out():
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
     if not hmac.compare_digest(provided or "", _ADMIN_SECRET):
+        _record_admin_secret_failure()
         raise HTTPException(status_code=403, detail="Forbidden")
 
 
