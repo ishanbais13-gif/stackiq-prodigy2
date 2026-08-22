@@ -220,6 +220,30 @@ def init_auth_db() -> None:
                 last_seen_at  TEXT    NOT NULL
             )
         """)
+        # Distinct from device_tokens (APNs push registration): this is the
+        # "how many devices is this account logged in on" cap used to make
+        # sequential credential-sharing across friends annoying, since
+        # single-session enforcement only blocks *simultaneous* use.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_devices (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER NOT NULL,
+                device_id     TEXT    NOT NULL,
+                label         TEXT,
+                first_seen_at TEXT    NOT NULL,
+                last_seen_at  TEXT    NOT NULL,
+                last_ip       TEXT,
+                UNIQUE(user_id, device_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS login_ip_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                ip         TEXT    NOT NULL,
+                seen_at    TEXT    NOT NULL
+            )
+        """)
         conn.commit()
     log.info("auth.db initialised")
 
@@ -965,16 +989,21 @@ class OTPVerifyRequest(BaseModel):
     email: EmailStr
     code: str
     is_new_user: bool = False
+    device_id: str
+    device_label: str = ""
 
 
 @auth_router.post("/verify-otp")
-def verify_otp(body: OTPVerifyRequest, response: Response):
+def verify_otp(body: OTPVerifyRequest, request: Request, response: Response):
     with _get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE LOWER(email) = ?", (body.email.lower(),)).fetchone()
     if user is None:
         raise HTTPException(401, "Invalid code")
     if not _verify_otp(user["id"], body.code.strip()):
         raise HTTPException(401, "Invalid or expired code")
+    # Device-cap check BEFORE minting a token -- this is the real
+    # enforcement point, not the /register-device follow-up call.
+    _enforce_device_cap(user["id"], user["email"], body.device_id, body.device_label, _client_ip(request))
     plan = _user_plan(user)
     sid = _new_session(user["id"])
     token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
@@ -1095,6 +1124,151 @@ def unregister_device_token(device_token: str, user: sqlite3.Row = Depends(get_c
         conn.execute(
             "DELETE FROM device_tokens WHERE device_token = ? AND user_id = ?",
             (device_token, user["id"]),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+_DEVICE_CAP = 2
+_IP_DIVERSITY_WINDOW_DAYS = 30
+_IP_DIVERSITY_FLAG_THRESHOLD = 4  # distinct IPs in the window before flagging
+
+
+def _client_ip(request: Optional[Request]) -> str:
+    if request is None:
+        return "unknown"
+    return (request.headers.get("X-Forwarded-For") or (request.client.host if request.client else None) or "unknown").split(",")[0].strip()
+
+
+def _log_login_ip(user_id: int, ip: str) -> None:
+    with _get_db() as conn:
+        conn.execute(
+            "INSERT INTO login_ip_log (user_id, ip, seen_at) VALUES (?, ?, ?)",
+            (user_id, ip, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+
+
+def _ip_diversity_flagged(user_id: int) -> bool:
+    """Log-only signal, not an enforcement mechanism: True if this account
+    has logged in from an unusually large number of distinct IPs recently.
+    No GeoIP service exists in this codebase, so this is IP-count diversity
+    over a rolling window, not geographic distance -- a real but coarser
+    signal than Netflix-style household detection."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_IP_DIVERSITY_WINDOW_DAYS)).isoformat()
+    with _get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(DISTINCT ip) AS c FROM login_ip_log WHERE user_id = ? AND seen_at >= ?",
+            (user_id, cutoff),
+        ).fetchone()
+    return bool(row and row["c"] and row["c"] >= _IP_DIVERSITY_FLAG_THRESHOLD)
+
+
+def _enforce_device_cap(user_id: int, email: str, device_id: str, label: Optional[str], ip: str) -> None:
+    """Call BEFORE minting a token for a login. Raises 403 (caught by the
+    caller before create_access_token runs) if this is a NEW device and the
+    account is already at the device cap.
+
+    This has to live in the token-issuing endpoints themselves (verify-otp,
+    apple/native, google/callback), not just a follow-up call the frontend
+    makes after -- a follow-up call can't stop a token that's already been
+    minted, and nothing stops a client from skipping it and hitting the raw
+    API directly. Putting the check here means you cannot get a usable
+    token at all without supplying a device_id that either already belongs
+    to this account or fits under the cap -- true even for curl/Postman/a
+    modified client, not just the shipped app UI.
+
+    Single-session enforcement (get_current_user's session_id check)
+    already blocks two people using the account *simultaneously*. This is
+    a different, complementary limit: how many distinct devices can ever
+    be associated with the account, so sequential handoff between friends
+    doesn't let an unlimited rotation of devices share one account.
+    """
+    device_id = (device_id or "").strip()[:128]
+    if not device_id:
+        raise HTTPException(400, "device_id required")
+    label = (label or "").strip()[:80] or None
+    now = datetime.now(timezone.utc).isoformat()
+    is_capped = str(email or "").lower() not in _OTP_EXEMPT_EMAILS  # Apple review may test from multiple devices/simulators; never block that
+
+    with _get_db() as conn:
+        existing = conn.execute(
+            "SELECT id FROM user_devices WHERE user_id = ? AND device_id = ?",
+            (user_id, device_id),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE user_devices SET last_seen_at = ?, last_ip = ?, label = COALESCE(?, label) WHERE id = ?",
+                (now, ip, label, existing["id"]),
+            )
+            conn.commit()
+        else:
+            count_row = conn.execute(
+                "SELECT COUNT(*) AS c FROM user_devices WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            if is_capped and int(count_row["c"] or 0) >= _DEVICE_CAP:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"DEVICE_LIMIT_REACHED:{_DEVICE_CAP}",
+                )
+            try:
+                conn.execute(
+                    "INSERT INTO user_devices (user_id, device_id, label, first_seen_at, last_seen_at, last_ip) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (user_id, device_id, label, now, now, ip),
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                # Another concurrent request for the same new device_id won
+                # the race (double-fired effect, retry) -- it's already
+                # registered now, same as the `existing` branch above.
+                conn.execute(
+                    "UPDATE user_devices SET last_seen_at = ?, last_ip = ?, label = COALESCE(?, label) "
+                    "WHERE user_id = ? AND device_id = ?",
+                    (now, ip, label, user_id, device_id),
+                )
+                conn.commit()
+
+    _log_login_ip(user_id, ip)
+
+
+class _RegisterDeviceBody(BaseModel):
+    device_id: str
+    label: str = ""
+
+
+@auth_router.post("/register-device")
+def register_device(body: _RegisterDeviceBody, request: Request, user: sqlite3.Row = Depends(get_current_user)):
+    """Kept as a harmless, idempotent backstop -- by the time the frontend
+    calls this (right after obtaining any token), the device has normally
+    already been registered by _enforce_device_cap inside the login
+    endpoint itself, which is the actual enforcement point. This mostly
+    just updates last_seen_at/last_ip and refreshes the IP-diversity flag.
+    """
+    _enforce_device_cap(user["id"], user["email"], body.device_id, body.label, _client_ip(request))
+    return {"ok": True, "flagged_ip_diversity": _ip_diversity_flagged(user["id"])}
+
+
+@auth_router.get("/devices")
+def list_devices(user: sqlite3.Row = Depends(get_current_user)):
+    with _get_db() as conn:
+        rows = conn.execute(
+            "SELECT device_id, label, first_seen_at, last_seen_at, last_ip FROM user_devices "
+            "WHERE user_id = ? ORDER BY last_seen_at DESC",
+            (user["id"],),
+        ).fetchall()
+    return {
+        "devices": [dict(r) for r in rows],
+        "cap": _DEVICE_CAP,
+    }
+
+
+@auth_router.delete("/devices/{device_id}")
+def remove_device(device_id: str, user: sqlite3.Row = Depends(get_current_user)):
+    with _get_db() as conn:
+        conn.execute(
+            "DELETE FROM user_devices WHERE user_id = ? AND device_id = ?",
+            (user["id"], device_id),
         )
         conn.commit()
     return {"ok": True}
@@ -2373,7 +2547,7 @@ _ALLOWED_PLANS = {"free", "starter", "pro", "elite"}
 
 
 @oauth_router.get("/google/redirect")
-def google_redirect(plan: str = "free", origin: str = ""):
+def google_redirect(plan: str = "free", origin: str = "", device_id: str = ""):
     if not GOOGLE_CLIENT_ID:
         raise HTTPException(503, "GOOGLE_CLIENT_ID not configured")
     clean_plan = plan.lower() if plan.lower() in _ALLOWED_PLANS else "free"
@@ -2387,7 +2561,11 @@ def google_redirect(plan: str = "free", origin: str = ""):
         "aurexis://auth",
     }
     clean_origin = origin if origin in _allowed_origins else FRONTEND_ORIGIN
-    state = _state_make("google", {"plan": clean_plan, "origin": clean_origin})
+    # device_id rides through the signed state -- Google's own callback URL
+    # isn't ours to attach custom params to outside this, so this is the
+    # only way to get it from "user clicked Sign in with Google" through to
+    # google_callback, where the device-cap check actually happens.
+    state = _state_make("google", {"plan": clean_plan, "origin": clean_origin, "device_id": device_id.strip()[:128]})
     params = urllib.parse.urlencode({
         "client_id":     GOOGLE_CLIENT_ID,
         "redirect_uri":  f"{APP_BASE_URL}/auth/google/callback",
@@ -2401,7 +2579,7 @@ def google_redirect(plan: str = "free", origin: str = ""):
 
 
 @oauth_router.get("/google/callback")
-def google_callback(code: str = "", state: str = "", error: str = ""):
+def google_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     if error:
         # Google always echoes `state` back, even on denial -- the origin
         # embedded in it (already validated against _allowed_origins when
@@ -2453,6 +2631,16 @@ def google_callback(code: str = "", state: str = "", error: str = ""):
     callback_origin = extras.get("origin", FRONTEND_ORIGIN)
 
     log.info("google_callback: email=%s is_new=%s selected_plan=%s origin=%s", user["email"], is_new, selected_plan, callback_origin)
+
+    # Device-cap check BEFORE minting a token, same as every other login
+    # path -- covers both the Stripe-checkout branch below and the plain
+    # _redirect_to_app fallback, since both come after this point.
+    try:
+        _enforce_device_cap(user["id"], user["email"], extras.get("device_id", ""), "", _client_ip(request))
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return RedirectResponse(url=f"{callback_origin}/auth?error=device_limit", status_code=302)
+        raise
 
     # BUG (fixed 2026-07-18): this used to route to a brand-new Stripe
     # checkout for ANY login carrying a plan= parameter, with no regard for
@@ -2545,10 +2733,10 @@ def _apple_client_secret() -> str:
 
 
 @oauth_router.get("/apple/redirect")
-def apple_redirect():
+def apple_redirect(device_id: str = ""):
     if not APPLE_CLIENT_ID:
         raise HTTPException(503, "APPLE_CLIENT_ID not configured")
-    state = _state_make("apple")
+    state = _state_make("apple", {"device_id": device_id.strip()[:128]})
     params = urllib.parse.urlencode({
         "client_id":     APPLE_CLIENT_ID,
         "redirect_uri":  f"{APP_BASE_URL}/auth/apple/callback",
@@ -2562,7 +2750,11 @@ def apple_redirect():
 
 @oauth_router.post("/apple/callback")
 async def apple_callback(request: Request):
-    """Apple sends the callback as an HTTP form POST (not GET)."""
+    """Apple sends the callback as an HTTP form POST (not GET). Not linked
+    from any current frontend button (the web flow uses the JS SDK popup ->
+    /auth/apple/native instead), but the route is live and reachable, so it
+    gets the same device-cap enforcement as every other login path rather
+    than being an unguarded, unlisted bypass."""
     form = await request.form()
     code  = str(form.get("code", ""))
     state = str(form.get("state", ""))
@@ -2601,6 +2793,15 @@ async def apple_callback(request: Request):
         return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=apple_failed", status_code=302)
 
     user, is_new = _upsert_oauth_user(email)
+
+    device_id = _state_extras(state).get("device_id", "")
+    try:
+        _enforce_device_cap(user["id"], user["email"], device_id, "", _client_ip(request))
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            return RedirectResponse(url=f"{FRONTEND_ORIGIN}/auth?error=device_limit", status_code=302)
+        raise
+
     return _redirect_to_app(user, is_new=is_new)
 
 
@@ -2660,10 +2861,12 @@ class _AppleNativeSignIn(BaseModel):
     # for this app -- the client must capture and forward it that one time.
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    device_id: str
+    device_label: str = ""
 
 
 @oauth_router.post("/apple/native")
-def apple_native_signin(body: _AppleNativeSignIn):
+def apple_native_signin(body: _AppleNativeSignIn, request: Request):
     if not APPLE_BUNDLE_ID:
         raise HTTPException(503, "APPLE_BUNDLE_ID not configured")
     try:
@@ -2688,6 +2891,10 @@ def apple_native_signin(body: _AppleNativeSignIn):
     user, is_new = _upsert_oauth_user(email, first_name=first_name, last_name=last_name)
     if is_new:
         send_welcome_email_bg(email, first_name)
+
+    # Device-cap check BEFORE minting a token -- covers both the native app
+    # and the web Sign in with Apple JS SDK popup, which both post here.
+    _enforce_device_cap(user["id"], user["email"], body.device_id, body.device_label, _client_ip(request))
 
     plan = _user_plan(user)
     sid = _new_session(user["id"])
