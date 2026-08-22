@@ -923,7 +923,14 @@ def signup(body: SignupRequest, response: Response):
             conn.commit()
             user_id = cur.lastrowid
     except sqlite3.IntegrityError:
-        raise HTTPException(409, "Email already registered")
+        # Same response shape as a genuine new signup -- a distinguishable
+        # 409 here let anyone probe which emails already have an Aurexis
+        # account (unlike forgot-password/resend-otp, which already always
+        # return the same generic response for exactly this reason). No
+        # duplicate account is created and no OTP goes out for the existing
+        # one; the attacker just lands on an OTP screen that can never
+        # complete, while the real account is untouched.
+        return {"requires_2fa": True, "email": body.email, "first_name": first, "is_new_user": True}
 
     # NOTE: _OTP_EXEMPT_EMAILS is deliberately NOT checked here. Doing so at
     # signup would let anyone who wins the race to register that literal
@@ -997,9 +1004,10 @@ class OTPVerifyRequest(BaseModel):
 def verify_otp(body: OTPVerifyRequest, request: Request, response: Response):
     with _get_db() as conn:
         user = conn.execute("SELECT * FROM users WHERE LOWER(email) = ?", (body.email.lower(),)).fetchone()
-    if user is None:
-        raise HTTPException(401, "Invalid code")
-    if not _verify_otp(user["id"], body.code.strip()):
+    # Same message whether the email doesn't exist or the code was wrong for
+    # a real account -- these used to be distinguishable ("Invalid code" vs
+    # "Invalid or expired code"), an enumeration side-channel.
+    if user is None or not _verify_otp(user["id"], body.code.strip()):
         raise HTTPException(401, "Invalid or expired code")
     # Device-cap check BEFORE minting a token -- this is the real
     # enforcement point, not the /register-device follow-up call.

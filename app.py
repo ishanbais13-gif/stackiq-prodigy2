@@ -11198,11 +11198,17 @@ async def scan_pre_movers(
 
 
 @app.post("/scan/brain_reset", include_in_schema=True)
-async def scan_brain_reset(_user=_dep_elite):
+async def scan_brain_reset(payload: Dict[str, Any] = Body(...)):
     """
     Wipe ALL outcomes and signal_stats, then run a full backfill with correct bar data.
     Use this once to clear corrupt outcomes from the old get_snapshots_batch bug.
+
+    Admin-gated, not tier-gated: this destroys shared learning data for
+    every user, not just the caller's own account -- a paying Elite
+    customer is not the right authorization level for an operation with
+    that blast radius (security review finding, fixed 2026-08-22).
     """
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
     import asyncio
     try:
         from brain import _conn, backfill_all_outcomes, recalibrate_weights
