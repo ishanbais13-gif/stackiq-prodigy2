@@ -29,7 +29,9 @@ ALERT_TO_EMAIL = os.getenv("ALERT_TO_EMAIL", "")
 
 def _get_db_connection():
     """Get SQLite database connection"""
-    conn = sqlite3.connect(ALERTS_DB_PATH)
+    conn = sqlite3.connect(ALERTS_DB_PATH, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     return conn
 

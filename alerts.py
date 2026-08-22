@@ -42,7 +42,7 @@ def migrate_alerts_columns() -> None:
     worth the risk. Nothing in this module reads or writes them anymore.
     """
     try:
-        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False, timeout=30)
         for col, defn in [
             ("phone",            "TEXT"),
             ("alerts_new_pick",  "INTEGER NOT NULL DEFAULT 1"),
@@ -69,7 +69,7 @@ migrate_alerts_columns()
 def _get_opted_in_users(alert_col: str) -> List[Dict[str, Any]]:
     """Return active paid users who opted in to the given alert column. Free users never get alerts."""
     try:
-        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             f"SELECT email, first_name FROM users "
@@ -362,7 +362,7 @@ def send_outcome_alert_bg(symbol: str, status: str,
 
 def get_alert_prefs(user_id: int) -> Dict[str, Any]:
     try:
-        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT alerts_new_pick, alerts_outcome FROM users WHERE id=?",
@@ -382,7 +382,7 @@ def get_alert_prefs(user_id: int) -> Dict[str, Any]:
 
 def save_alert_prefs(user_id: int, alerts_new_pick: bool, alerts_outcome: bool) -> bool:
     try:
-        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False, timeout=30)
         conn.execute(
             "UPDATE users SET alerts_new_pick=?, alerts_outcome=? WHERE id=?",
             (int(alerts_new_pick), int(alerts_outcome), user_id)

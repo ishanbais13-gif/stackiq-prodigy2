@@ -62,7 +62,7 @@ def _provider_token() -> str:
 def _get_all_device_tokens() -> List[Dict[str, Any]]:
     """Every registered device across every plan -- push isn't paid-gated at registration."""
     try:
-        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False, timeout=30)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             """
@@ -80,7 +80,7 @@ def _get_all_device_tokens() -> List[Dict[str, Any]]:
 
 def _delete_device_token(token: str) -> None:
     try:
-        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False, timeout=30)
         conn.execute("DELETE FROM device_tokens WHERE device_token = ?", (token,))
         conn.commit()
         conn.close()

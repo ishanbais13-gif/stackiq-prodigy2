@@ -3211,7 +3211,14 @@ def _db_path() -> str:
 
 
 def _db_connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(_db_path())
+    # WAL lets readers proceed while a writer holds the lock (default
+    # rollback-journal mode blocks everyone during a write); busy_timeout
+    # makes a connection wait out a brief lock instead of erroring
+    # immediately. Without these, concurrent writers (e.g. /track/ping's
+    # ~45s heartbeat racing a save_pick) throw "database is locked".
+    conn = sqlite3.connect(_db_path(), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     return conn
 
