@@ -134,7 +134,13 @@ _AUTH_DB_PATH = os.path.join(_DATA_DIR, "auth.db")
 
 
 def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False)
+    # WAL lets readers proceed while a writer holds the lock (default
+    # rollback-journal mode blocks everyone during a write); busy_timeout
+    # makes a connection wait out a brief lock instead of erroring
+    # immediately. See matching fix + rationale in app.py's _db_connect().
+    conn = sqlite3.connect(_AUTH_DB_PATH, check_same_thread=False, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -866,19 +872,15 @@ def signup(body: SignupRequest, response: Response):
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Email already registered")
 
-    if body.email.lower() in _OTP_EXEMPT_EMAILS:
-        plan = "free"
-        sid = _new_session(user_id)
-        token = create_access_token(user_id, body.email, plan=plan, session_id=sid)
-        _set_auth_cookie(response, token)
-        return {
-            "access_token": token,
-            "token_type": "bearer",
-            "user_id": user_id,
-            "email": body.email,
-            "plan": plan,
-            "first_name": first,
-        }
+    # NOTE: _OTP_EXEMPT_EMAILS is deliberately NOT checked here. Doing so at
+    # signup would let anyone who wins the race to register that literal
+    # email string (before the real account exists) get an immediate,
+    # permanent OTP-free token -- and _owner_upgrade() would then promote
+    # that attacker-controlled row to Elite on the next deploy. The
+    # exemption is only honored in login() below, which by construction can
+    # only ever apply to a row that already exists and was provisioned
+    # through a controlled path, not one anyone can create by calling this
+    # public endpoint. (Security review finding, fixed 2026-08-22.)
 
     # Send OTP for mandatory 2FA — welcome email fires after OTP verified
     send_otp_bg(user_id, body.email, first)
