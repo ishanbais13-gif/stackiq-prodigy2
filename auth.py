@@ -84,6 +84,11 @@ JWT_SECRET = _JWT_SECRET_RAW
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_DAYS = 30
 
+# Apple App Review demo account — Apple reviewers cannot receive OTP emails,
+# so this exact address skips mandatory 2FA at signup and login. Scoped to a
+# single literal email; does not affect OTP behavior for any other user.
+_OTP_EXEMPT_EMAILS = {"applereview@useaurexis.com"}
+
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 
@@ -861,6 +866,20 @@ def signup(body: SignupRequest, response: Response):
     except sqlite3.IntegrityError:
         raise HTTPException(409, "Email already registered")
 
+    if body.email.lower() in _OTP_EXEMPT_EMAILS:
+        plan = "free"
+        sid = _new_session(user_id)
+        token = create_access_token(user_id, body.email, plan=plan, session_id=sid)
+        _set_auth_cookie(response, token)
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user_id": user_id,
+            "email": body.email,
+            "plan": plan,
+            "first_name": first,
+        }
+
     # Send OTP for mandatory 2FA — welcome email fires after OTP verified
     send_otp_bg(user_id, body.email, first)
     return {"requires_2fa": True, "email": body.email, "first_name": first, "is_new_user": True}
@@ -883,10 +902,25 @@ def login(body: LoginRequest, response: Response):
             detail="Invalid email or password",
         )
 
-    # 2FA is mandatory — always send OTP and require verification
     first = ""
     try: first = user["first_name"] or ""
     except (IndexError, KeyError): pass
+
+    if email_lower in _OTP_EXEMPT_EMAILS:
+        plan = _user_plan(user)
+        sid = _new_session(user["id"])
+        token = create_access_token(user["id"], user["email"], plan=plan, session_id=sid)
+        _set_auth_cookie(response, token)
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user_id": user["id"],
+            "email": user["email"],
+            "plan": plan,
+            "first_name": first,
+        }
+
+    # 2FA is mandatory — always send OTP and require verification
     send_otp_bg(user["id"], user["email"], first)
     return {"requires_2fa": True, "email": user["email"]}
 
@@ -1576,7 +1610,10 @@ def admin_reset_picks(body: AdminResetPicksRequest):
 def _owner_upgrade() -> None:
     try:
         with _get_db() as conn:
-            for email in ("ishanbais13@gmail.com", "baisishan48@gmail.com"):
+            # Owner accounts, plus the Apple App Review demo account (needs
+            # subscription_status='active' too -- plan alone doesn't pass
+            # require_plan's active-subscription check, see require_plan()).
+            for email in ("ishanbais13@gmail.com", "baisishan48@gmail.com", "applereview@useaurexis.com"):
                 conn.execute(
                     "UPDATE users SET plan='elite', subscription_status='active' WHERE email=?",
                     (email,),
