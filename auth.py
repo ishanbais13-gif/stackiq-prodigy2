@@ -1690,6 +1690,41 @@ def admin_stripe_lookup(body: AdminStripeLookupRequest):
     return result
 
 
+class AdminPriceCheckRequest(BaseModel):
+    secret: str
+
+
+@auth_router.post("/admin-price-check")
+def admin_price_check(body: AdminPriceCheckRequest):
+    """
+    Diagnostic: what does Stripe actually charge for each configured plan
+    price ID? Read-only -- exists to reconcile the marketing page's
+    displayed price against what a subscriber is actually billed, without
+    needing to open the Stripe dashboard by hand.
+    """
+    _check_admin_secret(body.secret)
+    if _stripe is None or not STRIPE_SECRET_KEY:
+        raise HTTPException(503, "Stripe not configured")
+    out = {}
+    for plan, price_id in PLAN_PRICES.items():
+        if not price_id:
+            out[plan] = {"price_id": None, "error": "not configured"}
+            continue
+        try:
+            price = _stripe_to_dict(_stripe.Price.retrieve(price_id))
+            out[plan] = {
+                "price_id": price_id,
+                "unit_amount": price.get("unit_amount"),
+                "unit_amount_display": (price.get("unit_amount") or 0) / 100,
+                "currency": price.get("currency"),
+                "recurring": price.get("recurring"),
+                "active": price.get("active"),
+            }
+        except Exception as exc:
+            out[plan] = {"price_id": price_id, "error": str(exc)}
+    return out
+
+
 class AdminReconcileStripeRequest(BaseModel):
     secret: str
     apply: bool = False
@@ -3027,6 +3062,26 @@ def iap_verify(body: _IAPVerifyRequest, user: sqlite3.Row = Depends(get_current_
         log.warning("iap_verify: unrecognized productId=%s for user_id=%s", product_id, user["id"])
         raise HTTPException(400, f"Unrecognized product: {product_id}")
 
+    # A verified JWS is proof the transaction is real, not proof the caller
+    # is the one who bought it -- the string itself is just something the
+    # app forwards, and can be captured/replayed (proxy, jailbreak, shared
+    # screenshot) to claim the same underlying Apple purchase on any number
+    # of separate Aurexis accounts. Bind originalTransactionId to exactly
+    # one account: once claimed, reject verification from a different user.
+    original_transaction_id = transaction.originalTransactionId
+    if original_transaction_id:
+        with _get_db() as conn:
+            claimed_by = conn.execute(
+                "SELECT id FROM users WHERE apple_original_transaction_id = ?",
+                (original_transaction_id,),
+            ).fetchone()
+        if claimed_by and claimed_by["id"] != user["id"]:
+            log.warning(
+                "iap_verify: originalTransactionId=%s already claimed by user_id=%s, rejecting for user_id=%s",
+                original_transaction_id, claimed_by["id"], user["id"],
+            )
+            raise HTTPException(409, "This purchase is already linked to a different Aurexis account.")
+
     # Phase 5 dual-billing guard: a user already paying via Stripe must not
     # also get billed through Apple -- refuse instead of silently letting
     # both billing sources exist for the same account.
@@ -3059,7 +3114,6 @@ def iap_verify(body: _IAPVerifyRequest, user: sqlite3.Row = Depends(get_current_
         billing_source="apple_iap",
     )
 
-    original_transaction_id = transaction.originalTransactionId
     if original_transaction_id:
         with _get_db() as conn:
             conn.execute(
