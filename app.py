@@ -3203,11 +3203,26 @@ def _clamp_0_to_10(x: Any) -> float:
 
 
 def _db_path() -> str:
+    # Bug found 2026-08-23: this used to default to the bare relative string
+    # "stackiq.db", unlike auth.py's _AUTH_DB_PATH (anchored to an absolute
+    # DATA_DIR-based path). Nothing pins the process's working directory
+    # (the Procfile just runs `gunicorn ... app:app`, no `cd`), so a
+    # relative path silently points at a DIFFERENT file if the runtime's
+    # CWD ever differs between deploys/restarts -- portfolio/watchlist/
+    # saved_picks/app_visits data goes silently "missing" (the file is
+    # still there, just no longer the one being opened), while auth.db's
+    # users/sessions stay intact throughout because its path never moved.
+    # Anchoring to the same DATA_DIR pattern auth.py already uses fixes
+    # this for good, matching STACKIQ_DB_PATH's explicit-override behavior
+    # if that env var is set.
     try:
-        p = str(os.getenv("STACKIQ_DB_PATH", "stackiq.db") or "stackiq.db").strip()
+        override = str(os.getenv("STACKIQ_DB_PATH", "") or "").strip()
     except Exception:
-        p = "stackiq.db"
-    return p if p else "stackiq.db"
+        override = ""
+    if override:
+        return override
+    data_dir = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(data_dir, "stackiq.db")
 
 
 def _db_connect() -> sqlite3.Connection:

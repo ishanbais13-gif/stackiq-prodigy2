@@ -11,8 +11,16 @@ import logging
 
 log = logging.getLogger(__name__)
 
-# SQLite database for alerts
-ALERTS_DB_PATH = os.getenv("ALERTS_DB_PATH", "stackiq.db")
+# SQLite database for alerts -- shares app.py's main stackiq.db by default,
+# so this has to resolve to the exact same absolute path app.py's _db_path()
+# does (DATA_DIR-anchored), not a bare relative string. See the fix +
+# rationale on app.py's _db_path() (2026-08-23): an unanchored relative
+# path silently points at a different file if the process's working
+# directory ever differs between deploys/restarts.
+ALERTS_DB_PATH = os.getenv("ALERTS_DB_PATH", "") or os.path.join(
+    os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__))),
+    "stackiq.db"
+)
 
 # Email configuration
 EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "false").lower() == "true"
