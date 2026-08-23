@@ -5126,8 +5126,13 @@ async def analyze(
             "why": reasoning.get("why") if isinstance(reasoning.get("why"), list) else [],
             "confirms": reasoning.get("confirms") if isinstance(reasoning.get("confirms"), list) else [],
             "breaks": reasoning.get("breaks") if isinstance(reasoning.get("breaks"), list) else [],
-            "metrics_interpretation": str(reasoning.get("metrics_interpretation") or ""),
-            "metrics_next_steps": str(reasoning.get("metrics_next_steps") or ""),
+            # Advanced Metrics AI explainer -- Starter+ only (2026-08-22 product
+            # decision: gate and advertise, rather than leave free-for-all with
+            # no pricing-page mention). Still computed for every tier (shared
+            # _trade_reasoning cache/LLM call also feeds best_pick_v2), just
+            # stripped from the response for Free.
+            "metrics_interpretation": str(reasoning.get("metrics_interpretation") or "") if str(_user["plan"] or "free").lower() != "free" else "",
+            "metrics_next_steps": str(reasoning.get("metrics_next_steps") or "") if str(_user["plan"] or "free").lower() != "free" else "",
         },
         "market_data": market_data,
         "market_cap": market_cap,
@@ -10796,14 +10801,10 @@ def portfolio_add(payload: Dict[str, Any] = Body(...), _user=_dep_pro):
     if not bool(sd.get("ok")) or not sym:
         return _no_nulls({"ok": True, "symbol": sym_raw, "added": False})
 
-    try:
-        shares = float((payload or {}).get("shares") or 0.0)
-    except Exception:
-        shares = 0.0
-    try:
-        avg_price = float((payload or {}).get("avg_price") or 0.0)
-    except Exception:
-        avg_price = 0.0
+    # _safe_f rejects non-finite values -- see the matching fix + rationale
+    # in portfolio_save_pick above.
+    shares = _safe_f((payload or {}).get("shares")) or 0.0
+    avg_price = _safe_f((payload or {}).get("avg_price")) or 0.0
     if shares <= 0:
         shares = 0.0
     if avg_price < 0:
@@ -10871,21 +10872,17 @@ def portfolio_save_pick(payload: Dict[str, Any] = Body(...), _user=_dep_starter)
     reason = str((payload or {}).get("reason") or "")[:240]
     source = str((payload or {}).get("source") or "")[:60]
 
-    try:
-        entry_f = float(entry) if entry is not None else None
-    except Exception:
-        entry_f = None
+    # _safe_f rejects non-finite values (inf/nan) -- a raw float(x) here let
+    # "Infinity"/"NaN" strings through unclamped (unlike score/confidence a
+    # few lines below, which already use _clamp_0_to_10's isfinite check),
+    # producing a saved_picks row that later broke close_pick's pnl math
+    # and the JSON response itself (Infinity/NaN aren't valid JSON tokens).
+    entry_f = _safe_f(entry)
     if entry_f is None or entry_f <= 0:
         px = _latest_price_for_symbol(sym)
-        try:
-            entry_f = float(px) if px is not None else 0.0
-        except Exception:
-            entry_f = 0.0
+        entry_f = _safe_f(px) or 0.0
 
-    try:
-        stop_f = float(stop_loss) if stop_loss is not None else None
-    except Exception:
-        stop_f = None
+    stop_f = _safe_f(stop_loss)
     if stop_f is None:
         stop_f = 0.0
 
