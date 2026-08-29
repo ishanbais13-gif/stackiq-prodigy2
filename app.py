@@ -11448,7 +11448,11 @@ def _chat_build_context(user_id: Optional[int] = None, user_plan: Optional[str] 
             "SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) as clean_losses, "
             "SUM(CASE WHEN status='lost_drift' THEN 1 ELSE 0 END) as drift_losses, "
             "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending, "
-            "SUM(CASE WHEN status='expired_neutral' THEN 1 ELSE 0 END) as neutral "
+            "SUM(CASE WHEN status='expired_neutral' THEN 1 ELSE 0 END) as neutral, "
+            "AVG(CASE WHEN status IN ('won','won_drift') THEN exit_return_pct END) as avg_win_pct, "
+            "COUNT(CASE WHEN status IN ('won','won_drift') AND exit_return_pct IS NOT NULL THEN 1 END) as avg_win_n, "
+            "AVG(CASE WHEN status IN ('lost','lost_drift') THEN exit_return_pct END) as avg_loss_pct, "
+            "COUNT(CASE WHEN status IN ('lost','lost_drift') AND exit_return_pct IS NOT NULL THEN 1 END) as avg_loss_n "
             "FROM picks WHERE recorded_at >= ?",
             (_since_ts,),
         ).fetchone()
@@ -11465,12 +11469,47 @@ def _chat_build_context(user_id: Optional[int] = None, user_plan: Optional[str] 
             )
             lines.append(
                 f"\nPERFORMANCE SUMMARY (last 28 days, authoritative for win-rate questions -- NOT all-time): "
-                f"{row2['total']} total | "
+                f"{row2['total']} total picks generated | "
                 f"{wins} wins ({clean_wins} hit target cleanly, {drift_wins} closed positive after the hold "
                 f"window expired without hitting target or stop) | "
                 f"{losses} losses ({clean_losses} hit stop cleanly, {drift_losses} closed negative after the hold "
                 f"window expired) | {int(row2['pending'])} still open | {int(row2['neutral'])} closed neutral (no clear win or loss) | "
                 f"win rate {wr:.1f}% (wins / (wins+losses); excludes still-open and neutral picks from the denominator){caveat}"
+            )
+
+            # Average return magnitude -- same window/source as win rate above,
+            # using exit_return_pct (the realized return at close-out, not the
+            # peak reached mid-hold -- see RECENT PICKS note on why that
+            # distinction matters). A handful of picks that closed before the
+            # exit_return_pct column existed (pre Aug-8-2026 migration) were
+            # backfilled from max_return_pct/max_drawdown_pct for won/lost, but
+            # won_drift/lost_drift couldn't be safely backfilled (that value
+            # was never stored separately) -- avg_win_n/avg_loss_n can be lower
+            # than wins/losses above for exactly that reason, called out below
+            # rather than silently averaging over fewer picks than stated.
+            avg_win_pct = row2["avg_win_pct"]
+            avg_win_n = int(row2["avg_win_n"] or 0)
+            avg_loss_pct = row2["avg_loss_pct"]
+            avg_loss_n = int(row2["avg_loss_n"] or 0)
+
+            avg_win_str = f"{avg_win_pct:+.1f}% (n={avg_win_n})" if avg_win_n > 0 else "no data available"
+            avg_loss_str = f"{avg_loss_pct:+.1f}% (n={avg_loss_n})" if avg_loss_n > 0 else "no data available"
+            if avg_win_n > 0 and avg_loss_n > 0 and avg_loss_pct:
+                ratio_str = f"{abs(avg_win_pct / avg_loss_pct):.2f}x (avg win size / avg loss size)"
+            else:
+                ratio_str = "not computable -- insufficient win/loss return data"
+
+            missing_bits = []
+            if avg_win_n < wins:
+                missing_bits.append(f"{wins - avg_win_n} win(s) excluded (no realized-return data)")
+            if avg_loss_n < losses:
+                missing_bits.append(f"{losses - avg_loss_n} loss(es) excluded (no realized-return data)")
+            missing_note = f" [{'; '.join(missing_bits)}]" if missing_bits else ""
+
+            lines.append(
+                f"AVG RETURN (same 28-day window, realized return at close-out): "
+                f"avg win {avg_win_str} | avg loss {avg_loss_str} | "
+                f"win/loss magnitude ratio {ratio_str}{missing_note}{caveat}"
             )
     except Exception:
         pass
@@ -11530,7 +11569,8 @@ You know about:
 When discussing performance data (win rate, past picks, returns):
 - Always state the real number plainly and first — never omit, round favorably, or avoid a number that exists in your context just because it's unflattering.
 - Add brief, honest context that helps the user interpret it correctly — e.g. sample size, whether the system is intentionally selective (it sits out rather than forcing weak trades), or how the metric compares across different time windows if that data is available.
-- Never use hedging language like "I don't have that data" if the data IS present in your context — only say that if it's genuinely absent. RECENT PICKS being mostly "pending" is normal (new picks haven't had time to resolve) and is not a reason to avoid the PERFORMANCE SUMMARY win rate, which is a separate, trailing-28-day figure. When PERFORMANCE SUMMARY includes a small-sample note, pass that caveat along — don't state the percentage with more confidence than the data supports.
+- Never use hedging language like "I don't have that data" if the data IS present in your context — only say that if it's genuinely absent. RECENT PICKS being mostly "pending" is normal (new picks haven't had time to resolve) and is not a reason to avoid the PERFORMANCE SUMMARY win rate, which is a separate, trailing-28-day figure. When PERFORMANCE SUMMARY or AVG RETURN includes a small-sample note, or AVG RETURN says a figure is "no data available" / "not computable", pass that along exactly — don't state a number with more confidence than the data supports, and don't invent a number or ratio when told there isn't enough data to compute one.
+- For "average win/loss" or "risk-reward" questions, use the AVG RETURN line (same 28-day window as PERFORMANCE SUMMARY, realized return at close-out) rather than eyeballing individual RECENT PICKS returns.
 - Never use promotional or defensive language ("don't worry", "still great", "impressive") — state facts, offer relevant context, and let the user draw their own conclusion.
 - If the honest answer to a question is mediocre or negative, answer it exactly as plainly as you would a positive one. Consistency in tone matters more than making any single number look good.
 
