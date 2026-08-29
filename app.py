@@ -11430,7 +11430,15 @@ def _chat_build_context(user_id: Optional[int] = None, user_plan: Optional[str] 
     # every row2["..."] lookup below raised TypeError (tuples aren't
     # subscriptable by string key) and this whole section was silently
     # dropped on every single call -- not intermittent, always missing.
+    #
+    # BUG (fixed): this also queried the entire all-time picks table with
+    # no date scoping -- 344 picks stretching back through early/test data,
+    # producing "43% / 344 trades" -- vs. the ~117 picks a manual audit of
+    # the actual recent 4-week window found (~52% win rate). "Win rate?"
+    # means recent performance, not a number padded by ancient history.
+    # Scope to the same trailing-28-day window the audit used.
     try:
+        _since_ts = time.time() - 28 * 86400
         con2 = _sq.connect(_pt, timeout=5)
         con2.row_factory = _sq.Row
         row2 = con2.execute(
@@ -11439,21 +11447,30 @@ def _chat_build_context(user_id: Optional[int] = None, user_plan: Optional[str] 
             "SUM(CASE WHEN status='won_drift' THEN 1 ELSE 0 END) as drift_wins, "
             "SUM(CASE WHEN status='lost' THEN 1 ELSE 0 END) as clean_losses, "
             "SUM(CASE WHEN status='lost_drift' THEN 1 ELSE 0 END) as drift_losses, "
-            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending "
-            "FROM picks"
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending, "
+            "SUM(CASE WHEN status='expired_neutral' THEN 1 ELSE 0 END) as neutral "
+            "FROM picks WHERE recorded_at >= ?",
+            (_since_ts,),
         ).fetchone()
         con2.close()
         if row2:
             clean_wins, drift_wins = int(row2["clean_wins"]), int(row2["drift_wins"])
             clean_losses, drift_losses = int(row2["clean_losses"]), int(row2["drift_losses"])
             wins, losses = clean_wins + drift_wins, clean_losses + drift_losses
-            wr = wins / max(wins + losses, 1) * 100
+            decided = wins + losses
+            wr = wins / max(decided, 1) * 100
+            caveat = (
+                " -- NOTE: small sample size, treat this as directional, not a statistically reliable long-run number."
+                if decided < 100 else ""
+            )
             lines.append(
-                f"\nPERFORMANCE SUMMARY (all-time, authoritative for win-rate questions): {row2['total']} total | "
+                f"\nPERFORMANCE SUMMARY (last 28 days, authoritative for win-rate questions -- NOT all-time): "
+                f"{row2['total']} total | "
                 f"{wins} wins ({clean_wins} hit target cleanly, {drift_wins} closed positive after the hold "
                 f"window expired without hitting target or stop) | "
                 f"{losses} losses ({clean_losses} hit stop cleanly, {drift_losses} closed negative after the hold "
-                f"window expired) | {row2['pending']} pending | win rate {wr:.0f}% (blended, all outcome types)"
+                f"window expired) | {int(row2['pending'])} still open | {int(row2['neutral'])} closed neutral (no clear win or loss) | "
+                f"win rate {wr:.1f}% (wins / (wins+losses); excludes still-open and neutral picks from the denominator){caveat}"
             )
     except Exception:
         pass
@@ -11513,7 +11530,7 @@ You know about:
 When discussing performance data (win rate, past picks, returns):
 - Always state the real number plainly and first — never omit, round favorably, or avoid a number that exists in your context just because it's unflattering.
 - Add brief, honest context that helps the user interpret it correctly — e.g. sample size, whether the system is intentionally selective (it sits out rather than forcing weak trades), or how the metric compares across different time windows if that data is available.
-- Never use hedging language like "I don't have that data" if the data IS present in your context — only say that if it's genuinely absent. RECENT PICKS being mostly "pending" is normal (new picks haven't had time to resolve) and is not a reason to avoid the PERFORMANCE SUMMARY win rate, which is a separate, all-time figure.
+- Never use hedging language like "I don't have that data" if the data IS present in your context — only say that if it's genuinely absent. RECENT PICKS being mostly "pending" is normal (new picks haven't had time to resolve) and is not a reason to avoid the PERFORMANCE SUMMARY win rate, which is a separate, trailing-28-day figure. When PERFORMANCE SUMMARY includes a small-sample note, pass that caveat along — don't state the percentage with more confidence than the data supports.
 - Never use promotional or defensive language ("don't worry", "still great", "impressive") — state facts, offer relevant context, and let the user draw their own conclusion.
 - If the honest answer to a question is mediocre or negative, answer it exactly as plainly as you would a positive one. Consistency in tone matters more than making any single number look good.
 
