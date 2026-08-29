@@ -11511,6 +11511,44 @@ def _chat_build_context(user_id: Optional[int] = None, user_plan: Optional[str] 
                 f"avg win {avg_win_str} | avg loss {avg_loss_str} | "
                 f"win/loss magnitude ratio {ratio_str}{missing_note}{caveat}"
             )
+
+            # Period-over-period comparison -- gives the system prompt's
+            # "how the metric compares across different time windows" line
+            # something real to point at (it used to reference this with no
+            # such data ever actually provided). Prior window is the 28 days
+            # immediately before the current one, same win-rate methodology.
+            try:
+                _prior_since = _since_ts - 28 * 86400
+                con4 = _sq.connect(_pt, timeout=5)
+                con4.row_factory = _sq.Row
+                row4 = con4.execute(
+                    "SELECT "
+                    "SUM(CASE WHEN status IN ('won','won_drift') THEN 1 ELSE 0 END) as prior_wins, "
+                    "SUM(CASE WHEN status IN ('lost','lost_drift') THEN 1 ELSE 0 END) as prior_losses "
+                    "FROM picks WHERE recorded_at >= ? AND recorded_at < ?",
+                    (_prior_since, _since_ts),
+                ).fetchone()
+                con4.close()
+                prior_wins = int(row4["prior_wins"] or 0)
+                prior_losses = int(row4["prior_losses"] or 0)
+                prior_decided = prior_wins + prior_losses
+                if prior_decided > 0:
+                    prior_wr = prior_wins / prior_decided * 100
+                    delta = wr - prior_wr
+                    small_note = (
+                        " -- NOTE: at least one of the two periods has a small sample, so this difference is "
+                        "not a confirmed trend, just what each period's numbers happen to show right now."
+                        if (decided < 100 or prior_decided < 100) else ""
+                    )
+                    lines.append(
+                        f"PERIOD COMPARISON: current 28-day win rate {wr:.1f}% (n={decided}) vs "
+                        f"prior 28-day window {prior_wr:.1f}% (n={prior_decided}) "
+                        f"({'+' if delta >= 0 else ''}{delta:.1f} points){small_note}"
+                    )
+                else:
+                    lines.append("PERIOD COMPARISON: no prior-28-day-window data available to compare against.")
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -11568,9 +11606,10 @@ You know about:
 
 When discussing performance data (win rate, past picks, returns):
 - Always state the real number plainly and first — never omit, round favorably, or avoid a number that exists in your context just because it's unflattering.
-- Add brief, honest context that helps the user interpret it correctly — e.g. sample size, whether the system is intentionally selective (it sits out rather than forcing weak trades), or how the metric compares across different time windows if that data is available.
+- Add brief, honest context that helps the user interpret it correctly — e.g. sample size, whether the system is intentionally selective (it sits out rather than forcing weak trades), or the PERIOD COMPARISON line when it's directly relevant to what was asked.
 - Never use hedging language like "I don't have that data" if the data IS present in your context — only say that if it's genuinely absent. RECENT PICKS being mostly "pending" is normal (new picks haven't had time to resolve) and is not a reason to avoid the PERFORMANCE SUMMARY win rate, which is a separate, trailing-28-day figure. When PERFORMANCE SUMMARY or AVG RETURN includes a small-sample note, or AVG RETURN says a figure is "no data available" / "not computable", pass that along exactly — don't state a number with more confidence than the data supports, and don't invent a number or ratio when told there isn't enough data to compute one.
 - For "average win/loss" or "risk-reward" questions, use the AVG RETURN line (same 28-day window as PERFORMANCE SUMMARY, realized return at close-out) rather than eyeballing individual RECENT PICKS returns.
+- For "is performance improving/declining" or "how does this period compare" questions, use the PERIOD COMPARISON line (current vs. prior 28-day window). If it says the difference isn't a confirmed trend due to small sample size, say exactly that — don't describe a small-sample swing as a real improvement or decline. If it says no prior-period data is available, say that plainly rather than guessing at a trend.
 - Never use promotional or defensive language ("don't worry", "still great", "impressive") — state facts, offer relevant context, and let the user draw their own conclusion.
 - If the honest answer to a question is mediocre or negative, answer it exactly as plainly as you would a positive one. Consistency in tone matters more than making any single number look good.
 
