@@ -1189,11 +1189,19 @@ def get_bars(symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
     start_dt = now_utc - timedelta(days=int(lookback_days))
     start_iso = start_dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
     end_iso = now_utc.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    # Alpaca returns the first N bars matching sort order within [start, end], not
+    # the most recent N. With sort="asc" and a limit smaller than the number of bars
+    # actually inside the window, that means the OLDEST N bars come back instead of
+    # the most recent N (window can silently go stale by months). Request a page big
+    # enough to cover the whole window (Alpaca's stocks-bars max is 10000) and slice
+    # to the most recent `lim0` bars ourselves, so callers still get ascending-order
+    # data (oldest-first, most-recent-last) that actually reaches "now".
+    request_limit = max(int(lim0), 10000)
     base_params = {
         "timeframe": tf,
         "start": start_iso,
         "end": end_iso,
-        "limit": int(lim0),
+        "limit": int(request_limit),
         "adjustment": "raw",
         "sort": "asc",
     }
@@ -1292,6 +1300,9 @@ def get_bars(symbol: str, timeframe: str, limit: int) -> Dict[str, Any]:
                     "v": b.get("v"),
                 }
             )
+
+        if len(candles) > lim0:
+            candles = candles[-lim0:]
 
         if candles and len(candles) >= int(min_needed):
             _set_cache(candles)

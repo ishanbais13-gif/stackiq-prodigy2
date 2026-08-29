@@ -10411,6 +10411,57 @@ def admin_picks_raw(payload: Dict[str, Any] = Body(...)):
     return {"picks": [dict(r) for r in rows], "count": len(rows)}
 
 
+@app.post("/admin/backfill-exit-return-pct", include_in_schema=False)
+def admin_backfill_exit_return_pct(payload: Dict[str, Any] = Body(...)):
+    """
+    One-time data-completeness backfill: exit_return_pct was added in a later
+    migration than the picks it now documents, so any pick that closed out
+    (won/won_drift/lost/lost_drift) before that column existed was left with
+    exit_return_pct=NULL forever, even though it fully resolved.
+
+    Only backfills the two statuses where exit_return_pct is a pure copy of a
+    value already sitting in the same row (won -> max_return_pct, lost ->
+    max_drawdown_pct -- see _resolve_outcome() in performance_tracker.py), so
+    there's no re-derivation risk. won_drift/lost_drift are deliberately left
+    alone: their exit_return_pct is the final-vs-entry price at the moment a
+    time-stop closed the position, a value that was never stored separately
+    and can't be reconstructed after the fact without re-fetching the exact
+    historical bar window used at original evaluation time -- not something
+    to guess at in a performance-tracking table.
+    """
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    _ensure_perf_tracker_schema()
+    import sqlite3 as _sq
+    _pt = os.getenv("PERF_TRACKER_DB", os.path.join(os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
+    try:
+        con = _sq.connect(_pt, timeout=5)
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE picks SET exit_return_pct = max_return_pct "
+            "WHERE status = 'won' AND exit_return_pct IS NULL AND max_return_pct IS NOT NULL"
+        )
+        won_updated = cur.rowcount
+        cur.execute(
+            "UPDATE picks SET exit_return_pct = max_drawdown_pct "
+            "WHERE status = 'lost' AND exit_return_pct IS NULL AND max_drawdown_pct IS NOT NULL"
+        )
+        lost_updated = cur.rowcount
+        remaining = con.execute(
+            "SELECT status, COUNT(*) FROM picks "
+            "WHERE status IN ('won','won_drift','lost','lost_drift') AND exit_return_pct IS NULL "
+            "GROUP BY status"
+        ).fetchall()
+        con.commit()
+        con.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "won_backfilled": won_updated,
+        "lost_backfilled": lost_updated,
+        "still_null_by_status": {r[0]: r[1] for r in remaining},
+    }
+
+
 @app.get("/portfolio", include_in_schema=True)
 def portfolio(_user=_dep_pro):
     uid = int(_user["id"])
