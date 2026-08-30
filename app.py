@@ -11066,9 +11066,9 @@ def journal_list(_user=_dep_starter):
         cur.execute("SELECT * FROM journal_entries WHERE user_id = ? ORDER BY entered_at DESC", (uid,))
         rows = cur.fetchall()
         conn.close()
-        return _no_nulls({"entries": [_journal_row_to_dict(r) for r in rows]})
+        return {"entries": [_journal_row_to_dict(r) for r in rows]}
     except Exception:
-        return _no_nulls({"entries": []})
+        return {"entries": []}
 
 
 @app.post("/journal", include_in_schema=True)
@@ -11111,7 +11111,7 @@ def journal_create(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
         raise HTTPException(status_code=500, detail=f"Failed to save journal entry: {exc}")
     if not inserted:
         raise HTTPException(status_code=409, detail="Entry id already exists")
-    return _no_nulls(_journal_row_to_dict(row))
+    return _journal_row_to_dict(row)
 
 
 @app.patch("/journal/{entry_id}", include_in_schema=True)
@@ -11152,7 +11152,7 @@ def journal_update(entry_id: str, payload: Dict[str, Any] = Body(...), _user=_de
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to update journal entry: {exc}")
-    return _no_nulls(_journal_row_to_dict(row))
+    return _journal_row_to_dict(row)
 
 
 @app.delete("/journal/{entry_id}", include_in_schema=True)
@@ -11216,7 +11216,7 @@ def journal_sync(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
         conn.close()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Journal sync failed: {exc}")
-    return _no_nulls({"entries": [_journal_row_to_dict(r) for r in rows]})
+    return {"entries": [_journal_row_to_dict(r) for r in rows]}
 
 
 @app.post("/portfolio/add", include_in_schema=True)
