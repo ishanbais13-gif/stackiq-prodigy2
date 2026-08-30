@@ -1756,7 +1756,16 @@ def _news_and_sentiment(symbol: str, *, allow_llm: bool = True) -> Dict[str, Any
                 "You are a market news sentiment engine. Output MUST be valid JSON only (no prose, no markdown). "
                 "Return JSON with exactly these keys: "
                 "direction (Bullish|Bearish|Neutral), sentiment_score (-100..100), confidence (0..100), "
-                "summary (2-3 sentences), catalysts (array of strings), risk_flags (array of strings). "
+                "summary (2-3 sentences), catalysts (array of strings), risk_flags (array of strings).\n\n"
+                "CAUSATION, NOT CORRELATION: summary must name the SPECIFIC event driving the "
+                "sentiment -- e.g. 'an earnings beat with raised full-year guidance' or 'a downgrade "
+                "citing margin pressure' -- not a generic restatement like 'bullish sentiment supports "
+                "a favorable outlook.' Reference what the articles actually say happened, not the "
+                "sentiment label itself.\n\n"
+                "NEVER FABRICATE: only name a specific event, company, or figure if it is literally "
+                "present in the supplied articles. If the articles are thin, routine, or don't point "
+                "to one clear driver, say so honestly (e.g. 'coverage is routine with no single "
+                "dominant catalyst') rather than inventing a specific-sounding reason.\n\n"
                 "Ground your output strictly in the supplied articles."
             )
             payload = _build_llm_payload()
@@ -1909,6 +1918,72 @@ def _news_and_sentiment(symbol: str, *, allow_llm: bool = True) -> Dict[str, Any
     return out
 
 
+def _raw_technical_facts(candles: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Granular technical facts computed directly from price/volume bars --
+    RSI level, price-vs-EMA relationship, ATR%, distance from the 20-day
+    high/low, volume-vs-average -- for the reasoning LLM to actually cite.
+    calculate_indicators() only returns five rounded 0-100 aggregate scores
+    (momentum/trend/volatility/liquidity/risk); those numbers alone give an
+    LLM nothing to explain CAUSATION with -- it can only relabel a score
+    ("momentum is 72/100") because the underlying signal that produced that
+    score was discarded before it reached the prompt. This recomputes a
+    small set of the same underlying numbers (independent of, and not a
+    replacement for, calculate_indicators()'s own scoring) purely so the
+    reasoning prompt has real, specific, verifiable facts to reference."""
+    try:
+        tail = [b for b in (candles or [])[-60:] if isinstance(b, dict) and b.get("c") is not None]
+        closes = [float(b["c"]) for b in tail]
+        highs = [float(b.get("h") or b["c"]) for b in tail]
+        lows = [float(b.get("l") or b["c"]) for b in tail]
+        vols = [float(b.get("v") or 0.0) for b in tail]
+        if len(closes) < 20:
+            return {}
+        last = closes[-1]
+
+        def _ema(vals: List[float], period: int) -> float:
+            k = 2.0 / (period + 1.0)
+            e = vals[0]
+            for v in vals[1:]:
+                e = v * k + e * (1.0 - k)
+            return e
+
+        ema20 = _ema(closes, 20)
+        ema50 = _ema(closes, 50) if len(closes) >= 50 else None
+
+        rsi_tail = closes[-15:]
+        gains = sum(max(0.0, rsi_tail[i] - rsi_tail[i - 1]) for i in range(1, len(rsi_tail)))
+        losses = sum(max(0.0, rsi_tail[i - 1] - rsi_tail[i]) for i in range(1, len(rsi_tail)))
+        if gains <= 0 and losses <= 0:
+            rsi = 50.0
+        elif losses <= 0:
+            rsi = 100.0
+        else:
+            rsi = 100.0 - (100.0 / (1.0 + ((gains / 14.0) / (losses / 14.0))))
+
+        change_5d_pct = ((last - closes[-6]) / closes[-6] * 100.0) if len(closes) >= 6 and closes[-6] else None
+
+        trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])) for i in range(1, len(closes))]
+        atr_pct = (sum(trs[-14:]) / len(trs[-14:]) / last * 100.0) if len(trs) >= 14 and last else None
+
+        high20, low20 = max(closes[-20:]), min(closes[-20:])
+        vol_avg20 = sum(vols[-20:]) / len(vols[-20:]) if len(vols) >= 20 else None
+        vol_last = vols[-1] if vols else None
+
+        return {
+            "rsi14": round(rsi, 1),
+            "price_vs_ema20_pct": round((last - ema20) / ema20 * 100.0, 2) if ema20 else None,
+            "price_vs_ema50_pct": round((last - ema50) / ema50 * 100.0, 2) if ema50 else None,
+            "change_5d_pct": round(change_5d_pct, 2) if change_5d_pct is not None else None,
+            "atr_pct": round(atr_pct, 2) if atr_pct is not None else None,
+            "pct_from_20d_high": round((last - high20) / high20 * 100.0, 2) if high20 else None,
+            "pct_from_20d_low": round((last - low20) / low20 * 100.0, 2) if low20 else None,
+            "volume_vs_20d_avg_ratio": round(vol_last / vol_avg20, 2) if vol_avg20 and vol_last is not None else None,
+            "last_close": round(last, 2),
+        }
+    except Exception:
+        return {}
+
+
 def _deterministic_metrics_explainer(
     *, technicals: Dict[str, Any], ai_score: Optional[float], execution_score: Optional[float], trade_plan: Optional[Dict[str, Any]] = None
 ) -> Dict[str, str]:
@@ -1950,23 +2025,31 @@ def _trade_reasoning(
     allow_llm: bool = True,
     ai_score: Optional[float] = None,
     execution_score: Optional[float] = None,
+    raw_technicals: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     sym = str(symbol or "").strip().upper()
     if not sym:
         return {"why": [], "confirms": [], "breaks": [], "metrics_interpretation": "", "metrics_next_steps": ""}
 
+    news = news or {}
+    catalysts = [str(x).strip() for x in (news.get("catalysts") or []) if str(x or "").strip()][:6]
+    risk_flags = [str(x).strip() for x in (news.get("risk_flags") or []) if str(x or "").strip()][:6]
+    raw_technicals = raw_technicals or {}
+
     # Signature covers the inputs the LLM prose actually references (entry/stop/
-    # target, ai/execution scores). Without it the cache was keyed on symbol
-    # alone, so re-analyzing the same symbol within the 5-min TTL returned prose
-    # citing a stale trade_plan even though the response's own trade_plan field
-    # had just been recomputed fresh -- the two would visibly disagree on the
-    # same page. Rounding to 2dp/1dp matches the precision already displayed.
+    # target, ai/execution scores, and now the specific catalysts and raw
+    # technical numbers it's being asked to cite). Without this the cache was
+    # keyed on symbol alone (later: symbol+trade_plan+scores), so re-analyzing
+    # the same symbol within the 5-min TTL could return prose citing a catalyst
+    # or RSI reading that had already changed underneath it.
     _sig = "|".join([
         f"e{round(_safe_f((trade_plan or {}).get('entry')) or 0, 2)}",
         f"s{round(_safe_f((trade_plan or {}).get('stop')) or 0, 2)}",
         f"t{round(_safe_f((trade_plan or {}).get('target_1')) or 0, 2)}",
         f"a{round(ai_score or 0, 1)}",
         f"x{round(execution_score or 0, 1)}",
+        f"r{raw_technicals.get('rsi14')}",
+        f"c{len(catalysts)}",
     ])
     ck = _cache_key("reasoning", f"{sym}:{_sig}")
     cached = _REASONING_CACHE.get(ck)
@@ -1975,8 +2058,11 @@ def _trade_reasoning(
 
     mom = _safe_f((technicals or {}).get("momentum"), 50.0) or 50.0
     vol_trend = _safe_f((trade_plan or {}).get("volume_trend"), 1.0) or 1.0
-    news_sentiment = str((news or {}).get("sentiment") or "Neutral")
+    news_sentiment = str(news.get("sentiment") or "Neutral")
 
+    # Non-LLM fallback (allow_llm=False, or the LLM call/parse below fails) --
+    # necessarily generic since there's no model here to turn raw numbers into
+    # prose; the LLM path below is what actually cites specific causes.
     why = [
         f"Momentum score {int(round(mom))}/100 with volume trend x{round(float(vol_trend), 2)}.",
         f"Trade plan is risk-defined around VWAP/ATR with clear invalidation.",
@@ -2001,33 +2087,58 @@ def _trade_reasoning(
         from llm_client import call_llm_text
 
         system = (
-            "You are a trade reasoning engine. Return ONLY valid JSON with keys: "
+            "You are a trade reasoning engine explaining WHY a setup scores the way it does -- "
+            "not restating a score in sentence form. Return ONLY valid JSON with keys: "
             "why (array of strings), confirms (array of strings), breaks (array of strings), "
-            "metrics_interpretation (string), metrics_next_steps (string). "
-            "Rules for why/confirms/breaks: 2-4 items per array, concise, grounded strictly in "
-            "provided inputs. "
-            "Rules for metrics_interpretation: exactly 1-2 plain-language sentences covering what "
-            "the ai_score and execution_score numbers indicate for this specific pick, and which "
-            "of the momentum/trend/volatility/liquidity/risk technical scores are notably strong "
-            "(>=70) or weak (<=39) -- IMPORTANT: all five of these scores share one uniform 0-100 "
-            "scale where higher always means stronger/better regardless of the metric's name, "
-            "including risk (a high risk score is favorable here, NOT a warning -- do not "
-            "interpret it as real-world risk level). "
-            "Rules for metrics_next_steps: a SEPARATE, short, concrete action distinct from "
-            "metrics_interpretation -- what to watch for, when the entry window matters most, or "
-            "the specific price level that would invalidate the setup. This must stand on its own "
-            "as a scannable takeaway, not a continuation of metrics_interpretation's sentences. "
-            "Both fields grounded strictly in the provided numbers, no speculation beyond them."
+            "metrics_interpretation (string), metrics_next_steps (string).\n\n"
+            "CAUSATION, NOT CORRELATION: name the SPECIFIC underlying driver behind a claim, "
+            "never just relabel a 0-100 score. Bad: 'Momentum score 72/100 with volume trend "
+            "x1.3.' Good: 'RSI at 71 with price 4.2% above its 20-day EMA, and volume running "
+            "1.3x the 20-day average.' Bad: 'News sentiment currently Bullish.' Good: 'An "
+            "analyst price-target raise (see catalysts) is the main driver of the bullish tone.' "
+            "Use the numbers in raw_technicals (rsi14, price_vs_ema20_pct, price_vs_ema50_pct, "
+            "change_5d_pct, atr_pct, pct_from_20d_high/low, volume_vs_20d_avg_ratio) and the "
+            "actual text in news.catalysts/news.risk_flags -- cite specific numbers and specific "
+            "catalyst text, don't just describe technicals/news in the abstract.\n\n"
+            "NEVER FABRICATE: if raw_technicals or news.catalysts don't actually support a "
+            "specific claim, say something honest and general instead of inventing a plausible-"
+            "sounding cause -- e.g. if news.catalysts is empty, say the move looks technically "
+            "driven with no single news catalyst, rather than naming a fake event. Do not name a "
+            "specific company/analyst/event unless it is literally present in the provided data.\n\n"
+            "NO REPETITION ACROSS FIELDS -- each of the 5 fields must add distinct information, "
+            "not the same fact rephrased three ways:\n"
+            "- why: 2-4 bullets, the core trade thesis citing the SPECIFIC technical/news drivers "
+            "(not the aggregate 0-100 scores) that make this worth trading right now.\n"
+            "- confirms: 1-3 SPECIFIC, checkable forward-looking price/volume conditions that "
+            "would confirm the thesis is still playing out -- not a restatement of why.\n"
+            "- breaks: 1-3 SPECIFIC, checkable conditions that would invalidate the thesis.\n"
+            "- metrics_interpretation: 1-2 sentences on what the ai_score/execution_score "
+            "COMPOSITION means -- which momentum/trend/volatility/liquidity/risk sub-scores are "
+            "notably strong (>=70) or weak (<=39) and briefly why (cite the raw_technicals number "
+            "behind it). This is about the scoring itself, not a restatement of why's thesis. All "
+            "five sub-scores share one uniform 0-100 scale where higher always means stronger/"
+            "better, including risk (a high risk score is favorable here, NOT a warning).\n"
+            "- metrics_next_steps: one concrete, forward-looking action distinct from everything "
+            "above -- what to watch, when the entry window matters most, or the exact price level "
+            "that invalidates the setup.\n\n"
+            "Ground everything strictly in the provided data -- no speculation beyond it."
         )
         user = json.dumps(
             {
                 "symbol": sym,
                 "technicals": technicals,
+                "raw_technicals": raw_technicals,
                 "ai_score": ai_score,
                 "execution_score": execution_score,
                 "trade_plan": {k: trade_plan.get(k) for k in ("entry", "stop", "target_1", "target_2", "rr", "vwap", "atr14")},
                 "volume_trend": trade_plan.get("volume_trend"),
-                "news_sentiment": {"sentiment": news.get("sentiment"), "headlines": (news.get("headlines") or [])[:6]},
+                "news": {
+                    "sentiment": news.get("sentiment"),
+                    "summary": news.get("summary"),
+                    "catalysts": catalysts,
+                    "risk_flags": risk_flags,
+                    "headlines": (news.get("headlines") or [])[:6],
+                },
             },
             ensure_ascii=False,
         )
@@ -4992,6 +5103,7 @@ async def analyze(
         allow_llm=bool(allow_llm),
         ai_score=ai_score_0_100,
         execution_score=execution_score_0_100,
+        raw_technicals=_raw_technical_facts(candles),
     )
     if not isinstance(reasoning, dict):
         reasoning = {"why": [], "confirms": [], "breaks": [], "metrics_interpretation": "", "metrics_next_steps": ""}
