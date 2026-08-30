@@ -133,39 +133,6 @@ def record_pick(pick: Dict[str, Any]):
         if not symbol_upper:
             return None
 
-        # Dedup guard: reject if same symbol recorded within the last 24 hours
-        _dedup_window_seconds = 24 * 3600
-        _now_ts  = time.time()
-        _cutoff_ts = _now_ts - _dedup_window_seconds
-        with _conn() as db:
-            _existing = db.execute(
-                "SELECT id, recorded_at, alert_sent_at FROM picks WHERE symbol = ? AND recorded_at >= ? ORDER BY recorded_at DESC LIMIT 1",
-                (symbol_upper, _cutoff_ts),
-            ).fetchone()
-        if _existing:
-            _existing_id = int(_existing[0])
-            _existing_ts = float(_existing[1])
-            _age_hours   = (_now_ts - _existing_ts) / 3600
-            # BUG (fixed 2026-07-17): alert-firing used to be gated purely on
-            # "did this call insert a fresh row" -- so a pick that got
-            # deduped here NEVER got an alert, even if its original insert
-            # (for whatever reason -- a code path with no alert wiring, a
-            # transient failure, anything) never actually resulted in one
-            # either. needs_alert lets a duplicate still get its one alert
-            # if the existing row was never marked as alerted, while a
-            # true repeat (already alerted) stays suppressed as before.
-            _needs_alert = _existing[2] is None
-            log.info(
-                "perf_tracker: duplicate suppressed symbol=%s existing_id=%d age=%.1fh (within 24h window) needs_alert=%s",
-                symbol_upper, _existing_id, _age_hours, _needs_alert,
-            )
-            return {
-                "status": "duplicate_suppressed",
-                "existing_id": _existing_id,
-                "age_hours": _age_hours,
-                "needs_alert": _needs_alert,
-            }
-
         sym = symbol_upper  # alias used in the rest of the function
 
         # Only track real picks, not NO_TRADE responses
@@ -176,6 +143,72 @@ def record_pick(pick: Dict[str, Any]):
         entry     = _sf(tp.get("entry") or pick.get("entry"))
         stop      = _sf(tp.get("stop")  or pick.get("stop"))
         direction = str(tp.get("direction") or "long").lower()
+
+        # Dedup guard.
+        # BUG (fixed): this used to be a flat 24-hour rolling window keyed on
+        # symbol alone. The scanner runs once/day at a slightly drifting
+        # time, so two consecutive trading-day scans of the SAME unchanged
+        # setup routinely landed 24.1-27h apart -- just past the cutoff --
+        # and got re-inserted as a "new" pick. Confirmed in production: ~50
+        # pairs (~14.5% of all rows) with identical entry/stop/target
+        # recorded 24-27h apart, plus weekend cases (Fri->Mon scans) landing
+        # 40+ hours apart. A pure time window can't distinguish "same setup
+        # still sitting there" from "genuinely new setup after a real price
+        # move" -- so this now widens the lookback to 5 days (covers
+        # weekends + scan-time drift) but only treats it as a duplicate when
+        # entry AND stop are still within 1% of a recent row for this
+        # symbol. A symbol that gets a real new setup a day later (price
+        # actually moved) is NOT suppressed; the same unchanged level
+        # lingering across scans IS.
+        _dedup_window_seconds = 5 * 24 * 3600
+        _now_ts  = time.time()
+        _cutoff_ts = _now_ts - _dedup_window_seconds
+
+        def _close(a: Optional[float], b: Optional[float], tol: float = 0.01) -> bool:
+            if a is None or b is None or a == 0:
+                return False
+            try:
+                return abs(float(a) - float(b)) / abs(float(a)) <= tol
+            except Exception:
+                return False
+
+        with _conn() as db:
+            _recent = db.execute(
+                "SELECT id, recorded_at, alert_sent_at, entry_price, stop FROM picks "
+                "WHERE symbol = ? AND recorded_at >= ? ORDER BY recorded_at DESC",
+                (symbol_upper, _cutoff_ts),
+            ).fetchall()
+
+        _dupe = None
+        for _row in (_recent or []):
+            if _close(_row[3], entry) and _close(_row[4], stop):
+                _dupe = _row
+                break
+
+        if _dupe:
+            _existing_id = int(_dupe[0])
+            _existing_ts = float(_dupe[1])
+            _age_hours   = (_now_ts - _existing_ts) / 3600
+            # BUG (fixed 2026-07-17): alert-firing used to be gated purely on
+            # "did this call insert a fresh row" -- so a pick that got
+            # deduped here NEVER got an alert, even if its original insert
+            # (for whatever reason -- a code path with no alert wiring, a
+            # transient failure, anything) never actually resulted in one
+            # either. needs_alert lets a duplicate still get its one alert
+            # if the existing row was never marked as alerted, while a
+            # true repeat (already alerted) stays suppressed as before.
+            _needs_alert = _dupe[2] is None
+            log.info(
+                "perf_tracker: duplicate suppressed symbol=%s existing_id=%d age=%.1fh "
+                "(same setup within %dd window) needs_alert=%s",
+                symbol_upper, _existing_id, _age_hours, _dedup_window_seconds // 86400, _needs_alert,
+            )
+            return {
+                "status": "duplicate_suppressed",
+                "existing_id": _existing_id,
+                "age_hours": _age_hours,
+                "needs_alert": _needs_alert,
+            }
         targets   = tp.get("targets") or []
         t1 = _sf(targets[0]) if len(targets) > 0 else None
         t2 = _sf(targets[1]) if len(targets) > 1 else None
