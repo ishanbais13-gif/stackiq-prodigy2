@@ -10270,18 +10270,28 @@ def track_ping(payload: Dict[str, Any] = Body(...), request: Request = None):
     now = datetime.now(timezone.utc).isoformat()
     conn = _db_connect()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM app_visits WHERE session_id = ?", (sid,))
-    row = cur.fetchone()
-    if row:
-        if email:
-            cur.execute("UPDATE app_visits SET last_seen_at = ?, email = ? WHERE session_id = ?", (now, email, sid))
-        else:
-            cur.execute("UPDATE app_visits SET last_seen_at = ? WHERE session_id = ?", (now, sid))
-    else:
-        cur.execute(
-            "INSERT INTO app_visits (session_id, platform, email, first_seen_at, last_seen_at) VALUES (?, ?, ?, ?, ?)",
-            (sid, platform, email, now, now),
-        )
+    # BUG (fixed): this used to be a SELECT-then-branch (check if session_id
+    # exists, INSERT if not, UPDATE if so) -- a classic check-then-act race.
+    # Two near-simultaneous pings for the same session_id (e.g. the same
+    # session_id shared via localStorage across two tabs opened together, or
+    # a double-fire on page load) could both pass the SELECT before either
+    # INSERT committed, and the second INSERT would crash with
+    # "UNIQUE constraint failed: app_visits.session_id". A single atomic
+    # upsert closes the race entirely -- only one statement, no window
+    # between reading and writing. email = COALESCE(excluded.email, ...)
+    # preserves the original semantics: refresh the email on conflict only
+    # when this ping actually carried one, never clobber a known email with
+    # NULL from an anonymous repeat ping.
+    cur.execute(
+        """
+        INSERT INTO app_visits (session_id, platform, email, first_seen_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+            last_seen_at = excluded.last_seen_at,
+            email = COALESCE(excluded.email, app_visits.email)
+        """,
+        (sid, platform, email, now, now),
+    )
     conn.commit()
     conn.close()
     return {"ok": True}
