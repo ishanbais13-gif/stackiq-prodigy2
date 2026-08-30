@@ -28,6 +28,7 @@ import threading
 import requests
 import json
 import csv
+import uuid
 import io
 import xml.etree.ElementTree as ET
 import sqlite3
@@ -3466,6 +3467,20 @@ def _db_init() -> None:
             "targets_json TEXT, opened_at TEXT, closed_at TEXT, close_price REAL, score REAL, confidence REAL, "
             "reason TEXT, source TEXT, status TEXT)"
         )
+
+        # Trade Journal -- was localStorage-only (device-local, never synced).
+        # id stays client-generated TEXT (the frontend already mints one per
+        # entry) so existing localStorage entries migrate in unchanged, no id
+        # remapping needed on the client.
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS journal_entries "
+            "(id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, symbol TEXT NOT NULL, "
+            "entry_price REAL NOT NULL, stop_price REAL, target_price REAL, "
+            "entered_at TEXT NOT NULL, exit_price REAL, exited_at TEXT, "
+            "status TEXT NOT NULL DEFAULT 'open', return_pct REAL, notes TEXT DEFAULT '', "
+            "source TEXT, updated_at REAL NOT NULL)"
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_journal_user ON journal_entries(user_id)")
 
         conn.commit()
         conn.close()
@@ -11005,6 +11020,203 @@ def watchlist_remove(symbol: str, _user=_dep_starter):
         except Exception:
             pass
     return _no_nulls({"ok": True, "symbol": sym, "removed": True})
+
+
+# ---------------------------------------------------------------------------
+# Trade Journal -- server-synced (was localStorage-only, device-local).
+# ---------------------------------------------------------------------------
+
+def _journal_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": row["id"],
+        "symbol": row["symbol"],
+        "entryPrice": row["entry_price"],
+        "stopPrice": row["stop_price"],
+        "targetPrice": row["target_price"],
+        "enteredAt": row["entered_at"],
+        "exitPrice": row["exit_price"],
+        "exitedAt": row["exited_at"],
+        "status": row["status"],
+        "returnPct": row["return_pct"],
+        "notes": row["notes"] or "",
+        "source": row["source"],
+    }
+
+
+_JOURNAL_WRITABLE_FIELDS = {
+    "symbol": "symbol",
+    "entryPrice": "entry_price",
+    "stopPrice": "stop_price",
+    "targetPrice": "target_price",
+    "enteredAt": "entered_at",
+    "exitPrice": "exit_price",
+    "exitedAt": "exited_at",
+    "status": "status",
+    "returnPct": "return_pct",
+    "notes": "notes",
+}
+
+
+@app.get("/journal", include_in_schema=True)
+def journal_list(_user=_dep_starter):
+    uid = int(_user["id"])
+    try:
+        conn = _db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM journal_entries WHERE user_id = ? ORDER BY entered_at DESC", (uid,))
+        rows = cur.fetchall()
+        conn.close()
+        return _no_nulls({"entries": [_journal_row_to_dict(r) for r in rows]})
+    except Exception:
+        return _no_nulls({"entries": []})
+
+
+@app.post("/journal", include_in_schema=True)
+def journal_create(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
+    uid = int(_user["id"])
+    p = payload or {}
+    sym = str(p.get("symbol") or "").strip().upper()
+    entry = _safe_f(p.get("entryPrice"))
+    if not sym or entry is None or entry <= 0:
+        raise HTTPException(status_code=400, detail="symbol and a positive entryPrice are required")
+    eid = str(p.get("id") or "").strip() or (uuid.uuid4().hex)
+    entered_at = str(p.get("enteredAt") or now_iso())
+    stop = _safe_f(p.get("stopPrice"))
+    target = _safe_f(p.get("targetPrice"))
+    notes = str(p.get("notes") or "")[:2000]
+    source = p.get("source")
+    source = str(source)[:40] if source else None
+    try:
+        conn = _db_connect()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT OR IGNORE INTO journal_entries "
+            "(id, user_id, symbol, entry_price, stop_price, target_price, entered_at, "
+            "exit_price, exited_at, status, return_pct, notes, source, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (eid, uid, sym, entry, stop, target, entered_at,
+             None, None, "open", None, notes, source, time.time()),
+        )
+        # INSERT OR IGNORE succeeds-as-noop on a duplicate id -- the row is
+        # still there afterward either way, so "did the SELECT below find a
+        # row" can't tell a fresh insert apart from a pre-existing one that
+        # was just silently skipped. rowcount, checked immediately after the
+        # INSERT, is the only reliable signal.
+        inserted = cur.rowcount > 0
+        conn.commit()
+        cur.execute("SELECT * FROM journal_entries WHERE id = ? AND user_id = ?", (eid, uid))
+        row = cur.fetchone()
+        conn.close()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save journal entry: {exc}")
+    if not inserted:
+        raise HTTPException(status_code=409, detail="Entry id already exists")
+    return _no_nulls(_journal_row_to_dict(row))
+
+
+@app.patch("/journal/{entry_id}", include_in_schema=True)
+def journal_update(entry_id: str, payload: Dict[str, Any] = Body(...), _user=_dep_starter):
+    uid = int(_user["id"])
+    p = payload or {}
+    sets: List[str] = []
+    vals: List[Any] = []
+    for client_key, col in _JOURNAL_WRITABLE_FIELDS.items():
+        if client_key not in p:
+            continue
+        v = p.get(client_key)
+        if client_key in ("entryPrice", "stopPrice", "targetPrice", "exitPrice", "returnPct"):
+            v = _safe_f(v)
+        elif client_key == "symbol" and v is not None:
+            v = str(v).strip().upper()
+        elif client_key == "notes" and v is not None:
+            v = str(v)[:2000]
+        sets.append(f"{col} = ?")
+        vals.append(v)
+    if not sets:
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
+    sets.append("updated_at = ?")
+    vals.append(time.time())
+    vals.extend([entry_id, uid])
+    try:
+        conn = _db_connect()
+        cur = conn.cursor()
+        cur.execute(f"UPDATE journal_entries SET {', '.join(sets)} WHERE id = ? AND user_id = ?", vals)
+        if cur.rowcount == 0:
+            conn.close()
+            raise HTTPException(status_code=404, detail="Journal entry not found")
+        conn.commit()
+        cur.execute("SELECT * FROM journal_entries WHERE id = ? AND user_id = ?", (entry_id, uid))
+        row = cur.fetchone()
+        conn.close()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to update journal entry: {exc}")
+    return _no_nulls(_journal_row_to_dict(row))
+
+
+@app.delete("/journal/{entry_id}", include_in_schema=True)
+def journal_delete(entry_id: str, _user=_dep_starter):
+    uid = int(_user["id"])
+    try:
+        conn = _db_connect()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM journal_entries WHERE id = ? AND user_id = ?", (entry_id, uid))
+        conn.commit()
+        conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return _no_nulls({"ok": True, "id": entry_id})
+
+
+@app.post("/journal/sync", include_in_schema=True)
+def journal_sync(payload: Dict[str, Any] = Body(...), _user=_dep_starter):
+    """One-time migration: upload this device's pre-existing localStorage
+    journal entries to the server. INSERT OR IGNORE by id, so calling this
+    more than once (e.g. a second device that already has server data) never
+    duplicates -- entries the server already has for this id are left as-is,
+    and the full current server-side list is returned either way so the
+    client can just replace its local state with the response."""
+    uid = int(_user["id"])
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        entries = []
+    try:
+        conn = _db_connect()
+        cur = conn.cursor()
+        for e in entries[:500]:
+            if not isinstance(e, dict):
+                continue
+            sym = str(e.get("symbol") or "").strip().upper()
+            entry = _safe_f(e.get("entryPrice"))
+            eid = str(e.get("id") or "").strip()
+            if not sym or entry is None or entry <= 0 or not eid:
+                continue
+            cur.execute(
+                "INSERT OR IGNORE INTO journal_entries "
+                "(id, user_id, symbol, entry_price, stop_price, target_price, entered_at, "
+                "exit_price, exited_at, status, return_pct, notes, source, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    eid, uid, sym, entry,
+                    _safe_f(e.get("stopPrice")), _safe_f(e.get("targetPrice")),
+                    str(e.get("enteredAt") or now_iso()),
+                    _safe_f(e.get("exitPrice")), e.get("exitedAt"),
+                    str(e.get("status") or "open"), _safe_f(e.get("returnPct")),
+                    str(e.get("notes") or "")[:2000], (str(e.get("source"))[:40] if e.get("source") else None),
+                    time.time(),
+                ),
+            )
+        conn.commit()
+        cur.execute("SELECT * FROM journal_entries WHERE user_id = ? ORDER BY entered_at DESC", (uid,))
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Journal sync failed: {exc}")
+    return _no_nulls({"entries": [_journal_row_to_dict(r) for r in rows]})
 
 
 @app.post("/portfolio/add", include_in_schema=True)
