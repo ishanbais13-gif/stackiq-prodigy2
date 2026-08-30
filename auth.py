@@ -2357,6 +2357,18 @@ async def stripe_webhook(request: Request):
     event_type: str = event["type"]
     data_obj = _stripe_to_dict(event["data"]["object"])
 
+    # BUG (fixed): every branch below caught its own exceptions, logged a
+    # warning, and moved on -- then the handler unconditionally returned
+    # {"received": True} regardless of whether the plan update actually
+    # happened. Stripe treats any 2xx as "delivered successfully" and will
+    # NOT retry, so a transient DB lock or a Stripe API hiccup during
+    # processing silently dropped a plan update forever, with only a log
+    # line (which the alerting added earlier today doesn't even see, since
+    # nothing here re-raises). Track failures as they occur and turn them
+    # into a non-2xx response + an ops alert, so Stripe actually retries and
+    # someone is told about it.
+    _failures: List[str] = []
+
     if event_type == "checkout.session.completed":
         # Fired as soon as checkout succeeds — update plan immediately
         sub_id = data_obj.get("subscription")
@@ -2380,6 +2392,7 @@ async def stripe_webhook(request: Request):
                     _update_subscription_from_stripe(sub)
             except Exception as exc:
                 log.warning("checkout.session.completed: error processing sub %s: %s", sub_id, exc, exc_info=True)
+                _failures.append(f"checkout.session.completed sub={sub_id}: {exc}")
         else:
             # No subscription field — may be one-time payment; try customer lookup
             customer_id = data_obj.get("customer")
@@ -2421,7 +2434,11 @@ async def stripe_webhook(request: Request):
             _update_subscription_from_stripe(fresh_sub if fresh_sub else data_obj)
         except Exception as exc:
             log.warning("stripe webhook: failed to re-fetch subscription %s fresh, applying event payload as-is: %s", sub_id, exc)
-            _update_subscription_from_stripe(data_obj)
+            try:
+                _update_subscription_from_stripe(data_obj)
+            except Exception as exc2:
+                log.warning("stripe webhook: fallback update also failed for subscription %s: %s", sub_id, exc2, exc_info=True)
+                _failures.append(f"{event_type} sub={sub_id}: fresh-fetch failed ({exc}), fallback also failed ({exc2})")
 
     elif event_type == "invoice.payment_failed":
         sub_id = data_obj.get("subscription")
@@ -2430,7 +2447,8 @@ async def stripe_webhook(request: Request):
                 sub = _stripe_to_dict(_stripe.Subscription.retrieve(sub_id))
                 _update_subscription_from_stripe(sub)
             except Exception as exc:
-                log.warning("Failed to retrieve subscription %s: %s", sub_id, exc)
+                log.warning("Failed to retrieve subscription %s: %s", sub_id, exc, exc_info=True)
+                _failures.append(f"invoice.payment_failed sub={sub_id}: {exc}")
 
     elif event_type == "invoice.payment_succeeded":
         sub_id = data_obj.get("subscription")
@@ -2439,7 +2457,8 @@ async def stripe_webhook(request: Request):
                 sub = _stripe_to_dict(_stripe.Subscription.retrieve(sub_id))
                 _update_subscription_from_stripe(sub)
             except Exception as exc:
-                log.warning("Failed to retrieve subscription %s: %s", sub_id, exc)
+                log.warning("Failed to retrieve subscription %s: %s", sub_id, exc, exc_info=True)
+                _failures.append(f"invoice.payment_succeeded sub={sub_id}: {exc}")
 
     else:
         # Catch-all: an event type we don't act on was delivered. Log it so a
@@ -2448,6 +2467,19 @@ async def stripe_webhook(request: Request):
         # returning 200 with nothing done — this is exactly what masked the
         # 2026-07-15 plan-not-upgraded incident.
         log.warning("stripe webhook: unhandled event type=%s id=%s — no action taken", event_type, event.get("id"))
+
+    if _failures:
+        detail = f"event={event_type} id={event.get('id')}\n" + "\n".join(_failures)
+        _alert_ops(
+            f"Stripe webhook processing failed: {event_type}",
+            detail,
+            dedup_key=f"stripe-webhook:{event_type}",
+        )
+        # Non-2xx tells Stripe delivery did NOT succeed, so it retries with
+        # backoff (up to 3 days) instead of considering this event done --
+        # previously this always returned 200 even when the plan update
+        # itself failed, so a transient failure was permanent.
+        raise HTTPException(status_code=500, detail="Webhook processing failed; Stripe should retry")
 
     return {"received": True}
 
