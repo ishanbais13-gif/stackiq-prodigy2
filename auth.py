@@ -30,7 +30,8 @@ import os
 import sqlite3
 import logging
 import smtplib
-import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -278,6 +279,57 @@ def _sg_key() -> str:
 # Keep this for backwards compatibility with any direct reference
 _SENDGRID_KEY = _sg_key()
 
+# Bounded pool for all backgrounded email sends (OTP, welcome, password-reset).
+# BUG (fixed): every send used to spawn a brand-new raw threading.Thread with
+# no cap -- fine at normal volume, but a real signup spike (thousands within
+# an hour) would spawn thousands of concurrent unbounded threads inside the
+# single gunicorn worker process, a resource-exhaustion risk independent of
+# whatever SendGrid's own limits actually are. A fixed-size executor queues
+# excess work instead of spawning unbounded threads.
+_EMAIL_MAX_WORKERS = 20
+_email_executor = ThreadPoolExecutor(max_workers=_EMAIL_MAX_WORKERS, thread_name_prefix="email-send")
+
+# BUG (fixed): a failed SendGrid send (rate-limited, transient network error,
+# SendGrid outage) was a single attempt with no retry -- the calling request
+# had already returned 200 "success" to the user (this all happens in a
+# background thread), so a user signing up during any SendGrid hiccup was
+# silently left waiting forever for a code that would never arrive, with the
+# failure visible nowhere except a log line nobody was watching.
+_EMAIL_RETRY_ATTEMPTS = 3
+_EMAIL_RETRY_BACKOFF_S = (2, 5)  # delay before attempt 2, before attempt 3
+
+# Lightweight ops alerting -- no Slack/PagerDuty webhook is configured
+# anywhere in this deployment, so this reuses the existing SendGrid path to
+# email the account owner directly. Deliberately a single attempt with no
+# retry of its own (retrying here would recurse back into _send_email's own
+# failure-alerting) and deduped per condition so a burst of the same failure
+# doesn't flood the inbox.
+_OPS_ALERT_EMAIL = os.getenv("OPS_ALERT_EMAIL", "baisishan48@gmail.com")
+_OPS_ALERT_DEDUP_WINDOW_S = 900  # 15 min
+_ops_alert_last_sent: dict[str, float] = {}
+
+
+def _alert_ops(subject: str, detail: str, dedup_key: Optional[str] = None) -> None:
+    """Best-effort operational alert email. Never raises -- alerting failure
+    must never take down the caller's real work."""
+    if not _OPS_ALERT_EMAIL:
+        return
+    key = dedup_key or subject
+    now = time.time()
+    last = _ops_alert_last_sent.get(key, 0.0)
+    if now - last < _OPS_ALERT_DEDUP_WINDOW_S:
+        return
+    _ops_alert_last_sent[key] = now
+    try:
+        _sendgrid_send(
+            _OPS_ALERT_EMAIL,
+            f"[Aurexis ops alert] {subject}",
+            f"<pre style='font-family:monospace;white-space:pre-wrap'>{detail}</pre>",
+            detail,
+        )
+    except Exception as exc:
+        log.error("ops-alert: failed to send alert email — %s", exc)
+
 
 def _welcome_html(first_name: str) -> str:
     greeting = f"Hey {first_name}," if first_name else "Hey there,"
@@ -428,13 +480,24 @@ def _smtp_send(to_email: str, subject: str, html: str, plain: str) -> bool:
 
 
 def _send_email(to_email: str, subject: str, html: str, plain: str) -> bool:
-    """Try SendGrid, fall back to SMTP. Logs clearly if both fail."""
-    if _sendgrid_send(to_email, subject, html, plain):
-        return True
-    if _smtp_send(to_email, subject, html, plain):
-        return True
-    log.error("email: ALL delivery methods failed for %s (subject: %s) — "
-              "set SENDGRID_API_KEY in Railway env vars", to_email, subject)
+    """Try SendGrid (falling back to SMTP), retrying a transient failure
+    before giving up. Fires an ops alert if every attempt fails -- previously
+    this failed silently with only a log line, leaving a signed-up user
+    waiting forever for a code that would never arrive."""
+    for attempt in range(_EMAIL_RETRY_ATTEMPTS):
+        if attempt > 0:
+            time.sleep(_EMAIL_RETRY_BACKOFF_S[attempt - 1])
+        if _sendgrid_send(to_email, subject, html, plain):
+            return True
+        if _smtp_send(to_email, subject, html, plain):
+            return True
+    log.error("email: ALL delivery methods failed for %s after %d attempts (subject: %s) — "
+              "set SENDGRID_API_KEY in Railway env vars", to_email, _EMAIL_RETRY_ATTEMPTS, subject)
+    _alert_ops(
+        f"Email delivery failed: {subject}",
+        f"All {_EMAIL_RETRY_ATTEMPTS} delivery attempts failed.\nTo: {to_email}\nSubject: {subject}",
+        dedup_key=f"email-fail:{subject}",
+    )
     return False
 
 
@@ -452,8 +515,8 @@ def _send_welcome_email(to_email: str, first_name: str = "") -> None:
 
 
 def send_welcome_email_bg(to_email: str, first_name: str = "") -> None:
-    """Send welcome email in a background thread — never blocks the request."""
-    threading.Thread(target=_send_welcome_email, args=(to_email, first_name), daemon=True).start()
+    """Send welcome email via the bounded background pool — never blocks the request."""
+    _email_executor.submit(_send_welcome_email, to_email, first_name)
 
 
 # ---------------------------------------------------------------------------
@@ -554,7 +617,7 @@ def _send_otp_email(to_email: str, code: str, first_name: str = "") -> None:
 
 def send_otp_bg(user_id: int, to_email: str, first_name: str = "") -> str:
     code = _generate_otp(user_id)
-    threading.Thread(target=_send_otp_email, args=(to_email, code, first_name), daemon=True).start()
+    _email_executor.submit(_send_otp_email, to_email, code, first_name)
     return code
 
 
@@ -1446,11 +1509,7 @@ def forgot_password(body: ForgotPasswordRequest):
             first_name = row["first_name"] or ""
         except Exception:
             pass
-        threading.Thread(
-            target=_send_password_reset_email,
-            args=(email, code, first_name),
-            daemon=True,
-        ).start()
+        _email_executor.submit(_send_password_reset_email, email, code, first_name)
 
     return {"ok": True}
 

@@ -2511,6 +2511,7 @@ try:
         require_active_subscription as _require_subscription,
         require_plan as _require_plan,
         _check_admin_secret,
+        _alert_ops,
     )
     app.include_router(auth_router)
     app.include_router(stripe_router)
@@ -2532,10 +2533,36 @@ except Exception as _auth_err:
         return _dep
     def _check_admin_secret(_provided: str) -> None:  # type: ignore[misc]
         raise HTTPException(status_code=503, detail="Auth module not available")
+    def _alert_ops(_subject: str, _detail: str, dedup_key: Optional[str] = None) -> None:  # type: ignore[misc]
+        pass
     _dep_starter = Depends(_require_plan("starter"))
     _dep_pro     = Depends(_require_plan("pro"))
     _dep_elite   = Depends(_require_plan("elite"))
     oauth_router = None  # type: ignore[assignment]
+
+
+# Real alerting: previously there was no error-tracking/APM (no Sentry etc.)
+# and nothing that would proactively notify anyone of a failure -- a spike-
+# induced (or any) outage would only surface via user complaints, after the
+# fact. This is deliberately lightweight (reuses the existing SendGrid path,
+# see _alert_ops in auth.py) rather than a new monitoring dependency.
+# HTTPException/RequestValidationError already have their own more-specific
+# registered handlers, so this only ever fires for genuinely unhandled
+# exceptions (real 500s), not normal 4xx responses.
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception):
+    import traceback
+    tb = traceback.format_exc()
+    log.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}\n{tb}")
+    try:
+        _alert_ops(
+            f"Unhandled exception: {request.method} {request.url.path}",
+            f"{type(exc).__name__}: {exc}\n\n{tb}",
+            dedup_key=f"exc:{request.url.path}:{type(exc).__name__}",
+        )
+    except Exception:
+        pass
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 _SEED_UNIVERSE = [
