@@ -2631,7 +2631,6 @@ try:
     app.include_router(iap_router)
     _dep_starter = Depends(_require_plan("starter"))
     _dep_pro     = Depends(_require_plan("pro"))
-    _dep_elite   = Depends(_require_plan("elite"))
 except Exception as _auth_err:
     import logging as _lg
     _lg.getLogger("stackiq").warning(f"Auth module not loaded: {_auth_err}")
@@ -2649,7 +2648,6 @@ except Exception as _auth_err:
         pass
     _dep_starter = Depends(_require_plan("starter"))
     _dep_pro     = Depends(_require_plan("pro"))
-    _dep_elite   = Depends(_require_plan("elite"))
     oauth_router = None  # type: ignore[assignment]
 
 
@@ -9524,7 +9522,7 @@ def _check_starter_weekly_limit(user) -> None:
 
     plan = str(_user_field(user, "plan") or "free").lower()
     if plan not in ("starter",):
-        return  # Free/Pro/Elite: not subject to starter weekly limit
+        return  # Free/Pro: not subject to starter weekly limit
 
     user_id = _user_field(user, "id")
     if not user_id:
@@ -9558,7 +9556,7 @@ def _check_starter_weekly_limit(user) -> None:
 # is 3 -- must match ANALYZE_FREE_LIMIT in the frontend (src/App.jsx). This
 # had drifted to 10 here while the frontend separately enforced 3, so free
 # users only ever actually got the frontend's tighter, disconnected number.
-_ANALYZE_DAILY_LIMITS = {"free": 3, "starter": 50}  # pro/elite = unlimited
+_ANALYZE_DAILY_LIMITS = {"free": 3, "starter": 50}  # pro = unlimited
 
 
 def _check_analyze_daily_limit(user) -> None:
@@ -9568,7 +9566,7 @@ def _check_analyze_daily_limit(user) -> None:
     plan = str(_user_field(user, "plan") or "free").lower()
     limit = _ANALYZE_DAILY_LIMITS.get(plan)
     if limit is None:
-        return  # Pro/Elite: unlimited
+        return  # Pro: unlimited
 
     user_id = _user_field(user, "id")
     if not user_id:
@@ -9706,7 +9704,7 @@ async def best_pick_v2(
     out.setdefault("pillar_scores_0_10", {"technical": 1.0, "catalyst": 1.0, "sentiment": 1.0, "risk_structure": 1.0, "upside": 1.0})
     out.setdefault("watchlist_candidates", [])
 
-    # --- Dynamic position sizing (Pro/Elite only; stripped for Starter below) ---
+    # --- Dynamic position sizing (Pro only; stripped for Starter below) ---
     _ai_s100 = float(out.get("ai_score_0_10") or 0.0) * 10.0
     if _ai_s100 < 40:
         _pos_pct = 2.0
@@ -9811,8 +9809,8 @@ def learning_status(_user=_dep_starter):
 
 
 @app.post("/learning/recalculate", include_in_schema=True)
-def learning_recalculate(_user=_dep_elite):
-    """Force a weight recalculation. Elite only."""
+def learning_recalculate(_user=_dep_pro):
+    """Force a weight recalculation. Pro only."""
     try:
         from learning import recalculate_weights
         return recalculate_weights()
@@ -9821,8 +9819,8 @@ def learning_recalculate(_user=_dep_elite):
 
 
 @app.post("/learning/backfill", include_in_schema=True)
-def learning_backfill(_user=_dep_elite):
-    """Backfill all historical perf_tracker picks into evolution engine. Elite only."""
+def learning_backfill(_user=_dep_pro):
+    """Backfill all historical perf_tracker picks into evolution engine. Pro only."""
     try:
         from learning import backfill_from_perf_tracker
         return backfill_from_perf_tracker()
@@ -11650,7 +11648,7 @@ async def scan_brain_reset(payload: Dict[str, Any] = Body(...)):
 
 
 @app.post("/scan/brain_backfill", include_in_schema=True)
-async def scan_brain_backfill(_user=_dep_elite):
+async def scan_brain_backfill(_user=_dep_pro):
     """
     Retroactively evaluate ALL historical picks that haven't been fully checked.
     Fetches real price bars from after each pick date and records outcomes.
@@ -11667,7 +11665,7 @@ async def scan_brain_backfill(_user=_dep_elite):
 
 
 @app.get("/scan/brain_stats", include_in_schema=True)
-async def scan_brain_stats(_user=_dep_elite):
+async def scan_brain_stats(_user=_dep_pro):
     """
     Returns the scanner's self-learning brain stats:
     - Overall win rate across all tracked picks
@@ -11710,7 +11708,7 @@ async def scan_train_nn(
 
 
 @app.get("/scan/nn_status", include_in_schema=True)
-async def scan_nn_status(_user=_dep_elite):
+async def scan_nn_status(_user=_dep_pro):
     """
     Returns the status of the neural network scorer:
     - Whether a trained model exists

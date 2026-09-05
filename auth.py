@@ -16,7 +16,6 @@ Required env vars:
   STRIPE_WEBHOOK_SECRET — whsec_…
   STRIPE_PRICE_STARTER  — price_…
   STRIPE_PRICE_PRO      — price_…
-  STRIPE_PRICE_ELITE    — price_…
 
 Optional:
   JWT_REQUIRED_PREFIXES — comma-separated URL prefixes to protect, e.g.
@@ -96,7 +95,6 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 PLAN_PRICES = {
     "starter": os.getenv("STRIPE_PRICE_STARTER", ""),
     "pro": os.getenv("STRIPE_PRICE_PRO", ""),
-    "elite": os.getenv("STRIPE_PRICE_ELITE", ""),
 }
 
 # Reverse map: Stripe price ID → our plan string (built at import time)
@@ -107,7 +105,6 @@ _PRICE_TO_PLAN: dict[str, str] = {
 PLAN_DISPLAY = {
     "starter": {"name": "Starter", "price_usd": 9},
     "pro": {"name": "Pro", "price_usd": 29},
-    "elite": {"name": "Elite", "price_usd": 99},
 }
 
 if _stripe and STRIPE_SECRET_KEY:
@@ -762,7 +759,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 # JWT helpers
 # ---------------------------------------------------------------------------
 
-PLAN_RANK = {"free": 0, "starter": 1, "pro": 2, "elite": 3}
+PLAN_RANK = {"free": 0, "starter": 1, "pro": 2}
 
 
 def _new_session(user_id: int) -> str:
@@ -1547,7 +1544,7 @@ def reset_password(body: ResetPasswordRequest):
 
 
 _ADMIN_SECRET = os.getenv("ADMIN_SECRET", "")
-_VALID_PLANS = {"free", "starter", "pro", "elite"}
+_VALID_PLANS = {"free", "starter", "pro"}
 
 
 def _check_admin_secret(provided: str) -> None:
@@ -1929,7 +1926,7 @@ def _owner_upgrade() -> None:
             # require_plan's active-subscription check, see require_plan()).
             for email in ("ishanbais13@gmail.com", "baisishan48@gmail.com", "applereview@useaurexis.com"):
                 conn.execute(
-                    "UPDATE users SET plan='elite', subscription_status='active' WHERE email=?",
+                    "UPDATE users SET plan='pro', subscription_status='active' WHERE email=?",
                     (email,),
                 )
             conn.commit()
@@ -1987,7 +1984,7 @@ def create_checkout_session(
 
     plan_key = body.plan.lower()
     if plan_key not in PLAN_PRICES:
-        raise HTTPException(400, f"Unknown plan '{body.plan}'. Choose: starter, pro, elite")
+        raise HTTPException(400, f"Unknown plan '{body.plan}'. Choose: starter, pro")
     price_id = PLAN_PRICES[plan_key]
     if not price_id:
         raise HTTPException(503, f"STRIPE_PRICE_{plan_key.upper()} not configured")
@@ -2677,7 +2674,7 @@ def _redirect_to_app(user: sqlite3.Row, is_new: bool = False, origin: str = "") 
 
 # ── Google ───────────────────────────────────────────────────────────────
 
-_ALLOWED_PLANS = {"free", "starter", "pro", "elite"}
+_ALLOWED_PLANS = {"free", "starter", "pro"}
 
 
 @oauth_router.get("/google/redirect")
@@ -2789,7 +2786,7 @@ def google_callback(request: Request, code: str = "", state: str = "", error: st
     # subscription check (shared with create_checkout_session, so it can't
     # drift out of sync between the two again) is a second layer in case
     # is_new is ever wrong for some other reason.
-    if is_new and selected_plan in ("starter", "pro", "elite") and _stripe and STRIPE_SECRET_KEY:
+    if is_new and selected_plan in ("starter", "pro") and _stripe and STRIPE_SECRET_KEY:
         price_id = PLAN_PRICES.get(selected_plan, "")
         log.info("google_callback: routing to Stripe plan=%s price_id=%s", selected_plan, price_id)
         if price_id:
@@ -3064,7 +3061,6 @@ APPLE_APP_APPLE_ID = os.getenv("APPLE_APP_APPLE_ID", "")  # numeric App Store ID
 IAP_PRODUCT_TO_PLAN: dict[str, str] = {
     "com.useaurexis.app.starter.monthly": "starter",
     "com.useaurexis.app.pro.monthly":     "pro",
-    "com.useaurexis.app.elite.monthly":   "elite",
 }
 
 _APPLE_ROOT_CA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "certs", "AppleRootCA-G3.cer")

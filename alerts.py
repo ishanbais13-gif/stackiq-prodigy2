@@ -74,7 +74,7 @@ def _get_opted_in_users(alert_col: str) -> List[Dict[str, Any]]:
         rows = conn.execute(
             f"SELECT email, first_name FROM users "
             f"WHERE {alert_col} = 1 "
-            f"AND LOWER(plan) IN ('starter', 'pro', 'elite') "
+            f"AND LOWER(plan) IN ('starter', 'pro') "
             f"AND LOWER(subscription_status) = 'active'"
         ).fetchall()
         conn.close()

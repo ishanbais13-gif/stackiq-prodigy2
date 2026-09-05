@@ -173,7 +173,7 @@ def _fire_new_pick_push(pick: Dict[str, Any]) -> None:
     for d in devices:
         plan = str(d.get("plan") or "free").lower()
         sub_status = str(d.get("subscription_status") or "").lower()
-        is_paid = plan in ("starter", "pro", "elite") and sub_status == "active"
+        is_paid = plan in ("starter", "pro") and sub_status == "active"
         token = d.get("device_token")
         if not token:
             continue
