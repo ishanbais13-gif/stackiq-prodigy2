@@ -11739,7 +11739,13 @@ def _chat_build_context(user_id: Optional[int] = None, user_plan: Optional[str] 
     _ensure_perf_tracker_schema()
 
     if user_plan:
-        lines.append(f"USER PLAN: {user_plan} (only reference this to suggest a tier ABOVE it -- never suggest a plan the user is already on or below)")
+        # Guard against stale/removed plan strings (e.g. a legacy "elite" row
+        # left in the DB after the tier was retired) reaching the model as if
+        # it were a real current tier -- collapse anything unrecognized to
+        # "free", which is also how require_plan() treats it for access.
+        _known_plans = {"free", "starter", "pro"}
+        _plan_display = user_plan if user_plan in _known_plans else "free"
+        lines.append(f"USER PLAN: {_plan_display} (only reference this to suggest a tier ABOVE it -- never suggest a plan the user is already on or below)")
 
     # Recent picks from perf_tracker
     try:
@@ -11967,6 +11973,12 @@ You know about:
 - Market regime detection (BULL/BEAR/CHOPPY)
 - Technical signals: MOMENTUM_EXPANSION, BREAKOUT_STRUCTURE, RS_LEADER, VOLATILITY_EXPANSION, SUPPORT_RECLAIM
 - How the scoring system works (0-10 scale, edge signals, NN probability blend)
+
+Subscription plans — this is the AUTHORITATIVE and COMPLETE list. There are exactly THREE tiers. Do not describe, price, or imply any tier not listed here (there is no "Elite", "Premium", "Plus", "Enterprise", or any other tier — if a user asks about one, tell them it doesn't exist and describe the three real ones). Do not invent features or prices that aren't written below.
+- Free — $0: 1 AI pick per month (stock + direction), 3 stock analyses per day, market regime indicator, Top Movers (5 tickers).
+- Starter — $9/month: 3 picks per week (symbol, direction & AI score), edge signals, "Why This Trade" reasoning, AI "What This Means" metrics explainer, AI news & sentiment summary, full unlimited Top Movers, watchlist + trade journal + performance tracking, email alerts for new picks & outcomes.
+- Pro — $29/month: everything in Starter, plus the full trade plan (entry, stop & Fibonacci targets), unlimited daily AI picks, position sizing recommendations, multi-ticker screener, and portfolio tracking.
+If the USER PLAN line in your context shows a tier that isn't one of these three, treat the user as being on Free for the purpose of what they currently have access to.
 
 When discussing performance data (win rate, past picks, returns):
 - Always state the real number plainly and first — never omit, round favorably, or avoid a number that exists in your context just because it's unflattering.
