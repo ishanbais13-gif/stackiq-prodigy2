@@ -192,6 +192,16 @@ def init_auth_db() -> None:
                 PRIMARY KEY (user_id, date)
             )
         """)
+        # Which distinct pick symbol(s) a Starter user has already been
+        # charged for this week (JSON array), so re-reading the same
+        # already-shown pick (page reload, tab switch, "Refresh" button --
+        # none of which force a new scan) never charges twice. Only used by
+        # the best_pick_v2 weekly-count row; the analyze daily-limit rows in
+        # this same table just leave it NULL.
+        try:
+            conn.execute("ALTER TABLE pick_usage ADD COLUMN charged_symbols TEXT")
+        except Exception:
+            pass  # column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS otp_tokens (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -9515,8 +9515,28 @@ def _user_field(user, *keys):
     return None
 
 
-def _check_starter_weekly_limit(user) -> None:
-    """Raise 429 if a Starter user has used 3 picks this Mon-Sun UTC week."""
+def _check_starter_weekly_limit(user, pick_symbol: Optional[str]) -> None:
+    """
+    Enforce Starter's 3-picks-per-week cap on /best_pick_v2 -- charged per
+    DISTINCT pick shown this week, not per request.
+
+    BUG (fixed): this used to run before the pick was even resolved and
+    charged on every single call regardless of what was returned. Since
+    /best_pick_v2 mostly serves one shared, globally-cached pick that only
+    changes every ~4h (see _LAST_V2_PICK), and nothing in the frontend ever
+    forces a rescan (no caller passes refresh=true), that meant literally
+    every page load, tab switch, and "Refresh" click burned one of a
+    Starter user's 3/week -- including passive loads like opening the
+    Watchlist tab's System candidates section, which could silently exhaust
+    a whole week's quota through normal browsing alone.
+
+    Now: re-reading a pick the user has already been charged for this ISO
+    week (same symbol) is free -- call this AFTER the pick is resolved
+    (cache hit or fresh scan) and pass its symbol. Only a genuinely new,
+    not-yet-seen-this-week symbol consumes one of the 3, and once already
+    charged for a symbol it stays free to re-view even after the cap is
+    hit (so a maxed-out user can still see what they already unlocked).
+    """
     import sqlite3 as _sq3
     from datetime import datetime, timezone, timedelta
 
@@ -9528,6 +9548,10 @@ def _check_starter_weekly_limit(user) -> None:
     if not user_id:
         return
 
+    sym = str(pick_symbol or "").strip().upper()
+    if not sym:
+        return  # nothing resolved to charge for
+
     today = datetime.now(timezone.utc).date()
     week_start = today - timedelta(days=today.weekday())  # Monday of current UTC week
     week_key = week_start.isoformat()  # e.g. "2026-06-09"
@@ -9536,18 +9560,35 @@ def _check_starter_weekly_limit(user) -> None:
     with _sq3.connect(db_path, timeout=10) as conn:
         conn.row_factory = _sq3.Row
         row = conn.execute(
-            "SELECT count FROM pick_usage WHERE user_id = ? AND date = ?",
+            "SELECT count, charged_symbols FROM pick_usage WHERE user_id = ? AND date = ?",
             (user_id, week_key),
         ).fetchone()
-        if row and row["count"] >= 3:
+
+        charged: list = []
+        if row and row["charged_symbols"]:
+            try:
+                parsed = json.loads(row["charged_symbols"])
+                if isinstance(parsed, list):
+                    charged = parsed
+            except Exception:
+                charged = []
+
+        if sym in charged:
+            return  # already charged for this exact pick this week -- free re-read
+
+        count = int(row["count"]) if row else 0
+        if count >= 3:
             raise HTTPException(
                 status_code=429,
                 detail={"detail": "daily_limit_reached", "limit": 3, "plan": "starter", "upgrade_to": "pro"},
             )
+
+        charged.append(sym)
+        new_count = count + 1
         conn.execute(
-            """INSERT INTO pick_usage (user_id, date, count) VALUES (?, ?, 1)
-               ON CONFLICT(user_id, date) DO UPDATE SET count = count + 1""",
-            (user_id, week_key),
+            """INSERT INTO pick_usage (user_id, date, count, charged_symbols) VALUES (?, ?, ?, ?)
+               ON CONFLICT(user_id, date) DO UPDATE SET count = excluded.count, charged_symbols = excluded.charged_symbols""",
+            (user_id, week_key, new_count, json.dumps(charged)),
         )
         conn.commit()
 
@@ -9603,7 +9644,6 @@ async def best_pick_v2(
     _user=_dep_starter,
 ):
     _ = full_universe
-    _check_starter_weekly_limit(_user)
 
     # Serve from background-scan cache if fresh (< 4 hours) and not forced refresh.
     # The bg scan runs for 20 min every 4 hours and produces the true best pick.
@@ -9703,6 +9743,12 @@ async def best_pick_v2(
     out.setdefault("risk_flags", [])
     out.setdefault("pillar_scores_0_10", {"technical": 1.0, "catalyst": 1.0, "sentiment": 1.0, "risk_structure": 1.0, "upside": 1.0})
     out.setdefault("watchlist_candidates", [])
+
+    # Charge Starter's weekly cap only now that the actual pick is known --
+    # see _check_starter_weekly_limit for why this must run after resolution,
+    # not before. Raises 429 (never returns) if this is a genuinely new
+    # pick this week and the user's 3/week are already spent.
+    _check_starter_weekly_limit(_user, out.get("symbol"))
 
     # --- Dynamic position sizing (Pro only; stripped for Starter below) ---
     _ai_s100 = float(out.get("ai_score_0_10") or 0.0) * 10.0
