@@ -10523,6 +10523,137 @@ def admin_analytics(payload: Dict[str, Any] = Body(...)):
     }
 
 
+# ---------------------------------------------------------------------------
+# Growth Agent — SEO/social/email/ad-copy generation into an approval queue,
+# platform connections, and real publishing for the platforms that don't
+# require the platform's own app-review first (Reddit, your own blog). See
+# growth_agent.py for the brand grounding, the lint pass, and exactly which
+# platforms actually post vs. which are connection-slots waiting on their
+# own review process. Admin-only, same secret pattern as every other
+# /admin/* route. Never spends money -- nothing here touches an ads-buying
+# endpoint. /growth/blog and /growth/blog/{id} are the one deliberately
+# public exception (the actual published content).
+# ---------------------------------------------------------------------------
+
+@app.post("/admin/growth/generate", include_in_schema=False)
+def admin_growth_generate(payload: Dict[str, Any] = Body(...)):
+    """Generate one piece of content (seo_post | social_caption | email_sequence | ad_copy),
+    saved to the queue as 'pending'. Body: {secret, content_type, topic, platform?, brief?}."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    import growth_agent
+    from llm_client import LLMDisabledError, LLMCircuitOpenError, LLMDailyCapExceededError, LLMCallError
+    try:
+        item = growth_agent.generate_content(
+            content_type=str((payload or {}).get("content_type") or ""),
+            topic=str((payload or {}).get("topic") or ""),
+            platform=str((payload or {}).get("platform") or "none"),
+            brief=str((payload or {}).get("brief") or ""),
+        )
+        return {"ok": True, "item": item}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except (LLMDisabledError, LLMCircuitOpenError, LLMDailyCapExceededError, LLMCallError) as e:
+        raise HTTPException(status_code=503, detail=f"LLM unavailable: {type(e).__name__}: {e}")
+
+
+@app.get("/admin/growth/queue", include_in_schema=False)
+def admin_growth_queue(secret: str = "", status: Optional[str] = None, limit: int = 50):
+    """List queue items, newest first. ?status=pending|approved|rejected to filter."""
+    _check_admin_secret(secret)
+    import growth_agent
+    return {"ok": True, "items": growth_agent.list_queue(status=status, limit=limit)}
+
+
+@app.post("/admin/growth/review", include_in_schema=False)
+def admin_growth_review(payload: Dict[str, Any] = Body(...)):
+    """Approve or reject one queued item. Body: {secret, id, action: 'approve'|'reject', notes?}.
+    Approving marks it ready to publish -- it still does not auto-post anywhere; that's a
+    separate, explicit /admin/growth/publish call."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    import growth_agent
+    try:
+        item = growth_agent.review_item(
+            item_id=int((payload or {}).get("id") or 0),
+            action=str((payload or {}).get("action") or ""),
+            notes=str((payload or {}).get("notes") or ""),
+        )
+        return {"ok": True, "item": item}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/admin/growth/connections", include_in_schema=False)
+def admin_growth_connections_list(secret: str = ""):
+    """List every platform slot, connected or not, with setup instructions for the
+    ones that need you to go register a developer app first. Never returns a raw
+    secret -- credentials come back redacted (see growth_agent._redact)."""
+    _check_admin_secret(secret)
+    import growth_agent
+    return {"ok": True, "connections": growth_agent.list_connections()}
+
+
+@app.post("/admin/growth/connections", include_in_schema=False)
+def admin_growth_connections_save(payload: Dict[str, Any] = Body(...)):
+    """Save/update credentials for one platform. Body: {secret, platform, credentials: {...}}.
+    See growth_agent.PLATFORM_FIELDS for what each platform expects."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    import growth_agent
+    try:
+        result = growth_agent.save_connection(
+            platform=str((payload or {}).get("platform") or ""),
+            credentials=dict((payload or {}).get("credentials") or {}),
+        )
+        return {"ok": True, "connection": result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/admin/growth/connections/delete", include_in_schema=False)
+def admin_growth_connections_delete(payload: Dict[str, Any] = Body(...)):
+    """Remove a platform's stored credentials. Body: {secret, platform}."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    import growth_agent
+    growth_agent.delete_connection(str((payload or {}).get("platform") or ""))
+    return {"ok": True}
+
+
+@app.post("/admin/growth/publish", include_in_schema=False)
+def admin_growth_publish(payload: Dict[str, Any] = Body(...)):
+    """Actually publish one already-approved item. Body: {secret, id, platform}.
+    Only fires on an explicit call like this one -- approve never triggers it on its own."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    import growth_agent
+    try:
+        item = growth_agent.publish_item(
+            item_id=int((payload or {}).get("id") or 0),
+            platform=str((payload or {}).get("platform") or ""),
+        )
+        return {"ok": True, "item": item}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except growth_agent.PublishError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get("/growth/blog", include_in_schema=False)
+def public_growth_blog():
+    """Public: list of seo_post items that were reviewed, approved, and explicitly
+    published to the blog. No auth -- this is the actual public content."""
+    import growth_agent
+    return {"ok": True, "posts": growth_agent.list_published_blog_posts()}
+
+
+@app.get("/growth/blog/{item_id}", include_in_schema=False)
+def public_growth_blog_post(item_id: int):
+    """Public: one published blog post's full body."""
+    import growth_agent
+    posts = growth_agent.list_published_blog_posts(limit=1000)
+    for p in posts:
+        if p["id"] == item_id:
+            return {"ok": True, "post": p}
+    raise HTTPException(status_code=404, detail="Not found")
+
+
 @app.post("/admin/table-stats", include_in_schema=False)
 def admin_table_stats(payload: Dict[str, Any] = Body(...)):
     """Diagnostic: row/distinct-user counts for the unscoped legacy tables. Read-only."""
