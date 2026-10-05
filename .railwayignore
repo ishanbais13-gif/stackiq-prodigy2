@@ -1,2 +1,6 @@
 .venv/
 node_modules/
+# NN weights are retrained by production at startup from its own resolved picks
+# (ml/trainer.py). The local copy is retrained on local dev data, so never ship it.
+models/nn_scorer.npz
+models/nn_scorer_norm.npz
