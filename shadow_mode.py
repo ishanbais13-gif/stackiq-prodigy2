@@ -136,9 +136,22 @@ def features(cand: Dict[str, Any], now_ts: float) -> Optional[Dict[str, float]]:
     }
 
 
+def in_training_range(feats: Dict[str, float], m: Dict[str, Any]) -> bool:
+    """Only score trade plans shaped like the ones the model learned from. v1 put
+    an 88% win probability on a 17%-stop plan -- pure extrapolation, since every
+    training pick had a stop under ~10%."""
+    if "max" not in m:
+        return True
+    hi = dict(zip(m["features"], m["max"]))["stop_pct"]
+    return 0.5 <= feats["stop_pct"] <= hi
+
+
 def win_prob(feats: Dict[str, float], m: Dict[str, Any]) -> float:
-    z = m["bias"] + sum(w * (feats[n] - mu) / sd for n, w, mu, sd in
-                        zip(m["features"], m["weights"], m["mean"], m["std"]))
+    lo = m.get("min") or [-math.inf] * len(m["features"])
+    hi = m.get("max") or [math.inf] * len(m["features"])
+    # Clip to the training range so an outlier can't produce an extreme score.
+    z = m["bias"] + sum(w * (min(max(feats[n], a), b) - mu) / sd for n, w, mu, sd, a, b in
+                        zip(m["features"], m["weights"], m["mean"], m["std"], lo, hi))
     return 1.0 / (1.0 + math.exp(-z))
 
 
@@ -151,7 +164,7 @@ def record(pool: List[Dict[str, Any]], real_out: Optional[Dict[str, Any]]) -> Op
     scored = []
     for cand in pool:
         fe = features(cand, now)
-        if fe is not None:
+        if fe is not None and in_training_range(fe, m):
             scored.append((win_prob(fe, m), cand, fe))
     if not scored:
         return None
@@ -222,8 +235,12 @@ def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def compare(limit: int = 200) -> Dict[str, Any]:
     """Shadow vs real picks over the same period (since shadow logging began)."""
+    version = (_model() or {}).get("version")
     with _conn() as con:
-        shadow = [dict(r) for r in con.execute("SELECT * FROM shadow_picks ORDER BY recorded_at DESC").fetchall()]
+        # Only the current model version -- earlier versions' rows stay in the
+        # table but don't mix into the comparison.
+        shadow = [dict(r) for r in con.execute(
+            "SELECT * FROM shadow_picks WHERE model_version = ? ORDER BY recorded_at DESC", (version,)).fetchall()]
         if not shadow:
             return {"model": _model(), "shadow": _summary([]), "real": _summary([]), "rows": []}
         since = min(r["recorded_at"] for r in shadow)
