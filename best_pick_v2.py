@@ -1255,6 +1255,54 @@ def _score_premover_v2(c: "_Candidate") -> float:
         return 5.0
 
 
+_MAX_EXT_ABOVE_SMA20_PCT = float(os.getenv("MAX_EXT_ABOVE_SMA20_PCT", "10") or 0)
+
+
+def _completed_closes(c: "_Candidate") -> List[float]:
+    """Closes of daily bars whose session already ended (16:00 ET ~ bar t + 20h),
+    so a scan during market hours doesn't mix in today's unfinished bar."""
+    import shadow_mode
+    done = shadow_mode.completed_bars(list(c.daily_bars or []), time.time())
+    return [float(b["c"]) for b in done if _safe_f(b.get("c"))]
+
+
+def _ext_above_sma20_pct(c: "_Candidate") -> Optional[float]:
+    """Current price vs the 20-day average of completed closes, in percent."""
+    try:
+        price = _safe_f(c.last_price)
+        closes = _completed_closes(c)[-20:]
+        if price is None or price <= 0 or len(closes) < 15:
+            return None
+        return (float(price) / (sum(closes) / len(closes)) - 1.0) * 100.0
+    except Exception:
+        return None
+
+
+# Shadow mode (see shadow_mode.py): the background scan reads the final candidate
+# pool after each run so an experimental model can rank the same candidates.
+# Never affects the real pick.
+_SHADOW_POOL: Dict[str, Any] = {"ts": 0.0, "pool": []}
+
+
+def _set_shadow_pool(cands: List["_Candidate"]) -> None:
+    try:
+        _SHADOW_POOL["pool"] = [{
+            "symbol": c.symbol, "last_price": c.last_price, "stop": c.stop,
+            "final_score": c.final_score_0_10 if c.final_score_0_10 is not None else c.ai_score,
+            "edge_score": c.edge_score_0_10, "daily_bars": list(c.daily_bars or [])[-30:],
+        } for c in cands[:40]]
+        _SHADOW_POOL["ts"] = time.time()
+    except Exception:
+        pass
+
+
+def take_shadow_pool(max_age_s: float = 600.0) -> List[Dict[str, Any]]:
+    """Returns (and clears) the pool from the most recent scan, if fresh."""
+    pool = _SHADOW_POOL["pool"] if time.time() - float(_SHADOW_POOL["ts"]) <= max_age_s else []
+    _SHADOW_POOL["pool"] = []
+    return pool
+
+
 def _compute_overextension_penalty(c: "_Candidate") -> float:
     """Returns 0.0–2.5 penalty to subtract from final_score when stock is already extended.
     Fires on: >5x vol, price far above 20-day range, extreme ATR%."""
@@ -2882,6 +2930,8 @@ async def scan_best_pick_v2(
     cands.sort(key=_rank_key_final, reverse=True)
 
     # Final validation: never allow a disqualified symbol to win.
+    _anti_chase_skipped: List[str] = []
+
     def _passes_final_validation(cand: _Candidate) -> bool:
         try:
             if cand.last_price is None or float(cand.last_price) < 5.0:
@@ -2898,6 +2948,14 @@ async def scan_best_pick_v2(
             if cand.avg_dollar_vol_30d is None or float(cand.avg_dollar_vol_30d) < 10_000_000.0:
                 return False
         except Exception:
+            return False
+        # Anti-chasing: skip stocks already stretched far above their 20-day average.
+        # A backtest of 236 recorded picks (Jun-Sep 2026) showed the stretched ones
+        # drove most losses; skipping >10% above the average took the per-trade
+        # average from -1.53% to -0.53%.
+        ext = _ext_above_sma20_pct(cand)
+        if ext is not None and _MAX_EXT_ABOVE_SMA20_PCT > 0 and ext > _MAX_EXT_ABOVE_SMA20_PCT:
+            _anti_chase_skipped.append(str(cand.symbol))
             return False
         return True
 
@@ -2921,6 +2979,9 @@ async def scan_best_pick_v2(
     except Exception:
         etf_valid = []
     ordered_valid = list(stock_valid) + list(etf_valid)
+    if _anti_chase_skipped:
+        log.info(f"best_pick_v2: anti-chase skipped {len(_anti_chase_skipped)} stretched candidates: {_anti_chase_skipped[:10]}")
+    _set_shadow_pool(ordered_valid)
 
     if not ordered_valid:
         return {"error": "no_symbols_passed_universe_gates", "candidates_scanned": int(total_scanned)}

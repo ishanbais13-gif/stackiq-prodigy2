@@ -8711,6 +8711,16 @@ def _bg_v2_scan_once() -> None:
                 except Exception as _rp_err:
                     log.warning(f"bg_scan: record_pick failed: {_rp_err}")
 
+            # Shadow mode: an experimental model ranks this scan's final candidate
+            # pool and logs what it would have picked. Admin-only, never shown to
+            # users, never changes the real pick (see shadow_mode.py).
+            try:
+                import best_pick_v2 as _bpv2
+                import shadow_mode as _shadow
+                _shadow.record(_bpv2.take_shadow_pool(), out if isinstance(out, dict) else None)
+            except Exception as _sh_err:
+                log.warning(f"bg_scan: shadow record failed: {_sh_err}")
+
         _aio.run(_run())
     except Exception as _e:
         try:
@@ -8879,6 +8889,12 @@ def _bg_brain_outcome_loop() -> None:
         log.info(f"brain_outcome_loop: evaluated {n2} perf_tracker picks")
     except Exception as e:
         log.warning(f"brain_outcome_loop perf_tracker error: {e}")
+    try:
+        import shadow_mode as _shadow
+        n3 = _shadow.evaluate_pending(batch_size=80)
+        log.info(f"brain_outcome_loop: evaluated {n3} shadow picks")
+    except Exception as e:
+        log.warning(f"brain_outcome_loop shadow error: {e}")
     # Backfill learning.db from perf_tracker so the evolution engine
     # actually has data to learn from (was never called automatically before)
     try:
@@ -10708,6 +10724,14 @@ def admin_test_push(payload: Dict[str, Any] = Body(...)):
         )
         results.append({"token_prefix": token[:12], "platform": r["platform"], "last_seen_at": r["last_seen_at"], "ok": ok, "detail": detail})
     return {"ok": True, "results": results}
+
+
+@app.post("/admin/shadow", include_in_schema=False)
+def admin_shadow(payload: Dict[str, Any] = Body(...)):
+    """Shadow-model picks vs real picks over the same period. Admin-only."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    import shadow_mode
+    return shadow_mode.compare(limit=int((payload or {}).get("limit") or 200))
 
 
 @app.post("/admin/picks-raw", include_in_schema=False)
