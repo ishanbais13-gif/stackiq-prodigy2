@@ -233,16 +233,30 @@ def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
             "total_return_pct": round(sum(rets), 1) if rets else None}
 
 
+def _real_all_time(con: sqlite3.Connection) -> Dict[str, Any]:
+    """The real system's full record (every pick with a full trade plan), so
+    picks resolved before shadow logging began still show up somewhere."""
+    rows = [dict(r) for r in con.execute(
+        "SELECT symbol, recorded_at, status, exit_return_pct, evaluated_at FROM picks "
+        "WHERE entry_price IS NOT NULL AND target1 IS NOT NULL ORDER BY recorded_at").fetchall()]
+    recent = sorted((r for r in rows if r["status"] != "pending" and r["evaluated_at"]),
+                    key=lambda r: -r["evaluated_at"])[:10]
+    return {**_summary(rows), "since": rows[0]["recorded_at"] if rows else None, "recent_closed": recent}
+
+
 def compare(limit: int = 200) -> Dict[str, Any]:
-    """Shadow vs real picks over the same period (since shadow logging began)."""
+    """Shadow vs real picks over the same period (since shadow logging began),
+    plus the real system's all-time record for context."""
     version = (_model() or {}).get("version")
     with _conn() as con:
+        real_all = _real_all_time(con)
         # Only the current model version -- earlier versions' rows stay in the
         # table but don't mix into the comparison.
         shadow = [dict(r) for r in con.execute(
             "SELECT * FROM shadow_picks WHERE model_version = ? ORDER BY recorded_at DESC", (version,)).fetchall()]
         if not shadow:
-            return {"model": _model(), "shadow": _summary([]), "real": _summary([]), "rows": []}
+            return {"model": _model(), "shadow": _summary([]), "real": _summary([]),
+                    "real_all_time": real_all, "rows": []}
         since = min(r["recorded_at"] for r in shadow)
         real = [dict(r) for r in con.execute(
             "SELECT symbol, recorded_at, status, exit_return_pct FROM picks WHERE recorded_at >= ? "
@@ -260,6 +274,7 @@ def compare(limit: int = 200) -> Dict[str, Any]:
         "since": since,
         "shadow": _summary(shadow),
         "real": _summary(real),
+        "real_all_time": real_all,
         "agreement_pct": round(100.0 * sum(r["same_as_real"] for r in shadow) / len(shadow), 1),
         "rows": shadow[:limit],
     }
