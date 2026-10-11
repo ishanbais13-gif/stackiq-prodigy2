@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from typing import Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional
 import asyncio
 import math
 import os
@@ -2748,6 +2748,14 @@ def health_check():
     return {"status": "ok"}
 
 
+@app.get("/health/background", include_in_schema=False)
+def health_background():
+    """Whether the pick scanners and outcome checker are still running on schedule."""
+    loops = background_loop_status()
+    return {"ok": bool(loops) and all(v.get("healthy") for v in loops.values()), "loops": loops}
+
+
+
 @app.on_event("startup")
 def _startup_init():
     try:
@@ -4728,7 +4736,9 @@ async def analyze(
     except Exception:
         indicators = {}
 
-    news0 = _news_and_sentiment(sym, allow_llm=bool(allow_llm))
+    # Off the event loop: this does network + LLM work, and running it inline
+    # froze every other request on the single worker while it ran.
+    news0 = await asyncio.to_thread(_news_and_sentiment, sym, allow_llm=bool(allow_llm))
     if not isinstance(news0, dict):
         news0 = {"headlines": [], "sentiment": "Neutral", "items": [], "source": "unavailable"}
     news_sentiment = {
@@ -8729,12 +8739,73 @@ def _bg_v2_scan_once() -> None:
             pass
 
 
-def _bg_v2_scan_loop() -> None:
-    """Run once, then reschedule every 4 hours."""
-    _bg_v2_scan_once()
-    _t = threading.Timer(4 * 3600, _bg_v2_scan_loop)
-    _t.daemon = True
-    _t.start()
+# ---------------------------------------------------------------------------
+# Resilient background scheduling
+#
+# The loops used to run their job and only then schedule the next run, so a
+# single job that hung (a stalled network call, a retry storm) silently ended
+# that loop forever -- the site stayed up but stopped producing picks until
+# the next deploy restarted everything. Now each tick schedules the next one
+# FIRST, skips only while a previous run is genuinely still in progress, and
+# gives up waiting on a run that's been stuck longer than max_runtime_s.
+# ---------------------------------------------------------------------------
+
+_BG_LOOPS: Dict[str, Dict[str, Any]] = {}
+_BG_LOOPS_LOCK = threading.Lock()
+
+
+def _resilient_loop(name: str, once: Callable[[], None], interval_s: float, max_runtime_s: float) -> Callable[[], None]:
+    def tick() -> None:
+        nxt = threading.Timer(interval_s, tick)
+        nxt.daemon = True
+        nxt.start()
+        now = time.time()
+        with _BG_LOOPS_LOCK:
+            st = _BG_LOOPS.setdefault(name, {"runs": 0, "skipped": 0, "stuck_recoveries": 0, "interval_s": interval_s})
+            st["next_run"] = now + interval_s
+            started = st.get("running_since")
+            if started and now - started < max_runtime_s:
+                st["skipped"] += 1
+                log.warning(f"bg_loop {name}: previous run still in progress ({int(now - started)}s), skipping this tick")
+                return
+            if started:
+                st["stuck_recoveries"] += 1
+                log.error(f"bg_loop {name}: previous run stuck for {int(now - started)}s, starting a fresh run")
+            st["running_since"] = now
+            st["last_start"] = now
+            st["runs"] += 1
+        try:
+            once()
+            st["last_ok"] = time.time()
+            st["last_error"] = None
+        except BaseException as e:  # noqa: BLE001 -- a loop must never die from one bad run
+            st["last_error"] = f"{type(e).__name__}: {e}"[:300]
+            log.exception(f"bg_loop {name}: run failed")
+        finally:
+            with _BG_LOOPS_LOCK:
+                if st.get("running_since") == now:  # a stuck old run finishing late mustn't clear a newer one
+                    st["running_since"] = None
+                st["last_end"] = time.time()
+    return tick
+
+
+def background_loop_status() -> Dict[str, Any]:
+    now = time.time()
+    out: Dict[str, Any] = {}
+    with _BG_LOOPS_LOCK:
+        for name, st in _BG_LOOPS.items():
+            row = {k: v for k, v in st.items() if not isinstance(v, float) or k == "interval_s"}
+            for k in ("last_start", "last_ok", "last_end", "next_run", "running_since"):
+                if st.get(k):
+                    row[f"{k}_ago_s" if k != "next_run" else "next_run_in_s"] = int(abs(now - st[k]))
+            # Healthy = finished successfully within ~2 intervals.
+            row["healthy"] = bool(st.get("last_ok")) and now - st["last_ok"] < 2.2 * st["interval_s"]
+            out[name] = row
+    return out
+
+
+_bg_v2_scan_loop = _resilient_loop("v2_scan", _bg_v2_scan_once, 4 * 3600, 3 * 3600)
+
 
 
 # ---------------------------------------------------------------------------
@@ -8864,15 +8935,11 @@ def _bg_premover_scan_once() -> None:
         log.warning(f"bg_premover_scan error: {_e}")
 
 
-def _bg_premover_scan_loop() -> None:
-    """Run once every 2 hours (small-cap setups don't change minute-to-minute)."""
-    _bg_premover_scan_once()
-    _t = threading.Timer(2 * 3600, _bg_premover_scan_loop)
-    _t.daemon = True
-    _t.start()
+# Every 2 hours (small-cap setups don't change minute-to-minute).
+_bg_premover_scan_loop = _resilient_loop("premover_scan", _bg_premover_scan_once, 2 * 3600, 90 * 60)
 
 
-def _bg_brain_outcome_loop() -> None:
+def _bg_brain_outcome_once() -> None:
     """
     Every 6 hours: fetch current prices for pending picks, record outcomes,
     and trigger weight recalibration so the scanner keeps learning.
@@ -8910,10 +8977,9 @@ def _bg_brain_outcome_loop() -> None:
         log.info("brain_outcome_loop: recalibrated signal weights")
     except Exception as e:
         log.warning(f"brain_outcome_loop: recalibrate_weights failed: {e}")
-    finally:
-        _t = threading.Timer(6 * 3600, _bg_brain_outcome_loop)
-        _t.daemon = True
-        _t.start()
+
+
+_bg_brain_outcome_loop = _resilient_loop("brain_outcomes", _bg_brain_outcome_once, 6 * 3600, 4 * 3600)
 
 
 class BestPickResponse(BaseModel):
