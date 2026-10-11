@@ -8761,7 +8761,8 @@ def _resilient_loop(name: str, once: Callable[[], None], interval_s: float, max_
         nxt.start()
         now = time.time()
         with _BG_LOOPS_LOCK:
-            st = _BG_LOOPS.setdefault(name, {"runs": 0, "skipped": 0, "stuck_recoveries": 0, "interval_s": interval_s})
+            st = _BG_LOOPS.setdefault(name, {"runs": 0, "skipped": 0, "stuck_recoveries": 0,
+                                             "interval_s": interval_s, "max_runtime_s": max_runtime_s})
             st["next_run"] = now + interval_s
             started = st.get("running_since")
             if started and now - started < max_runtime_s:
@@ -8794,12 +8795,15 @@ def background_loop_status() -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     with _BG_LOOPS_LOCK:
         for name, st in _BG_LOOPS.items():
-            row = {k: v for k, v in st.items() if not isinstance(v, float) or k == "interval_s"}
+            row = {k: v for k, v in st.items() if not isinstance(v, float) or k in ("interval_s", "max_runtime_s")}
             for k in ("last_start", "last_ok", "last_end", "next_run", "running_since"):
                 if st.get(k):
                     row[f"{k}_ago_s" if k != "next_run" else "next_run_in_s"] = int(abs(now - st[k]))
-            # Healthy = finished successfully within ~2 intervals.
-            row["healthy"] = bool(st.get("last_ok")) and now - st["last_ok"] < 2.2 * st["interval_s"]
+            # Healthy = finished successfully within ~2 intervals, or the current
+            # run (e.g. the first one after a deploy) is still inside its time limit.
+            recent_ok = bool(st.get("last_ok")) and now - st["last_ok"] < 2.2 * st["interval_s"]
+            running_ok = bool(st.get("running_since")) and now - st["running_since"] < st["max_runtime_s"]
+            row["healthy"] = recent_ok or running_ok
             out[name] = row
     return out
 
