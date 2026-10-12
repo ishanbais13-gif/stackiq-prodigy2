@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger("stackiq")
 
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "shadow_model_v1.json")
-_DEDUPE_SECONDS = 20 * 3600   # one row per shadow symbol per ~trading day
+_COOLDOWN_SECONDS = 7 * 24 * 3600  # a symbol can't be the shadow pick again for ~5 trading days
 _MAX_AGE_DAYS = 7.0           # same time stop as performance_tracker
 _ET = timezone(timedelta(hours=-4))
 _lock = threading.Lock()
@@ -169,16 +169,21 @@ def record(pool: List[Dict[str, Any]], real_out: Optional[Dict[str, Any]]) -> Op
     if not scored:
         return None
     scored.sort(key=lambda x: -x[0])
-    prob, best, fe = scored[0]
+    # Cooldown: skip symbols the shadow model already picked in the last 7
+    # days and take the next-best candidate, so one stock can't count four
+    # times (EBAY did, before this).
+    with _conn() as con:
+        recent = {r[0] for r in con.execute(
+            "SELECT symbol FROM shadow_picks WHERE recorded_at > ?", (now - _COOLDOWN_SECONDS,)).fetchall()}
+    fresh = [x for x in scored if str(x[1].get("symbol") or "").upper() not in recent]
+    if not fresh:
+        return None
+    prob, best, fe = fresh[0]
     entry, stop = float(best["last_price"]), float(best["stop"])
     target1 = round(min(entry + 1.5 * (entry - stop), entry * 1.30), 4)  # same rule as _trade_plan_from_levels
     real_sym = str((real_out or {}).get("symbol") or "").strip().upper()
     sym = str(best.get("symbol") or "").upper()
     with _lock, _conn() as con:
-        dup = con.execute("SELECT 1 FROM shadow_picks WHERE symbol=? AND recorded_at>?",
-                          (sym, now - _DEDUPE_SECONDS)).fetchone()
-        if dup:
-            return None
         cur = con.execute(
             """INSERT INTO shadow_picks (model_version, recorded_at, symbol, entry_price, stop, target1,
                win_prob, features, pool_size, pool_top5, real_symbol, real_is_trade, same_as_real)

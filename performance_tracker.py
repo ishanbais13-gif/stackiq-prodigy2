@@ -160,17 +160,15 @@ def record_pick(pick: Dict[str, Any]):
         # symbol. A symbol that gets a real new setup a day later (price
         # actually moved) is NOT suppressed; the same unchanged level
         # lingering across scans IS.
-        _dedup_window_seconds = 5 * 24 * 3600
+        #
+        # Cooldown (2026-10-12): the 1% price match still let the same symbol
+        # in twice when its price moved between scans -- NOK and PSX were
+        # each recorded twice on the same day, counting double in the
+        # stats. Now any pick of the same symbol within 7 calendar days
+        # (~5 trading days) is treated as the same position.
+        _dedup_window_seconds = 7 * 24 * 3600
         _now_ts  = time.time()
         _cutoff_ts = _now_ts - _dedup_window_seconds
-
-        def _close(a: Optional[float], b: Optional[float], tol: float = 0.01) -> bool:
-            if a is None or b is None or a == 0:
-                return False
-            try:
-                return abs(float(a) - float(b)) / abs(float(a)) <= tol
-            except Exception:
-                return False
 
         with _conn() as db:
             _recent = db.execute(
@@ -179,11 +177,7 @@ def record_pick(pick: Dict[str, Any]):
                 (symbol_upper, _cutoff_ts),
             ).fetchall()
 
-        _dupe = None
-        for _row in (_recent or []):
-            if _close(_row[3], entry) and _close(_row[4], stop):
-                _dupe = _row
-                break
+        _dupe = _recent[0] if _recent else None  # most recent pick of this symbol in the window
 
         if _dupe:
             _existing_id = int(_dupe[0])
@@ -200,7 +194,7 @@ def record_pick(pick: Dict[str, Any]):
             _needs_alert = _dupe[2] is None
             log.info(
                 "perf_tracker: duplicate suppressed symbol=%s existing_id=%d age=%.1fh "
-                "(same setup within %dd window) needs_alert=%s",
+                "(symbol cooldown, %dd window) needs_alert=%s",
                 symbol_upper, _existing_id, _age_hours, _dedup_window_seconds // 86400, _needs_alert,
             )
             return {
