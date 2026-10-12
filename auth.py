@@ -3224,3 +3224,59 @@ def iap_verify(body: _IAPVerifyRequest, user: sqlite3.Row = Depends(get_current_
         user["id"], product_id, new_plan, new_status, original_transaction_id,
     )
     return {"ok": True, "plan": new_plan, "status": new_status}
+
+
+# ---------------------------------------------------------------------------
+# iOS launch notify list -- phone visitors to useaurexis.com (who get the
+# "open this on your computer" screen) can leave an email to hear when the
+# iPhone app launches. Public, unauthenticated; one row per email.
+# ---------------------------------------------------------------------------
+
+import re
+from typing import Any, Dict
+from fastapi import Body
+
+_LAUNCH_NOTIFY_HITS: Dict[str, List[float]] = {}
+
+
+def _ensure_launch_notify_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS launch_notify ("
+        " email TEXT PRIMARY KEY, created_at REAL NOT NULL, source TEXT, user_agent TEXT)"
+    )
+
+
+class LaunchNotifyIn(BaseModel):
+    email: str
+    source: Optional[str] = None
+
+
+@auth_router.post("/launch-notify")
+def launch_notify(payload: LaunchNotifyIn, request: Request):
+    email = (payload.email or "").strip().lower()
+    if len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address.")
+    ip = _client_ip(request)
+    now = time.time()
+    hits = [t for t in _LAUNCH_NOTIFY_HITS.get(ip, []) if now - t < 3600]
+    if len(hits) >= 10:
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again later.")
+    _LAUNCH_NOTIFY_HITS[ip] = hits + [now]
+    with _get_db() as conn:
+        _ensure_launch_notify_table(conn)
+        conn.execute(
+            "INSERT OR IGNORE INTO launch_notify (email, created_at, source, user_agent) VALUES (?,?,?,?)",
+            (email, now, (payload.source or "")[:40], (request.headers.get("user-agent") or "")[:300]),
+        )
+        conn.commit()
+    return {"ok": True}
+
+
+@auth_router.post("/admin/launch-notify")
+def admin_launch_notify(payload: Dict[str, Any] = Body(...)):
+    """List the launch-notify signups. Admin secret required."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    with _get_db() as conn:
+        _ensure_launch_notify_table(conn)
+        rows = conn.execute("SELECT email, created_at, source FROM launch_notify ORDER BY created_at DESC").fetchall()
+    return {"count": len(rows), "signups": [dict(r) for r in rows]}
