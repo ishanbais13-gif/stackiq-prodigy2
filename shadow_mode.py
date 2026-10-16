@@ -227,12 +227,32 @@ def evaluate_pending(batch_size: int = 80) -> int:
     return updated
 
 
+def _positions(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One row per position: a repeat pick of the same symbol within 7 days of
+    the last counted pick of that symbol is the same position, not a new
+    result (the same cooldown record_pick and record() now apply to new
+    picks). Keeps the earliest pick of each position."""
+    last: Dict[str, float] = {}
+    kept = []
+    for r in sorted(rows, key=lambda r: r["recorded_at"]):
+        sym = str(r.get("symbol") or "").upper()
+        if sym in last and r["recorded_at"] - last[sym] < _COOLDOWN_SECONDS:
+            continue
+        last[sym] = r["recorded_at"]
+        kept.append(r)
+    return kept
+
+
 def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    closed = [r for r in rows if r["status"] not in ("pending",)]
+    """Stats over unique positions (see _positions); raw_* are the counts
+    before repeats were collapsed."""
+    uniq = _positions(rows)
+    closed = [r for r in uniq if r["status"] not in ("pending",)]
     wins = sum(r["status"] in ("won", "won_drift") for r in closed)
     losses = sum(r["status"] in ("lost", "lost_drift") for r in closed)
     rets = [max(-75.0, min(75.0, r["exit_return_pct"])) for r in closed if r.get("exit_return_pct") is not None]
-    return {"picks": len(rows), "closed": len(closed), "pending": len(rows) - len(closed),
+    return {"picks": len(uniq), "closed": len(closed), "pending": len(uniq) - len(closed),
+            "raw_picks": len(rows), "raw_closed": sum(r["status"] != "pending" for r in rows),
             "win_rate": round(100.0 * wins / (wins + losses), 1) if wins + losses else None,
             "avg_return_pct": round(statistics.mean(rets), 2) if rets else None,
             "total_return_pct": round(sum(rets), 1) if rets else None}
@@ -266,7 +286,9 @@ def compare(limit: int = 200) -> Dict[str, Any]:
         real = [dict(r) for r in con.execute(
             "SELECT symbol, recorded_at, status, exit_return_pct FROM picks WHERE recorded_at >= ? "
             "AND entry_price IS NOT NULL AND target1 IS NOT NULL ORDER BY recorded_at", (since,)).fetchall()]
+    counted = {r["id"] for r in _positions(shadow)}
     for r in shadow:
+        r["repeat"] = r["id"] not in counted  # same position as an earlier shadow pick
         # Outcome of the real pick logged closest to this scan (same symbol, within 2h).
         match = [p for p in real if p["symbol"] == r["real_symbol"] and abs(p["recorded_at"] - r["recorded_at"]) < 7200]
         r["real_status"] = match[0]["status"] if match else None
@@ -281,5 +303,6 @@ def compare(limit: int = 200) -> Dict[str, Any]:
         "real": _summary(real),
         "real_all_time": real_all,
         "agreement_pct": round(100.0 * sum(r["same_as_real"] for r in shadow) / len(shadow), 1),
+        "target_unique_closed": 40,
         "rows": shadow[:limit],
     }

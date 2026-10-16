@@ -10554,6 +10554,16 @@ def track_ping(payload: Dict[str, Any] = Body(...), request: Request = None):
     return {"ok": True}
 
 
+# Signed-in sessions from these accounts are left out of the traffic counts
+# (owner accounts + Apple's App Review demo login). Override with a
+# comma-separated ANALYTICS_EXCLUDE_EMAILS env var. Logged-out sessions
+# can't be attributed to anyone, so they're always counted.
+_ANALYTICS_EXCLUDE_EMAILS = tuple(
+    e.strip().lower() for e in (os.getenv("ANALYTICS_EXCLUDE_EMAILS")
+    or "ishanbais13@gmail.com,baisishan48@gmail.com,applereview@useaurexis.com").split(",") if e.strip()
+)
+
+
 @app.post("/admin/analytics", include_in_schema=False)
 def admin_analytics(payload: Dict[str, Any] = Body(...)):
     """Admin-gated traffic dashboard data: all-time + daily visit counts by
@@ -10568,27 +10578,30 @@ def admin_analytics(payload: Dict[str, Any] = Body(...)):
     day24_cutoff = (now - timedelta(hours=24)).isoformat()
     day7_cutoff = (now - timedelta(days=7)).isoformat()
     day30_cutoff = (now - timedelta(days=30)).isoformat()
+    _ph = ",".join("?" * len(_ANALYTICS_EXCLUDE_EMAILS)) or "''"
+    _notme = f"(email IS NULL OR lower(email) NOT IN ({_ph}))"
+    _ex = list(_ANALYTICS_EXCLUDE_EMAILS)
 
-    cur.execute("SELECT platform, COUNT(*) AS c FROM app_visits GROUP BY platform")
+    cur.execute(f"SELECT platform, COUNT(*) AS c FROM app_visits WHERE {_notme} GROUP BY platform", _ex)
     total_by_platform = {r["platform"]: int(r["c"]) for r in cur.fetchall()}
     total_visits = sum(total_by_platform.values())
 
-    cur.execute("SELECT COUNT(*) AS c FROM app_visits WHERE last_seen_at >= ?", (day24_cutoff,))
+    cur.execute(f"SELECT COUNT(*) AS c FROM app_visits WHERE last_seen_at >= ? AND {_notme}", [day24_cutoff, *_ex])
     active_24h = int(cur.fetchone()["c"])
-    cur.execute("SELECT COUNT(*) AS c FROM app_visits WHERE last_seen_at >= ?", (day7_cutoff,))
+    cur.execute(f"SELECT COUNT(*) AS c FROM app_visits WHERE last_seen_at >= ? AND {_notme}", [day7_cutoff, *_ex])
     active_7d = int(cur.fetchone()["c"])
 
     cur.execute(
         "SELECT session_id, platform, email, first_seen_at, last_seen_at FROM app_visits "
-        "WHERE last_seen_at >= ? ORDER BY last_seen_at DESC",
-        (active_cutoff,),
+        f"WHERE last_seen_at >= ? AND {_notme} ORDER BY last_seen_at DESC",
+        [active_cutoff, *_ex],
     )
     currently_active = [dict(r) for r in cur.fetchall()]
 
     cur.execute(
         "SELECT substr(first_seen_at, 1, 10) AS day, platform, COUNT(*) AS c "
-        "FROM app_visits WHERE first_seen_at >= ? GROUP BY day, platform ORDER BY day ASC",
-        (day30_cutoff,),
+        f"FROM app_visits WHERE first_seen_at >= ? AND {_notme} GROUP BY day, platform ORDER BY day ASC",
+        [day30_cutoff, *_ex],
     )
     by_day_rows = cur.fetchall()
     conn.close()
