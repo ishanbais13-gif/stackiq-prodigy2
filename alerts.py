@@ -88,17 +88,53 @@ def _get_opted_in_users(alert_col: str) -> List[Dict[str, Any]]:
 # Low-level email sender (SendGrid)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Unsubscribe + sender footer (CAN-SPAM: every email needs a working
+# unsubscribe and the sender's postal address). POSTAL_ADDRESS is the
+# mailing address shown in the footer -- set it in Railway; until it's set
+# the footer shows the company name only.
+_UNSUB_BASE = os.getenv("APP_BASE_URL", "https://aurexis-backend-production.up.railway.app").rstrip("/")
+
+
+def unsubscribe_token(email: str) -> str:
+    import hashlib, hmac
+    key = (os.getenv("JWT_SECRET_KEY") or "").encode()
+    return hmac.new(key, ("unsub:" + email.strip().lower()).encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def unsubscribe_url(email: str) -> str:
+    from urllib.parse import urlencode
+    e = email.strip().lower()
+    return f"{_UNSUB_BASE}/auth/unsubscribe?{urlencode({'e': e, 't': unsubscribe_token(e)})}"
+
+
+def _email_footer(to_email: str) -> str:
+    addr = (os.getenv("POSTAL_ADDRESS") or "").strip()
+    sender = "Empower PMP LLC" + (f" · {addr}" if addr else "")
+    return (
+        '<div style="margin-top:28px;padding-top:16px;border-top:1px solid #222;font-family:-apple-system,'
+        'Segoe UI,Arial,sans-serif;font-size:11px;line-height:1.6;color:#777">'
+        "You're getting this because you turned on Aurexis email alerts. "
+        f'<a href="{unsubscribe_url(to_email)}" style="color:#999">Unsubscribe</a> from alert emails.<br>'
+        f"{sender}</div>"
+    )
+
+
 def _send_email(to_email: str, subject: str, html: str) -> bool:
     key = _sg_key()
     if not key:
         log.warning("alerts: SENDGRID_API_KEY not set — cannot send email to %s", to_email)
         return False
     try:
+        unsub = unsubscribe_url(to_email)
+        footer = _email_footer(to_email)
+        body_html = html.replace("</body>", footer + "</body>") if "</body>" in html else html + footer
         payload = json.dumps({
             "personalizations": [{"to": [{"email": to_email}]}],
             "from": {"email": _FROM_EMAIL, "name": "Aurexis"},
             "subject": subject,
-            "content": [{"type": "text/html", "value": html}],
+            "content": [{"type": "text/html", "value": body_html}],
+            # One-click unsubscribe button in Gmail / Apple Mail (RFC 8058).
+            "headers": {"List-Unsubscribe": f"<{unsub}>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"},
         }).encode()
         req = _ur.Request(
             "https://api.sendgrid.com/v3/mail/send",

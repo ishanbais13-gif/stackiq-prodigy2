@@ -110,6 +110,21 @@ PLAN_DISPLAY = {
 if _stripe and STRIPE_SECRET_KEY:
     _stripe.api_key = STRIPE_SECRET_KEY
 
+
+def _renewal_custom_text(plan: str) -> dict:
+    """Auto-renewal terms shown on Stripe Checkout directly above the
+    Subscribe button -- California's auto-renewal law wants the renewal
+    terms clear and next to the purchase button, or renewals can be
+    treated as unconditional gifts. Used by every subscription checkout."""
+    d = PLAN_DISPLAY.get(plan, {})
+    name, price = d.get("name", "your"), d.get("price_usd")
+    amount = f"${price}/month" if price else "the monthly price"
+    return {"submit": {"message": (
+        f"Your Aurexis {name} plan renews automatically every month at {amount} until you cancel. "
+        "Cancel anytime in Settings; cancellation takes effect at the end of the current billing period. "
+        "New subscribers can request a full refund within 7 days."
+    )}}
+
 # Paths that are always exempt from JWT enforcement in JWTMiddleware
 _JWT_EXEMPT = frozenset([
     "/health", "/__alive__", "/docs", "/openapi.json", "/redoc",
@@ -2037,6 +2052,7 @@ def create_checkout_session(
         line_items=[{"price": price_id, "quantity": 1}],
         success_url=success_url,
         cancel_url=cancel_url,
+        custom_text=_renewal_custom_text(plan_key),
         metadata={"user_id": str(user["id"])},
         subscription_data={"metadata": {"user_id": str(user["id"])}},
     )
@@ -2834,6 +2850,7 @@ def google_callback(request: Request, code: str = "", state: str = "", error: st
                         line_items=[{"price": price_id, "quantity": 1}],
                         success_url=success_url,
                         cancel_url=cancel_url,
+                        custom_text=_renewal_custom_text(selected_plan),
                         metadata={"user_id": str(user["id"])},
                         subscription_data={"metadata": {"user_id": str(user["id"])}},
                     )
@@ -3280,3 +3297,52 @@ def admin_launch_notify(payload: Dict[str, Any] = Body(...)):
         _ensure_launch_notify_table(conn)
         rows = conn.execute("SELECT email, created_at, source FROM launch_notify ORDER BY created_at DESC").fetchall()
     return {"count": len(rows), "signups": [dict(r) for r in rows]}
+
+
+
+# ---------------------------------------------------------------------------
+# Email unsubscribe (link + one-click header in every alert email; see
+# alerts.unsubscribe_url). Turns off all alert emails for the address and
+# removes it from the launch-notify list. GET shows a confirmation page;
+# POST is the RFC 8058 one-click call mail apps make.
+# ---------------------------------------------------------------------------
+
+def _do_unsubscribe(e: str, t: str) -> bool:
+    import hmac as _hmac
+    from alerts import unsubscribe_token
+    email = (e or "").strip().lower()
+    if not email or not _hmac.compare_digest(unsubscribe_token(email), (t or "").strip()):
+        return False
+    with _get_db() as conn:
+        for col in ("alerts_new_pick", "alerts_outcome"):
+            try:
+                conn.execute(f"UPDATE users SET {col} = 0 WHERE LOWER(email) = ?", (email,))
+            except sqlite3.OperationalError:
+                pass  # column not present on this schema
+        _ensure_launch_notify_table(conn)
+        conn.execute("DELETE FROM launch_notify WHERE email = ?", (email,))
+        conn.commit()
+    return True
+
+
+@auth_router.get("/unsubscribe")
+def unsubscribe_page(e: str = "", t: str = ""):
+    from fastapi.responses import HTMLResponse
+    ok = _do_unsubscribe(e, t)
+    msg = ("You're unsubscribed. Aurexis won't send alert or launch emails to this address. "
+           "You can turn alerts back on in Settings.") if ok else "This unsubscribe link isn't valid. Email aurexis.app@gmail.com and we'll remove you."
+    return HTMLResponse(
+        '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<title>Aurexis · Unsubscribe</title><body style="margin:0;background:#07090f;color:#e8ecf2;'
+        'font-family:-apple-system,Segoe UI,Arial,sans-serif;display:flex;align-items:center;justify-content:center;'
+        f'min-height:100vh;padding:24px"><div style="max-width:420px;text-align:center"><h1 style="font-size:22px">'
+        f'{"Unsubscribed" if ok else "Link not valid"}</h1><p style="color:#9ba6ae;line-height:1.6">{msg}</p></div></body>',
+        status_code=200 if ok else 400,
+    )
+
+
+@auth_router.post("/unsubscribe")
+def unsubscribe_one_click(e: str = "", t: str = ""):
+    if not _do_unsubscribe(e, t):
+        raise HTTPException(status_code=400, detail="Invalid unsubscribe link.")
+    return {"ok": True}
