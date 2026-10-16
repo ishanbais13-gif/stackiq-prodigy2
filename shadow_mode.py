@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger("stackiq")
 
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "shadow_model_v1.json")
-_COOLDOWN_SECONDS = 7 * 24 * 3600
+_COOLDOWN_SECONDS = 7 * 24 * 3600  # a symbol can't be the shadow pick again for ~5 trading days
 # Below this win probability the shadow model "passes" for the scan, the way
 # the real model logs NO_TRADE: the row keeps the candidate + probability
 # (what it would have picked) with status 'no_trade', is never evaluated,
@@ -39,7 +39,7 @@ _MIN_TRADE_PROB = 0.50
 # When the 50% rule went live (deploy 10790762, 2026-10-16 19:16 ET). The
 # 40-unique-closed comparison counts only picks from here on, for both
 # sides; earlier shadow picks (including sub-50% ones) stay as history.
-_RULE_SINCE = 1792192585.0  # a symbol can't be the shadow pick again for ~5 trading days
+_RULE_SINCE = 1792192585.0
 _MAX_AGE_DAYS = 7.0           # same time stop as performance_tracker
 _ET = timezone(timedelta(hours=-4))
 _lock = threading.Lock()
