@@ -30,7 +30,12 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger("stackiq")
 
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "shadow_model_v1.json")
-_COOLDOWN_SECONDS = 7 * 24 * 3600  # a symbol can't be the shadow pick again for ~5 trading days
+_COOLDOWN_SECONDS = 7 * 24 * 3600
+# Below this win probability the shadow model "passes" for the scan, the way
+# the real model logs NO_TRADE: the row keeps the candidate + probability
+# (what it would have picked) with status 'no_trade', is never evaluated,
+# never counts in win/loss stats, and doesn't put the symbol on cooldown.
+_MIN_TRADE_PROB = 0.50  # a symbol can't be the shadow pick again for ~5 trading days
 _MAX_AGE_DAYS = 7.0           # same time stop as performance_tracker
 _ET = timezone(timedelta(hours=-4))
 _lock = threading.Lock()
@@ -174,7 +179,8 @@ def record(pool: List[Dict[str, Any]], real_out: Optional[Dict[str, Any]]) -> Op
     # times (EBAY did, before this).
     with _conn() as con:
         recent = {r[0] for r in con.execute(
-            "SELECT symbol FROM shadow_picks WHERE recorded_at > ?", (now - _COOLDOWN_SECONDS,)).fetchall()}
+            "SELECT symbol FROM shadow_picks WHERE recorded_at > ? AND status != 'no_trade'",
+            (now - _COOLDOWN_SECONDS,)).fetchall()}
     fresh = [x for x in scored if str(x[1].get("symbol") or "").upper() not in recent]
     if not fresh:
         return None
@@ -183,15 +189,17 @@ def record(pool: List[Dict[str, Any]], real_out: Optional[Dict[str, Any]]) -> Op
     target1 = round(min(entry + 1.5 * (entry - stop), entry * 1.30), 4)  # same rule as _trade_plan_from_levels
     real_sym = str((real_out or {}).get("symbol") or "").strip().upper()
     sym = str(best.get("symbol") or "").upper()
+    status = "pending" if prob >= _MIN_TRADE_PROB else "no_trade"
     with _lock, _conn() as con:
         cur = con.execute(
             """INSERT INTO shadow_picks (model_version, recorded_at, symbol, entry_price, stop, target1,
-               win_prob, features, pool_size, pool_top5, real_symbol, real_is_trade, same_as_real)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               win_prob, features, pool_size, pool_top5, real_symbol, real_is_trade, same_as_real, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (m.get("version", "shadow"), now, sym, round(entry, 4), round(stop, 4), target1, round(prob, 4),
              json.dumps({k: round(v, 4) for k, v in fe.items()}), len(scored),
              json.dumps([[str(c.get("symbol")), round(p, 4)] for p, c, _ in scored[:5]]),
-             real_sym or None, int(bool((real_out or {}).get("is_trade"))), int(bool(real_sym) and real_sym == sym)))
+             real_sym or None, int(bool((real_out or {}).get("is_trade"))), int(bool(real_sym) and real_sym == sym),
+             status))
         return cur.lastrowid
 
 
@@ -246,6 +254,8 @@ def _positions(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Stats over unique positions (see _positions); raw_* are the counts
     before repeats were collapsed."""
+    no_trade = sum(r.get("status") == "no_trade" for r in rows)
+    rows = [r for r in rows if r.get("status") != "no_trade"]
     uniq = _positions(rows)
     closed = [r for r in uniq if r["status"] not in ("pending",)]
     wins = sum(r["status"] in ("won", "won_drift") for r in closed)
@@ -253,6 +263,7 @@ def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     rets = [max(-75.0, min(75.0, r["exit_return_pct"])) for r in closed if r.get("exit_return_pct") is not None]
     return {"picks": len(uniq), "closed": len(closed), "pending": len(uniq) - len(closed),
             "raw_picks": len(rows), "raw_closed": sum(r["status"] != "pending" for r in rows),
+            "no_trade_scans": no_trade,
             "win_rate": round(100.0 * wins / (wins + losses), 1) if wins + losses else None,
             "avg_return_pct": round(statistics.mean(rets), 2) if rets else None,
             "total_return_pct": round(sum(rets), 1) if rets else None}
@@ -286,9 +297,9 @@ def compare(limit: int = 200) -> Dict[str, Any]:
         real = [dict(r) for r in con.execute(
             "SELECT symbol, recorded_at, status, exit_return_pct FROM picks WHERE recorded_at >= ? "
             "AND entry_price IS NOT NULL AND target1 IS NOT NULL ORDER BY recorded_at", (since,)).fetchall()]
-    counted = {r["id"] for r in _positions(shadow)}
+    counted = {r["id"] for r in _positions([r for r in shadow if r["status"] != "no_trade"])}
     for r in shadow:
-        r["repeat"] = r["id"] not in counted  # same position as an earlier shadow pick
+        r["repeat"] = r["status"] != "no_trade" and r["id"] not in counted  # same position as an earlier shadow pick
         # Outcome of the real pick logged closest to this scan (same symbol, within 2h).
         match = [p for p in real if p["symbol"] == r["real_symbol"] and abs(p["recorded_at"] - r["recorded_at"]) < 7200]
         r["real_status"] = match[0]["status"] if match else None
@@ -304,5 +315,6 @@ def compare(limit: int = 200) -> Dict[str, Any]:
         "real_all_time": real_all,
         "agreement_pct": round(100.0 * sum(r["same_as_real"] for r in shadow) / len(shadow), 1),
         "target_unique_closed": 40,
+        "min_trade_prob": _MIN_TRADE_PROB,
         "rows": shadow[:limit],
     }
