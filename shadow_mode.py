@@ -35,7 +35,11 @@ _COOLDOWN_SECONDS = 7 * 24 * 3600
 # the real model logs NO_TRADE: the row keeps the candidate + probability
 # (what it would have picked) with status 'no_trade', is never evaluated,
 # never counts in win/loss stats, and doesn't put the symbol on cooldown.
-_MIN_TRADE_PROB = 0.50  # a symbol can't be the shadow pick again for ~5 trading days
+_MIN_TRADE_PROB = 0.50
+# When the 50% rule went live (deploy 10790762, 2026-10-16 19:16 ET). The
+# 40-unique-closed comparison counts only picks from here on, for both
+# sides; earlier shadow picks (including sub-50% ones) stay as history.
+_RULE_SINCE = 1792192585.0  # a symbol can't be the shadow pick again for ~5 trading days
 _MAX_AGE_DAYS = 7.0           # same time stop as performance_tracker
 _ET = timezone(timedelta(hours=-4))
 _lock = threading.Lock()
@@ -315,6 +319,14 @@ def compare(limit: int = 200) -> Dict[str, Any]:
         "real_all_time": real_all,
         "agreement_pct": round(100.0 * sum(r["same_as_real"] for r in shadow) / len(shadow), 1),
         "target_unique_closed": 40,
+        # The comparison that decides it: shadow picks >= 50% vs real picks,
+        # both counted from the moment the 50% rule went live.
+        "rule": {
+            "since": _RULE_SINCE,
+            "shadow": _summary([r for r in shadow if r["recorded_at"] >= _RULE_SINCE and r["status"] != "no_trade"
+                                and r["win_prob"] >= _MIN_TRADE_PROB]),
+            "real": _summary([r for r in real if r["recorded_at"] >= _RULE_SINCE]),
+        },
         "min_trade_prob": _MIN_TRADE_PROB,
         "rows": shadow[:limit],
     }
