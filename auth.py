@@ -2000,11 +2000,30 @@ def _existing_active_subscription(customer_id: str) -> Optional[dict]:
     return None
 
 
+def _is_native_app_request(request: Optional[Request], *urls: str) -> bool:
+    """True when a request comes from inside the iOS app's WebView
+    (Capacitor's capacitor://localhost origin) or carries the app's own
+    return URLs. Subscriptions are never sold inside the app (App Review
+    3.1.1); upgrading goes through Safari instead."""
+    origin = ((request.headers.get("origin") if request else "") or "").lower()
+    if origin.startswith(("capacitor://", "ionic://")):
+        return True
+    return any(str(u or "").lower().startswith(("capacitor://", "ionic://", "aurexis://")) for u in urls)
+
+
 @stripe_router.post("/create-checkout-session")
 def create_checkout_session(
     body: CheckoutRequest,
+    request: Request,
     user: sqlite3.Row = Depends(get_current_user),
 ):
+    # In-app signup (build 14) auto-requests checkout when a paid plan was
+    # picked; answer with no URL so the app continues into /app on Free and
+    # the user upgrades later via Safari. Nothing is created in Stripe.
+    if _is_native_app_request(request, body.success_url, body.cancel_url):
+        log.info("create_checkout_session: native app request -- skipping checkout (user_id=%s)", user["id"])
+        return {"checkout_url": None, "skipped": "native_app"}
+
     _ensure_stripe()
 
     plan_key = body.plan.lower()
@@ -2812,7 +2831,12 @@ def google_callback(request: Request, code: str = "", state: str = "", error: st
     # subscription check (shared with create_checkout_session, so it can't
     # drift out of sync between the two again) is a second layer in case
     # is_new is ever wrong for some other reason.
-    if is_new and selected_plan in ("starter", "pro") and _stripe and STRIPE_SECRET_KEY:
+    # Google sign-up started in the iOS app returns to aurexis://auth -- never
+    # open a Stripe checkout there (App Review 3.1.1); land them in the app
+    # on Free and they can upgrade through Safari.
+    if is_new and selected_plan in ("starter", "pro") and str(callback_origin).startswith("aurexis://"):
+        log.info("google_callback: native app sign-up -- skipping Stripe checkout, user stays on free")
+    elif is_new and selected_plan in ("starter", "pro") and _stripe and STRIPE_SECRET_KEY:
         price_id = PLAN_PRICES.get(selected_plan, "")
         log.info("google_callback: routing to Stripe plan=%s price_id=%s", selected_plan, price_id)
         if price_id:
