@@ -7390,6 +7390,29 @@ def get_market_universe() -> List[str]:
 
 
 _SCAN_UNIVERSE_CACHE: Dict[str, Any] = {"ts": 0.0, "raw": [], "filtered": [], "ranked": []}
+# A universe smaller than this means the asset fetch failed and only the core
+# ETF fallback is left: serve it for this scan, but never cache it.
+_SCAN_UNIVERSE_MIN_CACHE = 200
+
+
+def _list_assets_raw_rest() -> List[Any]:
+    try:
+        import requests as _rq
+        from types import SimpleNamespace
+        base = "https://paper-api.alpaca.markets"
+        r = _rq.get(
+            f"{base}/v2/assets",
+            params={"status": "active", "asset_class": "us_equity"},
+            headers={"APCA-API-KEY-ID": os.getenv("ALPACA_API_KEY", ""), "APCA-API-SECRET-KEY": os.getenv("ALPACA_SECRET_KEY", "")},
+            timeout=60,
+        )
+        r.raise_for_status()
+        out = [SimpleNamespace(**a) for a in (r.json() or []) if isinstance(a, dict)]
+        log.info(f"get_scan_universe: raw REST fallback returned {len(out)} assets")
+        return out
+    except Exception as e:
+        log.exception(f"get_scan_universe: raw REST asset fallback failed: {e}")
+        return []
 
 
 def get_alpaca_trading_client():
@@ -7447,7 +7470,7 @@ def get_scan_universe(max_scan: int = 0) -> List[str]:
             _fc = _json.load(_f)
         _fc_ts = float(_fc.get("ts") or 0.0)
         _fc_ranked = _fc.get("ranked") or []
-        if isinstance(_fc_ranked, list) and _fc_ranked and (time.time() - _fc_ts) < cache_ttl_s:
+        if isinstance(_fc_ranked, list) and len(_fc_ranked) >= _SCAN_UNIVERSE_MIN_CACHE and (time.time() - _fc_ts) < cache_ttl_s:
             _SCAN_UNIVERSE_CACHE["ts"] = _fc_ts
             _SCAN_UNIVERSE_CACHE["ranked"] = _fc_ranked
             log.info(f"get_scan_universe: loaded {len(_fc_ranked)} symbols from shared file cache")
@@ -7495,6 +7518,11 @@ def get_scan_universe(max_scan: int = 0) -> List[str]:
         except Exception:
             pass
         all_assets = []
+    if not all_assets:
+        # alpaca-py validates every asset against a fixed exchange enum, so one
+        # new exchange (e.g. TXSE in Oct 2026) fails the whole list. Fall back
+        # to the raw REST endpoint and read the JSON as-is.
+        all_assets = _list_assets_raw_rest()
 
     raw_syms: List[str] = []
     for a in all_assets or []:
@@ -7708,6 +7736,10 @@ def get_scan_universe(max_scan: int = 0) -> List[str]:
         )
     except Exception:
         pass
+
+    if len(scan_list) < _SCAN_UNIVERSE_MIN_CACHE:
+        log.warning(f"get_scan_universe: only {len(scan_list)} symbols, not caching")
+        return scan_list
 
     try:
         _SCAN_UNIVERSE_CACHE["ts"] = float(now_ts)

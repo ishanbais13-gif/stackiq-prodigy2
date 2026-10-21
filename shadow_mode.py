@@ -255,6 +255,44 @@ def _positions(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return kept
 
 
+_SPY_CACHE: Dict[str, Any] = {"ts": 0.0, "bars": []}
+
+
+def _spy_bars() -> List[Dict[str, Any]]:
+    if time.time() - _SPY_CACHE["ts"] > 600 or not _SPY_CACHE["bars"]:
+        try:
+            from data_fetcher import get_bars_batch
+            bars = (get_bars_batch(["SPY"], "1Day", 600) or {}).get("SPY") or []
+            bars = sorted((b for b in bars if isinstance(b, dict) and _f(b.get("c"))), key=_bar_ts)
+            if bars:
+                _SPY_CACHE.update(ts=time.time(), bars=bars)
+        except Exception:
+            pass
+    return _SPY_CACHE["bars"]
+
+
+def _add_spy(rows: List[Dict[str, Any]]) -> None:
+    """Benchmark: SPY's close-to-close return over the same trading days as
+    each pick (close of the day it was recorded -> close of its outcome day,
+    or the latest close / day 7 while pending). Sets spy_return_pct and
+    excess_pct (pick minus SPY) on each row."""
+    bars = _spy_bars()
+    for r in rows:
+        r["spy_return_pct"] = r["excess_pct"] = None
+        if not bars or r.get("status") == "no_trade":
+            continue
+        before = [b for b in bars if _bar_ts(b) <= r["recorded_at"]]
+        after = [b for b in bars if _bar_ts(b) > r["recorded_at"]]
+        if not before or not after:
+            continue
+        n = int(r.get("days_to_outcome") or 0) if r.get("status") != "pending" else 0
+        end = after[min(n, len(after), 7) - 1] if n else after[min(len(after), 7) - 1]
+        spy = 100.0 * (_f(end["c"]) / _f(before[-1]["c"]) - 1.0)
+        r["spy_return_pct"] = round(spy, 2)
+        if r.get("exit_return_pct") is not None:
+            r["excess_pct"] = round(max(-75.0, min(75.0, r["exit_return_pct"])) - spy, 2)
+
+
 def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Stats over unique positions (see _positions); raw_* are the counts
     before repeats were collapsed."""
@@ -265,20 +303,27 @@ def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     wins = sum(r["status"] in ("won", "won_drift") for r in closed)
     losses = sum(r["status"] in ("lost", "lost_drift") for r in closed)
     rets = [max(-75.0, min(75.0, r["exit_return_pct"])) for r in closed if r.get("exit_return_pct") is not None]
+    spy = [r["spy_return_pct"] for r in closed if r.get("excess_pct") is not None]
+    excess = [r["excess_pct"] for r in closed if r.get("excess_pct") is not None]
     return {"picks": len(uniq), "closed": len(closed), "pending": len(uniq) - len(closed),
             "raw_picks": len(rows), "raw_closed": sum(r["status"] != "pending" for r in rows),
             "no_trade_scans": no_trade,
             "win_rate": round(100.0 * wins / (wins + losses), 1) if wins + losses else None,
             "avg_return_pct": round(statistics.mean(rets), 2) if rets else None,
-            "total_return_pct": round(sum(rets), 1) if rets else None}
+            "total_return_pct": round(sum(rets), 1) if rets else None,
+            # Same-window SPY benchmark over the closed positions above.
+            "avg_spy_pct": round(statistics.mean(spy), 2) if spy else None,
+            "avg_excess_pct": round(statistics.mean(excess), 2) if excess else None,
+            "beat_spy": sum(e > 0 for e in excess), "benchmarked": len(excess)}
 
 
 def _real_all_time(con: sqlite3.Connection) -> Dict[str, Any]:
     """The real system's full record (every pick with a full trade plan), so
     picks resolved before shadow logging began still show up somewhere."""
     rows = [dict(r) for r in con.execute(
-        "SELECT symbol, recorded_at, status, exit_return_pct, evaluated_at FROM picks "
+        "SELECT symbol, recorded_at, status, exit_return_pct, evaluated_at, days_to_outcome FROM picks "
         "WHERE entry_price IS NOT NULL AND target1 IS NOT NULL ORDER BY recorded_at").fetchall()]
+    _add_spy(rows)
     recent = sorted((r for r in rows if r["status"] != "pending" and r["evaluated_at"]),
                     key=lambda r: -r["evaluated_at"])[:10]
     return {**_summary(rows), "since": rows[0]["recorded_at"] if rows else None, "recent_closed": recent}
@@ -299,8 +344,10 @@ def compare(limit: int = 200) -> Dict[str, Any]:
                     "real_all_time": real_all, "rows": []}
         since = min(r["recorded_at"] for r in shadow)
         real = [dict(r) for r in con.execute(
-            "SELECT symbol, recorded_at, status, exit_return_pct FROM picks WHERE recorded_at >= ? "
+            "SELECT symbol, recorded_at, status, exit_return_pct, days_to_outcome FROM picks WHERE recorded_at >= ? "
             "AND entry_price IS NOT NULL AND target1 IS NOT NULL ORDER BY recorded_at", (since,)).fetchall()]
+    _add_spy(shadow)
+    _add_spy(real)
     counted = {r["id"] for r in _positions([r for r in shadow if r["status"] != "no_trade"])}
     for r in shadow:
         r["repeat"] = r["status"] != "no_trade" and r["id"] not in counted  # same position as an earlier shadow pick
@@ -308,6 +355,7 @@ def compare(limit: int = 200) -> Dict[str, Any]:
         match = [p for p in real if p["symbol"] == r["real_symbol"] and abs(p["recorded_at"] - r["recorded_at"]) < 7200]
         r["real_status"] = match[0]["status"] if match else None
         r["real_exit_return_pct"] = match[0]["exit_return_pct"] if match else None
+        r["real_spy_return_pct"] = match[0]["spy_return_pct"] if match else None
         r["features"] = json.loads(r["features"] or "{}")
         r["pool_top5"] = json.loads(r["pool_top5"] or "[]")
     m = _model() or {}
