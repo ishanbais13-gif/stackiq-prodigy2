@@ -5,8 +5,9 @@ Every background v2 scan hands its final candidate pool here. The shadow model
 (models/shadow_model_v1.json, a small logistic regression trained on resolved
 perf_tracker picks) ranks that same pool, and its top choice is written to the
 shadow_picks table next to what the real system picked at that moment. Shadow
-picks are resolved with performance_tracker's own outcome rules (7-day window,
-same won/lost/drift thresholds), so the two records compare like for like.
+picks are filled and resolved by performance_tracker's own resolver
+(capture_fill at scan time, resolve_rows after), with the same entry, exit,
+time-stop and SPY rules, so the two records compare like for like.
 
 Nothing here feeds back into the real pick, alerts, or any user-facing
 endpoint. The only reader is the admin comparison endpoint.
@@ -24,8 +25,9 @@ import sqlite3
 import statistics
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger("stackiq")
 
@@ -40,8 +42,7 @@ _MIN_TRADE_PROB = 0.50
 # 40-unique-closed comparison counts only picks from here on, for both
 # sides; earlier shadow picks (including sub-50% ones) stay as history.
 _RULE_SINCE = 1792192585.0
-_MAX_AGE_DAYS = 7.0           # same time stop as performance_tracker
-_ET = timezone(timedelta(hours=-4))
+_NY = ZoneInfo("America/New_York")
 _lock = threading.Lock()
 _model_cache: Dict[str, Any] = {}
 
@@ -79,10 +80,18 @@ def _db_path() -> str:
         os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
 
 
+_migrated = False
+
+
 def _conn() -> sqlite3.Connection:
+    global _migrated
     con = sqlite3.connect(_db_path(), timeout=10)
     con.row_factory = sqlite3.Row
     con.executescript(_SCHEMA)
+    if not _migrated:
+        from performance_tracker import add_outcome_columns
+        add_outcome_columns(con, "shadow_picks")
+        _migrated = True
     return con
 
 
@@ -129,7 +138,7 @@ def features(cand: Dict[str, Any], now_ts: float) -> Optional[Dict[str, float]]:
     vols = [_f(b.get("v")) or 0.0 for b in pb]
     if any(c is None or c <= 0 for c in closes):
         return None
-    t = datetime.fromtimestamp(now_ts, _ET)
+    t = datetime.fromtimestamp(now_ts, _NY)
     return {
         "final_score": _f(cand.get("final_score")) or 0.0,
         "edge_score": _f(cand.get("edge_score")) or 0.0,
@@ -194,47 +203,41 @@ def record(pool: List[Dict[str, Any]], real_out: Optional[Dict[str, Any]]) -> Op
     real_sym = str((real_out or {}).get("symbol") or "").strip().upper()
     sym = str(best.get("symbol") or "").upper()
     status = "pending" if prob >= _MIN_TRADE_PROB else "no_trade"
+    # entry_price/stop/target1 are the plan, built on the scan's (possibly
+    # prior-close) price; the fill is captured live, the same way record_pick does.
+    from performance_tracker import capture_fill
+    fill = capture_fill(sym)
     with _lock, _conn() as con:
         cur = con.execute(
             """INSERT INTO shadow_picks (model_version, recorded_at, symbol, entry_price, stop, target1,
-               win_prob, features, pool_size, pool_top5, real_symbol, real_is_trade, same_as_real, status)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               win_prob, features, pool_size, pool_top5, real_symbol, real_is_trade, same_as_real, status,
+               entry_basis, fill_price, fill_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (m.get("version", "shadow"), now, sym, round(entry, 4), round(stop, 4), target1, round(prob, 4),
              json.dumps({k: round(v, 4) for k, v in fe.items()}), len(scored),
              json.dumps([[str(c.get("symbol")), round(p, 4)] for p, c, _ in scored[:5]]),
              real_sym or None, int(bool((real_out or {}).get("is_trade"))), int(bool(real_sym) and real_sym == sym),
-             status))
+             status, fill["entry_basis"], fill["fill_price"], fill["fill_at"]))
         return cur.lastrowid
 
 
 def evaluate_pending(batch_size: int = 80) -> int:
-    """Resolve pending shadow picks with performance_tracker's own outcome rules."""
-    from performance_tracker import _resolve_outcome
-    from data_fetcher import get_bars_batch
+    """Resolve pending shadow picks with performance_tracker's resolver.
+    Resolved rows are final; no_trade rows are never evaluated."""
+    from performance_tracker import resolve_rows, write_outcome
     now = time.time()
     with _conn() as con:
-        rows = con.execute("SELECT * FROM shadow_picks WHERE status IN ('pending','expired_neutral') "
+        rows = con.execute("SELECT * FROM shadow_picks WHERE status = 'pending' "
                            "AND recorded_at < ? ORDER BY recorded_at LIMIT ?",
                            (now - 24 * 3600, batch_size)).fetchall()
     if not rows:
         return 0
-    bars_map = {str(k).upper(): v for k, v in (get_bars_batch(list({r["symbol"] for r in rows}), "1Day", 30) or {}).items()}
     updated = 0
-    for r in rows:
-        age_days = (now - r["recorded_at"]) / 86400.0
-        future = [b for b in bars_map.get(r["symbol"]) or [] if isinstance(b, dict) and _bar_ts(b) > r["recorded_at"]]
-        if not future and age_days < _MAX_AGE_DAYS:
-            continue
-        o = _resolve_outcome(future_bars=future, entry=r["entry_price"], stop=r["stop"], target1=r["target1"],
-                             direction=r["direction"] or "long", age_days=age_days,
-                             max_age_days=_MAX_AGE_DAYS, symbol=r["symbol"])
-        if o["status"] == "pending" or (r["status"] == "expired_neutral" and o["status"] == "expired_neutral"):
+    for row_id, outcome in resolve_rows(rows, now=now).items():
+        if outcome is None:
             continue
         with _lock, _conn() as con:
-            con.execute("""UPDATE shadow_picks SET status=?, evaluated_at=?, exit_return_pct=?, max_return_pct=?,
-                           max_drawdown_pct=?, days_to_outcome=? WHERE id=?""",
-                        (o["status"], now, o["exit_return_pct"], o["max_return_pct"], o["max_drawdown_pct"],
-                         o["days_to_outcome"], r["id"]))
+            write_outcome(con, "shadow_picks", row_id, outcome, now)
         updated += 1
     return updated
 
@@ -255,42 +258,13 @@ def _positions(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return kept
 
 
-_SPY_CACHE: Dict[str, Any] = {"ts": 0.0, "bars": []}
-
-
-def _spy_bars() -> List[Dict[str, Any]]:
-    if time.time() - _SPY_CACHE["ts"] > 600 or not _SPY_CACHE["bars"]:
-        try:
-            from data_fetcher import get_bars_batch
-            bars = (get_bars_batch(["SPY"], "1Day", 600) or {}).get("SPY") or []
-            bars = sorted((b for b in bars if isinstance(b, dict) and _f(b.get("c"))), key=_bar_ts)
-            if bars:
-                _SPY_CACHE.update(ts=time.time(), bars=bars)
-        except Exception:
-            pass
-    return _SPY_CACHE["bars"]
-
-
 def _add_spy(rows: List[Dict[str, Any]]) -> None:
-    """Benchmark: SPY's close-to-close return over the same trading days as
-    each pick (close of the day it was recorded -> close of its outcome day,
-    or the latest close / day 7 while pending). Sets spy_return_pct and
-    excess_pct (pick minus SPY) on each row."""
-    bars = _spy_bars()
+    """excess_pct = pick minus SPY over the pick's own fill -> exit window
+    (spy_return_pct, set by performance_tracker's resolver)."""
     for r in rows:
-        r["spy_return_pct"] = r["excess_pct"] = None
-        if not bars or r.get("status") == "no_trade":
-            continue
-        before = [b for b in bars if _bar_ts(b) <= r["recorded_at"]]
-        after = [b for b in bars if _bar_ts(b) > r["recorded_at"]]
-        if not before or not after:
-            continue
-        n = int(r.get("days_to_outcome") or 0) if r.get("status") != "pending" else 0
-        end = after[min(n, len(after), 7) - 1] if n else after[min(len(after), 7) - 1]
-        spy = 100.0 * (_f(end["c"]) / _f(before[-1]["c"]) - 1.0)
-        r["spy_return_pct"] = round(spy, 2)
-        if r.get("exit_return_pct") is not None:
-            r["excess_pct"] = round(max(-75.0, min(75.0, r["exit_return_pct"])) - spy, 2)
+        r["excess_pct"] = None
+        if r.get("spy_return_pct") is not None and r.get("exit_return_pct") is not None:
+            r["excess_pct"] = round(max(-75.0, min(75.0, r["exit_return_pct"])) - r["spy_return_pct"], 2)
 
 
 def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -321,7 +295,7 @@ def _real_all_time(con: sqlite3.Connection) -> Dict[str, Any]:
     """The real system's full record (every pick with a full trade plan), so
     picks resolved before shadow logging began still show up somewhere."""
     rows = [dict(r) for r in con.execute(
-        "SELECT symbol, recorded_at, status, exit_return_pct, evaluated_at, days_to_outcome FROM picks "
+        "SELECT symbol, recorded_at, status, exit_return_pct, evaluated_at, days_to_outcome, spy_return_pct FROM picks "
         "WHERE entry_price IS NOT NULL AND target1 IS NOT NULL ORDER BY recorded_at").fetchall()]
     _add_spy(rows)
     recent = sorted((r for r in rows if r["status"] != "pending" and r["evaluated_at"]),
@@ -344,7 +318,7 @@ def compare(limit: int = 200) -> Dict[str, Any]:
                     "real_all_time": real_all, "rows": []}
         since = min(r["recorded_at"] for r in shadow)
         real = [dict(r) for r in con.execute(
-            "SELECT symbol, recorded_at, status, exit_return_pct, days_to_outcome FROM picks WHERE recorded_at >= ? "
+            "SELECT symbol, recorded_at, status, exit_return_pct, days_to_outcome, spy_return_pct FROM picks WHERE recorded_at >= ? "
             "AND entry_price IS NOT NULL AND target1 IS NOT NULL ORDER BY recorded_at", (since,)).fetchall()]
     _add_spy(shadow)
     _add_spy(real)

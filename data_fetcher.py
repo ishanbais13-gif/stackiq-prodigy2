@@ -5,7 +5,7 @@ import random
 import asyncio
 import threading
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from collections.abc import Iterable
 
 import requests
@@ -866,6 +866,59 @@ def _get_latest_trade_price(symbol: str) -> Optional[float]:
             return float(t.get("p"))
     except Exception:
         return None
+    return None
+
+
+def _rfc3339_ts(s: Any) -> Optional[float]:
+    """Alpaca timestamps carry nanoseconds ("...T19:59:59.123456789Z"), which
+    datetime.fromisoformat can't parse; trim the fraction to microseconds."""
+    try:
+        s = str(s).replace("Z", "+00:00")
+        if "." in s:
+            whole, frac = s.split(".", 1)
+            digits = len(frac) - len(frac.lstrip("0123456789"))
+            s = f"{whole}.{frac[:digits][:6].ljust(6, '0')}{frac[digits:]}"  # 3.9 wants exactly 6
+        dt = datetime.fromisoformat(s)
+        return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+    except Exception:
+        return None
+
+
+def get_latest_trade(symbol: str) -> Optional[Tuple[float, float]]:
+    """(price, unix timestamp) of the latest trade, or None. Unlike the
+    snapshot paths, never falls back to a daily close: the timestamp is what
+    proves the price is live (performance_tracker.capture_fill)."""
+    sym = _normalize_symbol(symbol)
+    url = f"{_data_base_url()}/v2/stocks/{sym}/trades/latest"
+    for feed in _feed_candidates():
+        try:
+            t = (safe_alpaca_call_sync(_request_governed, "GET", url, {"feed": feed}) or {}).get("trade") or {}
+            p, ts = _to_float(t.get("p")), _rfc3339_ts(t.get("t"))
+            if p and p > 0 and ts:
+                return p, ts
+        except Exception:
+            continue
+    return None
+
+
+def get_intraday_bars(symbol: str, start_ts: float, end_ts: float, timeframe: str = "5Min") -> Optional[List[Dict[str, Any]]]:
+    """Intraday bars with start time in [start_ts, end_ts), oldest first, or
+    None if the fetch failed (an empty list means no trades in the window).
+    Consolidated (SIP) first: historical SIP is free once 15 minutes old, and
+    IEX-only highs/lows understate the real range."""
+    sym = _normalize_symbol(symbol)
+    url = f"{_data_base_url()}/v2/stocks/{sym}/bars"
+    iso = lambda ts: datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for feed in ["sip"] + [f for f in _feed_candidates() if f.lower() != "sip"]:
+        try:
+            data = safe_alpaca_call_sync(_request_governed, "GET", url, {
+                "timeframe": timeframe, "start": iso(start_ts), "end": iso(end_ts),
+                "limit": 10000, "adjustment": "raw", "sort": "asc", "feed": feed})
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return [{"t": b.get("t"), "o": b.get("o"), "h": b.get("h"), "l": b.get("l"), "c": b.get("c")}
+                    for b in data.get("bars") or [] if isinstance(b, dict)]
     return None
 
 

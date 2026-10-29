@@ -10849,6 +10849,37 @@ def admin_shadow(payload: Dict[str, Any] = Body(...)):
     return shadow_mode.compare(limit=int((payload or {}).get("limit") or 200))
 
 
+_RESCORE_JOB: Dict[str, Any] = {"state": "idle"}
+
+
+@app.post("/admin/rescore-outcomes", include_in_schema=False)
+def admin_rescore_outcomes(payload: Dict[str, Any] = Body(...)):
+    """Re-resolve every real and shadow pick with the current resolver
+    (performance_tracker.rescore_all). Runs in the background -- a full pass
+    fetches intraday bars for every stop/target exit. {"apply": false}
+    (default) only reports the diff; {"apply": true} backs up the DB, then
+    writes. Poll with {"status": true}. Admin-only."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    if (payload or {}).get("status"):
+        return _RESCORE_JOB
+    if _RESCORE_JOB["state"] == "running":
+        return _RESCORE_JOB
+    apply = bool((payload or {}).get("apply"))
+
+    def _run() -> None:
+        try:
+            import performance_tracker as _pt
+            _RESCORE_JOB.update(state="done", result=_pt.rescore_all(apply=apply), finished_at=time.time())
+        except Exception as e:
+            log.exception("rescore-outcomes failed")
+            _RESCORE_JOB.update(state="failed", error=str(e), finished_at=time.time())
+
+    _RESCORE_JOB.clear()
+    _RESCORE_JOB.update(state="running", apply=apply, started_at=time.time())
+    threading.Thread(target=_run, daemon=True).start()
+    return _RESCORE_JOB
+
+
 @app.post("/admin/picks-raw", include_in_schema=False)
 def admin_picks_raw(payload: Dict[str, Any] = Body(...)):
     """
@@ -12488,7 +12519,7 @@ def public_performance():
     try:
         con = _sq.connect(_pt_path, timeout=5)
         rows = con.execute(
-            """SELECT symbol, recorded_at, entry_price, NULL as exit_price,
+            """SELECT symbol, recorded_at, COALESCE(fill_price, entry_price), exit_price,
                       max_return_pct, max_drawdown_pct, exit_return_pct, status,
                       edge_signals, days_to_outcome
                FROM picks

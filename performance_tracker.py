@@ -14,7 +14,8 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 log = logging.getLogger("stackiq")
 
@@ -47,8 +48,9 @@ CREATE TABLE IF NOT EXISTS picks (
     hit_stop            INTEGER DEFAULT 0,
     days_to_outcome     INTEGER,
     alert_sent_at       REAL,   -- unix timestamp; NULL until a new-pick alert has actually fired for this row
-    exit_return_pct     REAL    -- the return actually realized at close-out: target/stop level for won/lost,
-                                 -- final price vs entry for won_drift/lost_drift/expired_neutral. Distinct from
+    exit_return_pct     REAL    -- the return actually realized at close-out, from fill_price (see the
+                                 -- resolver section): target/stop price, or the open when a bar gapped past it,
+                                 -- for won/lost; the time-stop close for the drift statuses. Distinct from
                                  -- max_return_pct, which is the best point reached at any time during the hold
                                  -- and can meaningfully overstate what a drift-classified pick actually banked.
 );
@@ -92,11 +94,11 @@ def _ensure_schema() -> None:
                 db.commit()
             except Exception:
                 pass  # column already exists
+            add_outcome_columns(db, "picks")
     except Exception as e:
         log.warning(f"perf_tracker: schema init failed: {e}")
 
 
-_ensure_schema()
 
 
 def _bar_ts(bar: Dict[str, Any]) -> float:
@@ -208,6 +210,8 @@ def record_pick(pick: Dict[str, Any]):
         t2 = _sf(targets[1]) if len(targets) > 1 else None
         t3 = _sf(targets[2]) if len(targets) > 2 else None
 
+        fill = capture_fill(sym)
+
         edge_signals  = json.dumps(list(pick.get("edge_signals")  or []))
         edge_score    = _sf(pick.get("edge_score_0_10"))
         final_score   = _sf(pick.get("final_score_0_10"))
@@ -219,11 +223,11 @@ def record_pick(pick: Dict[str, Any]):
                 """INSERT INTO picks
                    (symbol, direction, entry_price, stop, target1, target2, target3,
                     edge_signals, edge_score, final_score, confidence, premover_score,
-                    recorded_at, status)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    recorded_at, status, entry_basis, fill_price, fill_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (sym, direction, entry, stop, t1, t2, t3,
                  edge_signals, edge_score, final_score, confidence, premover,
-                 time.time(), "pending"),
+                 time.time(), "pending", fill["entry_basis"], fill["fill_price"], fill["fill_at"]),
             )
             row_id = int(cur.lastrowid)
 
@@ -257,33 +261,25 @@ def mark_alert_sent(pick_id: int) -> None:
 
 def evaluate_pending_picks(
     min_age_hours: float = 24.0,
-    max_age_days:  float = 7.0,
     batch_size:    int   = 40,
 ) -> int:
     """
-    Fetch bar data for pending picks and resolve win/loss/expired.
+    Resolve pending picks with resolve_rows() and write the outcome.
+    Only 'pending' rows are read: once a pick resolves (including
+    expired_neutral at the time stop) it is final and never re-scored.
     Should be called from a background thread.
     Returns number of picks updated.
     """
-    try:
-        from data_fetcher import get_bars_batch as _gbatch
-    except Exception:
-        log.warning("perf_tracker: data_fetcher unavailable, skipping evaluation")
-        return 0
-
-    now       = time.time()
-    min_age_s = min_age_hours * 3600.0
-    max_age_s = max_age_days  * 86400.0
-
+    now = time.time()
     try:
         with _conn() as db:
             rows = db.execute(
                 """SELECT * FROM picks
-                   WHERE status IN ('pending', 'expired_neutral')
+                   WHERE status = 'pending'
                      AND recorded_at < ?
                    ORDER BY recorded_at ASC
                    LIMIT ?""",
-                (now - min_age_s, batch_size),
+                (now - min_age_hours * 3600.0, batch_size),
             ).fetchall()
     except Exception as e:
         log.warning(f"perf_tracker: query failed: {e}")
@@ -292,77 +288,18 @@ def evaluate_pending_picks(
     if not rows:
         return 0
 
-    symbols = list({row["symbol"] for row in rows})
-    try:
-        # Fetch 30 days to cover picks going back ~6 weeks
-        bars_map: Dict[str, List] = _gbatch(symbols, "1Day", 30) or {}
-        bars_map = {str(k).upper(): v for k, v in bars_map.items()}
-    except Exception as e:
-        log.warning(f"perf_tracker: bar fetch failed: {e}")
-        return 0
-
+    outcomes = resolve_rows(rows, now=now)
     updated = 0
     for row in rows:
         try:
-            sym         = row["symbol"]
-            recorded_at = float(row["recorded_at"])
-            age_s       = now - recorded_at
-            age_days    = age_s / 86400.0
-
-            all_bars    = bars_map.get(sym) or []
-            future_bars = [
-                b for b in all_bars
-                if isinstance(b, dict) and _bar_ts(b) > recorded_at
-            ]
-
-            # If no future bars yet and still within evaluation window, skip
-            if not future_bars and age_s < max_age_s:
-                continue
-
-            outcome = _resolve_outcome(
-                future_bars = future_bars,
-                entry       = _sf(row["entry_price"]),
-                stop        = _sf(row["stop"]),
-                target1     = _sf(row["target1"]),
-                direction   = str(row["direction"] or "long"),
-                age_days    = age_days,
-                max_age_days= max_age_days,
-                symbol      = sym,
-            )
-
-            # If still pending (too early), don't write
-            if outcome["status"] == "pending":
-                continue
-
-            # Don't downgrade a definitive result back to expired_neutral
-            current_status = str(row["status"])
-            if current_status in ("won", "won_drift", "lost", "lost_drift"):
-                continue
-            # Only upgrade expired_neutral to a decisive result — never re-expire
-            if current_status == "expired_neutral" and outcome["status"] == "expired_neutral":
-                continue
-
+            outcome = outcomes.get(row["id"])
+            if outcome is None:
+                continue  # still open, or its bars aren't in yet
             with _conn() as db:
-                db.execute(
-                    """UPDATE picks
-                       SET status=?, evaluated_at=?,
-                           max_return_pct=?, max_drawdown_pct=?, exit_return_pct=?,
-                           hit_target=?, hit_stop=?, days_to_outcome=?
-                       WHERE id=?""",
-                    (
-                        outcome["status"],
-                        now,
-                        outcome["max_return_pct"],
-                        outcome["max_drawdown_pct"],
-                        outcome["exit_return_pct"],
-                        int(bool(outcome["hit_target"])),
-                        int(bool(outcome["hit_stop"])),
-                        outcome["days_to_outcome"],
-                        row["id"],
-                    ),
-                )
+                write_outcome(db, "picks", row["id"], outcome, now)
             updated += 1
 
+            sym = row["symbol"]
             # Feed outcome into evolution engine. Use the realized exit
             # return, not the peak -- a drift win/loss that reversed before
             # close-out shouldn't teach the model a stronger signal than it
@@ -370,7 +307,7 @@ def evaluate_pending_picks(
             if outcome["status"] in ("won", "won_drift", "lost", "lost_drift"):
                 try:
                     from learning import settle_outcome as _settle
-                    _ret   = float(outcome["exit_return_pct"] if outcome["exit_return_pct"] is not None else (outcome["max_return_pct"] or 0))
+                    _ret   = float(outcome["exit_return_pct"])
                     _dd    = float(outcome["max_drawdown_pct"] or 0)
                     _days  = int(outcome["days_to_outcome"] or 1)
                     _tgt_n = 3 if outcome["hit_target"] and _ret > 15 else \
@@ -395,28 +332,29 @@ def evaluate_pending_picks(
             # outcome for a pick they were never told about. alert_sent_at
             # is NULL until mark_alert_sent() runs after a confirmed
             # new-pick send, so it's the exact signal to gate on here.
-            try:
-                _alert_sent = row["alert_sent_at"]
-            except (IndexError, KeyError):
-                _alert_sent = None
-            if outcome["status"] in ("won", "won_drift", "lost", "lost_drift") and _alert_sent is not None:
+            # outcome_alerted_at makes it once per pick, so a pick re-scored
+            # by rescore_all() can never email users a second outcome.
+            if (outcome["status"] in ("won", "won_drift", "lost", "lost_drift")
+                    and row["alert_sent_at"] is not None and row["outcome_alerted_at"] is None):
                 try:
                     from alerts import send_outcome_alert_bg
                     send_outcome_alert_bg(
                         symbol     = sym,
                         status     = outcome["status"],
-                        return_pct = outcome["exit_return_pct"] if outcome["exit_return_pct"] is not None else outcome["max_return_pct"],
-                        entry      = _sf(row["entry_price"]),
+                        return_pct = outcome["exit_return_pct"],
+                        entry      = outcome["fill_price"],
                     )
+                    with _conn() as db:
+                        db.execute("UPDATE picks SET outcome_alerted_at = ? WHERE id = ?", (time.time(), row["id"]))
                 except Exception as _ae:
                     log.warning(f"perf_tracker: outcome alert failed: {_ae}")
-            elif outcome["status"] in ("won", "won_drift", "lost", "lost_drift"):
+            elif outcome["status"] in ("won", "won_drift", "lost", "lost_drift") and row["alert_sent_at"] is None:
                 log.info(f"perf_tracker: outcome alert skipped for id={row['id']} {sym} -- no new-pick alert was ever sent for this pick")
 
             log.info(
                 f"perf_tracker: evaluated id={row['id']} {sym} "
-                f"→ {outcome['status']} ret={outcome['max_return_pct']}% "
-                f"dd={outcome['max_drawdown_pct']}%"
+                f"→ {outcome['status']} fill={outcome['fill_price']} exit={outcome['exit_price']} "
+                f"ret={outcome['exit_return_pct']}% spy={outcome['spy_return_pct']}%"
             )
         except Exception as e:
             log.warning(f"perf_tracker: eval error for {dict(row).get('symbol')}: {e}")
@@ -424,167 +362,435 @@ def evaluate_pending_picks(
     return updated
 
 
-# A pick with no real trade plan gets its return tracked off a synthetic
-# entry (first future bar's open). That price has no sanity-check behind it,
+# ──────────────────────────────────────────────────────────────────────────────
+# Outcome resolver (shared by real picks and shadow_mode)
+#
+#   fill    first tradable price after the scan: the live trade price when the
+#           scan ran during a regular session (capture_fill), otherwise the
+#           next session's open. Never the prior close.
+#   exits   stop checked before target in every bar; a bar that opens beyond
+#           a level fills at the open, otherwise the level price fills. Never
+#           the day's high or low.
+#   time    close of the MAX_SESSIONS-th session, counting the fill session.
+#           Resolved rows are final.
+#   SPY     SPY's price at the same fill and exit moments.
+# ──────────────────────────────────────────────────────────────────────────────
+
+NY = ZoneInfo("America/New_York")
+MAX_SESSIONS = 5            # ~7 calendar days, the old time stop
+RESOLVER_VERSION = 2
+_LIVE_TRADE_MAX_AGE_S = 15 * 60
+_INTRADAY_GIVE_UP_S = 10 * 86400  # no intraday bars for a live fill by then -> score it from the next open
+
+# A pick with no real trade plan gets its return tracked off the next open
+# with no stop or target. That price has no sanity-check behind it,
 # so a bad print / stock split / bad ticker match can produce a nonsensical
 # "return" (seen in production: +5,910% and +5,697% on single picks). Cap
 # how far a synthetic-entry outcome is trusted before treating it as a data
 # anomaly rather than a real win/loss.
 _SYNTHETIC_RETURN_SANITY_CAP_PCT = 75.0
 
+# Columns the resolver owns, on both picks and shadow_picks.
+OUTCOME_COLUMNS = {
+    "entry_basis":        "TEXT",     # 'live' | 'next_open' (NULL on rows from before fills were captured = next_open)
+    "fill_price":         "REAL",
+    "fill_at":            "REAL",
+    "exit_price":         "REAL",
+    "exit_at":            "REAL",
+    "hit_target":         "INTEGER DEFAULT 0",
+    "hit_stop":           "INTEGER DEFAULT 0",
+    "spy_return_pct":     "REAL",     # SPY from fill_at to exit_at
+    "spy_basis":          "TEXT",     # 'exact', or 'approx' when intraday bars were missing
+    "resolver_version":   "INTEGER",
+    "outcome_alerted_at": "REAL",
+}
 
-def _resolve_outcome(
+
+def add_outcome_columns(db: sqlite3.Connection, table: str) -> None:
+    have = {r[1] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+    for col, typ in OUTCOME_COLUMNS.items():
+        if col not in have:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    db.commit()
+
+
+def capture_fill(symbol: str, now: Optional[float] = None) -> Dict[str, Any]:
+    """Fill convention for a pick, decided at scan time. During a regular
+    session it's the live trade price, proven live by its own timestamp
+    (which also rules out holidays and early closes); otherwise the resolver
+    fills it later with the next session's open."""
+    now = now or time.time()
+    t = datetime.fromtimestamp(now, NY)
+    if t.weekday() < 5 and (9, 30) <= (t.hour, t.minute) < (16, 0):
+        try:
+            from data_fetcher import get_latest_trade
+            lt = get_latest_trade(symbol)
+        except Exception:
+            lt = None
+        if lt and 0 <= now - lt[1] <= _LIVE_TRADE_MAX_AGE_S:
+            return {"entry_basis": "live", "fill_price": round(lt[0], 4), "fill_at": now}
+    return {"entry_basis": "next_open", "fill_price": None, "fill_at": None}
+
+
+def sessions_from_bars(bars: List[Dict[str, Any]], now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Completed regular sessions from daily bars, oldest first. Alpaca stamps
+    a daily bar 00:00 ET of its session date, so the bar's ET date is the
+    session date (a scan at 1:55 AM is BEFORE that day's session)."""
+    out: Dict[Any, Dict[str, Any]] = {}
+    for b in bars or []:
+        if not isinstance(b, dict):
+            continue
+        o, h, l, c = (_sf(b.get(k)) for k in ("o", "h", "l", "c"))
+        ts = _bar_ts(b)
+        if not ts or None in (o, h, l, c):
+            continue
+        d = datetime.fromtimestamp(ts, NY).date()
+        open_ts = datetime(d.year, d.month, d.day, 9, 30, tzinfo=NY).timestamp()
+        close_ts = open_ts + 6.5 * 3600
+        if now is not None and close_ts > now:
+            continue
+        out[d] = {"date": d, "open_ts": open_ts, "close_ts": close_ts, "o": o, "h": h, "l": l, "c": c}
+    return [out[d] for d in sorted(out)]
+
+
+def resolve_trade(
     *,
-    future_bars:  List[Dict[str, Any]],
-    entry:        Optional[float],
-    stop:         Optional[float],
-    target1:      Optional[float],
-    direction:    str,
-    age_days:     float,
-    max_age_days: float,
-    symbol:       str = "",
+    recorded_at:   float,
+    entry_basis:   Optional[str],
+    fill_price:    Optional[float],
+    stop:          Optional[float],
+    target1:       Optional[float],
+    direction:     str,
+    sessions:      List[Dict[str, Any]],
+    scan_day_bars: Optional[List[Dict[str, Any]]] = None,
+    max_sessions:  int = MAX_SESSIONS,
 ) -> Dict[str, Any]:
-    """Walk forward through bars and determine win/loss/expired."""
-    _null = {"status": "pending", "max_return_pct": None, "max_drawdown_pct": None,
-             "exit_return_pct": None, "hit_target": False, "hit_stop": False, "days_to_outcome": None}
+    """Walk completed sessions from the fill and decide the outcome. Pure:
+    all prices come in as arguments. scan_day_bars are the intraday bars of
+    the scan day, needed only for a live fill (the scan-day daily bar also
+    holds the prices from before the scan). Returns {"status": "pending"}
+    while the trade is still open or its data isn't in yet."""
+    is_long = str(direction or "long").lower() != "short"
+    stop, target1 = _sf(stop), _sf(target1)
+    live = entry_basis == "live" and bool(_sf(fill_price))
+    day = datetime.fromtimestamp(recorded_at, NY).date()
 
-    is_synthetic_entry = False
-    if not entry or not math.isfinite(float(entry)) or float(entry) <= 0:
-        # No formal entry price — use first future bar's open as synthetic entry.
-        # This lets us track return % for picks that lacked a trade plan.
-        synthetic_entry = None
-        for b in future_bars:
-            v = _sf(b.get("o")) or _sf(b.get("c"))
-            if v and v > 0:
-                synthetic_entry = v
-                break
-        if not synthetic_entry:
-            return {**_null, "status": "expired_neutral", "days_to_outcome": int(age_days)}
-        entry = synthetic_entry
-        stop = None    # no stop without a real trade plan
-        target1 = None  # no target without a real trade plan
-        is_synthetic_entry = True
+    if live:
+        scan = next((s for s in sessions if s["date"] == day), None)
+        if scan is None or not scan["open_ts"] <= recorded_at < scan["close_ts"]:
+            if not any(s["date"] > day for s in sessions):
+                return {"status": "pending"}  # scan session not complete yet
+            live = False                      # no session that day after all
+        elif scan_day_bars is None:
+            return {"status": "pending", "waiting_for": "scan_day_bars"}
+        else:
+            fill = float(fill_price)
+            rest = [b for b in scan_day_bars if _bar_ts(b) >= recorded_at]
+            first = dict(scan, o=fill,
+                         h=max([fill] + [_sf(b.get("h")) for b in rest if _sf(b.get("h"))]),
+                         l=min([fill] + [_sf(b.get("l")) for b in rest if _sf(b.get("l"))]))
+            walk, fill_at = [first] + [s for s in sessions if s["date"] > day], recorded_at
+    if not live:
+        walk = [s for s in sessions if s["open_ts"] >= recorded_at]
+        if not walk:
+            return {"status": "pending"}
+        fill, fill_at = walk[0]["o"], walk[0]["open_ts"]
 
-    entry   = float(entry)
-    stop    = float(stop)   if stop   is not None and math.isfinite(float(stop))   else None
-    target1 = float(target1) if target1 is not None and math.isfinite(float(target1)) else None
-    is_long = direction.lower() != "short"
+    def ret(px: float) -> float:
+        return ((px - fill) if is_long else (fill - px)) / fill * 100.0
 
-    max_ret:  Optional[float] = None
-    max_dd:   Optional[float] = None
-    hit_tgt   = False
-    hit_stop  = False
-    days_out: Optional[int]  = None
+    best = worst = 0.0
+    exit_ = None
+    for i, b in enumerate(walk[:max_sessions]):
+        o, h, l = b["o"], b["h"], b["l"]
+        if is_long:
+            if stop is not None and o <= stop:
+                exit_ = ("lost", o, "gap")
+            elif target1 is not None and o >= target1:
+                exit_ = ("won", o, "gap")
+            elif stop is not None and l <= stop:      # stop first when a bar spans both
+                exit_ = ("lost", stop, "level")
+            elif target1 is not None and h >= target1:
+                exit_ = ("won", target1, "level")
+        else:
+            if stop is not None and o >= stop:
+                exit_ = ("lost", o, "gap")
+            elif target1 is not None and o <= target1:
+                exit_ = ("won", o, "gap")
+            elif stop is not None and h >= stop:
+                exit_ = ("lost", stop, "level")
+            elif target1 is not None and l <= target1:
+                exit_ = ("won", target1, "level")
+        if exit_:
+            break
+        best, worst = max(best, ret(h if is_long else l)), min(worst, ret(l if is_long else h))
 
-    for i, bar in enumerate(future_bars):
-        h = _sf(bar.get("h"))
-        l = _sf(bar.get("l"))
+    if exit_:
+        status, px, kind = exit_
+        # a gap fills at the bar's open: the session open, or the fill itself on a live first bar
+        exit_at = (fill_at if live and i == 0 else b["open_ts"]) if kind == "gap" else None
+    elif len(walk) >= max_sessions:
+        i, b = max_sessions - 1, walk[max_sessions - 1]
+        px, kind, exit_at = b["c"], "time", b["close_ts"]
+        r = ret(px)
+        status = "won_drift" if r > 2.0 else "lost_drift" if r < -2.0 else "expired_neutral"
+    else:
+        return {"status": "pending"}
+
+    r = ret(px)
+    out = {
+        "status":           status,
+        "entry_basis":      "live" if live else "next_open",
+        "fill_price":       round(fill, 4),
+        "fill_at":          fill_at,
+        "exit_price":       round(px, 4),
+        "exit_at":          exit_at,      # None for a level exit: pinpointed from intraday bars by the caller
+        "exit_kind":        kind,
+        "exit_session":     b,
+        "exit_on_scan_day": live and i == 0,
+        "exit_return_pct":  round(r, 2),
+        "max_return_pct":   round(max(best, r), 2),
+        "max_drawdown_pct": round(min(worst, r), 2),
+        "hit_target":       status == "won",
+        "hit_stop":         status == "lost",
+        "days_to_outcome":  i + 1,
+    }
+    # No trade plan: discard a bad print as a data anomaly rather than
+    # recording a fake blowout number.
+    if stop is None and target1 is None and (
+            abs(r) > _SYNTHETIC_RETURN_SANITY_CAP_PCT or abs(best) > _SYNTHETIC_RETURN_SANITY_CAP_PCT
+            or abs(worst) > _SYNTHETIC_RETURN_SANITY_CAP_PCT):
+        log.warning("perf_tracker: discarding implausible synthetic-entry outcome fill=%.4f ret=%.1f", fill, r)
+        out.update(status="expired_neutral", exit_return_pct=None, max_return_pct=None, max_drawdown_pct=None)
+    return out
+
+
+def _level_cross_ts(bars: List[Dict[str, Any]], stop: Optional[float], target1: Optional[float],
+                    is_long: bool) -> Optional[float]:
+    """End of the first intraday bar that touched the stop or target (stop first)."""
+    for b in bars:
+        h, l = _sf(b.get("h")), _sf(b.get("l"))
         if h is None or l is None:
             continue
-        day_num = i + 1
+        hit = ((stop is not None and l <= stop) or (target1 is not None and h >= target1)) if is_long else \
+              ((stop is not None and h >= stop) or (target1 is not None and l <= target1))
+        if hit:
+            return _bar_ts(b) + 300.0  # 5-minute bars: the exit is certain by the bar's end
+    return None
 
-        if is_long:
-            bar_ret = (h - entry) / entry * 100.0
-            bar_dd  = (l - entry) / entry * 100.0
-            if target1 is not None and h >= target1 and not hit_tgt:
-                hit_tgt  = True
-                days_out = day_num
-            if stop is not None and l <= stop and not hit_stop:
-                hit_stop  = True
-                if days_out is None:
-                    days_out = day_num
-        else:
-            bar_ret = (entry - l) / entry * 100.0
-            bar_dd  = (entry - h) / entry * 100.0
-            if target1 is not None and l <= target1 and not hit_tgt:
-                hit_tgt  = True
-                days_out = day_num
-            if stop is not None and h >= stop and not hit_stop:
-                hit_stop  = True
-                if days_out is None:
-                    days_out = day_num
 
-        max_ret = max(max_ret, bar_ret) if max_ret is not None else bar_ret
-        max_dd  = min(max_dd,  bar_dd)  if max_dd  is not None else bar_dd
+class _Intraday:
+    """Cached intraday fetches for one resolve pass. Returns None when the
+    fetch failed, so callers can tell 'no data' from 'no trades'."""
 
-        # Stop exits first within same bar if both triggered
-        if hit_stop and not hit_tgt:
-            break
-        if hit_tgt:
-            break
+    def __init__(self, fetch: Optional[Callable] = None):
+        if fetch is None:
+            from data_fetcher import get_intraday_bars as fetch
+        self._fetch, self._cache = fetch, {}
 
-    # Determine final status
-    final_ret: Optional[float] = None
-    if hit_tgt:
-        status = "won"
-    elif hit_stop:
-        status = "lost"
-    elif age_days >= max_age_days:
-        # Time stop reached without hitting a hard target or stop.
-        # Classify by final price vs entry using ±2% drift threshold.
-        if future_bars:
-            last_c = _sf(future_bars[-1].get("c"))
-            if last_c is not None and entry > 0:
-                final_ret = ((last_c - entry) / entry * 100.0 if is_long
-                             else (entry - last_c) / entry * 100.0)
-                if final_ret > 2.0:
-                    status = "won_drift"
-                elif final_ret < -2.0:
-                    status = "lost_drift"
-                else:
-                    status = "expired_neutral"
-                if max_ret is None:
-                    max_ret = final_ret
-            else:
-                status = "expired_neutral"
-        else:
-            status = "expired_neutral"
-        days_out = int(age_days)
+    def session(self, symbol: str, s: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+        key = (symbol, s["date"])
+        if key not in self._cache:
+            try:
+                self._cache[key] = self._fetch(symbol, s["open_ts"], s["close_ts"])
+            except Exception:
+                self._cache[key] = None
+        return self._cache[key]
 
-        # Synthetic entries have no real trade plan behind them, so a bad
-        # print (bad ticker match, stock split, corrupted bar) can produce
-        # an implausible "return" instead of a real win/loss. Discard those
-        # as a data anomaly rather than recording a fake blowout number.
-        if is_synthetic_entry and (
-            (max_ret is not None and abs(max_ret) > _SYNTHETIC_RETURN_SANITY_CAP_PCT)
-            or (max_dd is not None and abs(max_dd) > _SYNTHETIC_RETURN_SANITY_CAP_PCT)
-        ):
-            log.warning(
-                "perf_tracker: discarding implausible synthetic-entry outcome "
-                "symbol=%s entry=%.4f max_ret=%s max_dd=%s — likely bad bar data",
-                symbol, entry, max_ret, max_dd,
-            )
-            status    = "expired_neutral"
-            max_ret   = None
-            max_dd    = None
-            final_ret = None
-    else:
-        status = "pending"
 
-    # exit_return_pct is what was actually realized at close-out, distinct
-    # from max_return_pct (the best point reached at any time during the
-    # hold). For won/lost, that's the target/stop-triggering excursion
-    # itself -- already a real, achieved price, not a peak that reversed.
-    # For the drift/expired path it's the final-vs-entry price at the
-    # moment the time-stop closed the position.
-    if status == "won":
-        exit_return_pct = max_ret
-    elif status == "lost":
-        exit_return_pct = max_dd
-    elif final_ret is not None:
-        exit_return_pct = final_ret
-    else:
-        exit_return_pct = None
+def _price_at(sessions: List[Dict[str, Any]], intraday: "_Intraday", symbol: str,
+              ts: float) -> Tuple[Optional[float], bool]:
+    """First tradable price at/after ts, and whether it's exact. Session
+    open/close timestamps use the daily bar; anything in between uses the
+    open of the first intraday bar starting at/after ts."""
+    s = next((x for x in sessions if x["open_ts"] <= ts <= x["close_ts"]), None)
+    if s is None:
+        return None, False
+    if ts == s["open_ts"]:
+        return s["o"], True
+    if ts == s["close_ts"]:
+        return s["c"], True
+    bars = intraday.session(symbol, s) or []
+    nxt = [b for b in bars if _bar_ts(b) >= ts and _sf(b.get("o"))]
+    if nxt:
+        return _sf(nxt[0].get("o")), True
+    if bars and _bar_ts(bars[-1]) + 300 >= ts:
+        return _sf(bars[-1].get("c")), True  # ts falls in the session's last bar
+    # no intraday data: nearest session boundary
+    return (s["o"] if ts - s["open_ts"] < s["close_ts"] - ts else s["c"]), False
+
+
+def _resolve_row(row: Dict[str, Any], sessions: List[Dict[str, Any]], spy_sessions: List[Dict[str, Any]],
+                 intraday: "_Intraday", now: float) -> Optional[Dict[str, Any]]:
+    """Outcome columns for one picks/shadow_picks row, or None while it's open."""
+    sym = str(row["symbol"]).upper()
+    is_long = str(row["direction"] or "long").lower() != "short"
+    has_plan = bool(_sf(row["entry_price"]))
+    stop, target1 = (row["stop"], row["target1"]) if has_plan else (None, None)
+    basis = row["entry_basis"] or "next_open"
+
+    kw = dict(recorded_at=float(row["recorded_at"]), fill_price=row["fill_price"], stop=stop,
+              target1=target1, direction=row["direction"] or "long", sessions=sessions)
+    res = resolve_trade(entry_basis=basis, **kw)
+    if res.get("waiting_for") == "scan_day_bars":
+        scan = next(s for s in sessions if s["date"] == datetime.fromtimestamp(row["recorded_at"], NY).date())
+        bars = intraday.session(sym, scan)
+        if bars is not None:
+            res = resolve_trade(entry_basis=basis, scan_day_bars=bars, **kw)
+        elif now - float(row["recorded_at"]) > _INTRADAY_GIVE_UP_S:
+            log.warning(f"perf_tracker: no intraday bars for {sym} live fill; scoring from the next open")
+            res = resolve_trade(entry_basis="next_open", **kw)
+    if res["status"] == "pending":
+        return None
+
+    exact = True
+    exit_at = res["exit_at"]
+    if exit_at is None:  # stop/target touched inside a session: find when
+        s = res["exit_session"]
+        after = res["fill_at"] if res["exit_on_scan_day"] else s["open_ts"]
+        bars = [b for b in intraday.session(sym, s) or [] if _bar_ts(b) >= after]
+        exit_at = _level_cross_ts(bars, stop, target1, is_long)
+        if exit_at is None:
+            exit_at, exact = s["close_ts"], False
+        exit_at = min(exit_at, s["close_ts"])
+
+    spy_in, ok_in = _price_at(spy_sessions, intraday, "SPY", res["fill_at"])
+    spy_out, ok_out = _price_at(spy_sessions, intraday, "SPY", exit_at)
+    spy = round((spy_out / spy_in - 1.0) * 100.0, 2) if spy_in and spy_out else None
 
     return {
-        "status":          status,
-        "exit_return_pct": round(exit_return_pct, 2) if exit_return_pct is not None else None,
-        "max_return_pct":  round(max_ret, 2) if max_ret is not None else None,
-        "max_drawdown_pct": round(max_dd, 2) if max_dd  is not None else None,
-        "hit_target":      hit_tgt,
-        "hit_stop":        hit_stop,
-        "days_to_outcome": days_out,
+        "status":           res["status"],
+        "entry_basis":      res["entry_basis"],
+        "fill_price":       res["fill_price"],
+        "fill_at":          res["fill_at"],
+        "exit_price":       res["exit_price"],
+        "exit_at":          exit_at,
+        "exit_return_pct":  res["exit_return_pct"],
+        "max_return_pct":   res["max_return_pct"],
+        "max_drawdown_pct": res["max_drawdown_pct"],
+        "hit_target":       int(res["hit_target"]),
+        "hit_stop":         int(res["hit_stop"]),
+        "days_to_outcome":  res["days_to_outcome"],
+        "spy_return_pct":   spy,
+        "spy_basis":        "exact" if exact and ok_in and ok_out else "approx",
+        "resolver_version": RESOLVER_VERSION,
     }
+
+
+def resolve_rows(rows: List[Any], now: Optional[float] = None,
+                 bars_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+                 intraday_fetch: Optional[Callable] = None) -> Dict[int, Optional[Dict[str, Any]]]:
+    """Resolve picks/shadow_picks rows. Returns {row id: outcome columns, or
+    None while open}. bars_map / intraday_fetch default to live Alpaca data;
+    passing them in lets an audit replay the exact same logic offline."""
+    now = now or time.time()
+    rows = [dict(r) for r in rows]
+    if bars_map is None:
+        from data_fetcher import get_bars_batch
+        bars_map = get_bars_batch(sorted({str(r["symbol"]).upper() for r in rows} | {"SPY"}), "1Day", 200) or {}
+    bars_map = {str(k).upper(): v for k, v in bars_map.items()}
+    spy_sessions = sessions_from_bars(bars_map.get("SPY") or [], now)
+    intraday = _Intraday(intraday_fetch)
+    out: Dict[int, Optional[Dict[str, Any]]] = {}
+    for r in rows:
+        for col in OUTCOME_COLUMNS:
+            r.setdefault(col, None)
+        try:
+            out[r["id"]] = _resolve_row(r, sessions_from_bars(bars_map.get(str(r["symbol"]).upper()) or [], now),
+                                        spy_sessions, intraday, now)
+        except Exception as e:
+            log.warning(f"perf_tracker: resolve failed for id={r.get('id')} {r.get('symbol')}: {e}")
+            out[r["id"]] = None
+    return out
+
+
+def write_outcome(db: sqlite3.Connection, table: str, row_id: int, outcome: Dict[str, Any],
+                  evaluated_at: Optional[float]) -> None:
+    cols = list(outcome)
+    db.execute(f"UPDATE {table} SET {', '.join(c + '=?' for c in cols)}, evaluated_at=? WHERE id=?",
+               [outcome[c] for c in cols] + [evaluated_at, row_id])
+
+
+_RESET = {k: None for k in ("exit_price", "exit_at", "exit_return_pct", "max_return_pct", "max_drawdown_pct",
+                            "days_to_outcome", "spy_return_pct", "spy_basis")}
+
+
+def rescore_all(apply: bool = False, now: Optional[float] = None,
+                bars_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+                intraday_fetch: Optional[Callable] = None) -> Dict[str, Any]:
+    """Re-resolve every pick in picks and shadow_picks with the current
+    resolver and report what changes. apply=False (default) writes nothing.
+    apply=True first copies the DB to perf_tracker.db.bak-<unix time>, then
+    writes every row. No alerts and no learning updates fire from here, and
+    already-alerted picks are marked so a later resolution can't re-alert."""
+    now = now or time.time()
+    report: Dict[str, Any] = {"applied": False, "resolver_version": RESOLVER_VERSION, "tables": {}}
+    with _conn() as db:
+        add_outcome_columns(db, "picks")
+        tables = {"picks": [dict(r) for r in db.execute("SELECT * FROM picks ORDER BY recorded_at")]}
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='shadow_picks'").fetchone():
+            add_outcome_columns(db, "shadow_picks")
+            tables["shadow_picks"] = [dict(r) for r in db.execute(
+                "SELECT * FROM shadow_picks WHERE status != 'no_trade' ORDER BY recorded_at")]
+    every = [r for rows in tables.values() for r in rows]
+    if bars_map is None and every:
+        from data_fetcher import get_bars_batch
+        bars_map = get_bars_batch(sorted({str(r["symbol"]).upper() for r in every} | {"SPY"}), "1Day", 200) or {}
+
+    new: Dict[str, Dict[int, Optional[Dict[str, Any]]]] = {}
+    for table, rows in tables.items():
+        new[table] = resolve_rows(rows, now=now, bars_map=bars_map, intraday_fetch=intraday_fetch)
+        report["tables"][table] = _rescore_diff(rows, new[table])
+
+    if apply:
+        path = f"{_DB_PATH}.bak-{int(now)}"
+        with _conn() as src, sqlite3.connect(path) as dst:
+            src.backup(dst)
+        with _conn() as db:
+            for table, rows in tables.items():
+                for r in rows:
+                    o = new[table].get(r["id"])
+                    if o is None:  # open under the fixed rules
+                        o = dict(_RESET, status="pending", resolver_version=RESOLVER_VERSION)
+                        evaluated = None
+                    else:
+                        evaluated = now
+                    write_outcome(db, table, r["id"], o, evaluated)
+                    if table == "picks" and r.get("alert_sent_at") and r["status"] not in ("pending",):
+                        db.execute("UPDATE picks SET outcome_alerted_at = COALESCE(outcome_alerted_at, ?) WHERE id = ?",
+                                   (r.get("evaluated_at") or now, r["id"]))
+            db.commit()
+        report.update(applied=True, backup=path)
+    return report
+
+
+def _rescore_diff(rows: List[Dict[str, Any]], new: Dict[int, Optional[Dict[str, Any]]]) -> Dict[str, Any]:
+    def stats(pairs: List[Tuple[str, Optional[float], Optional[float]]]) -> Dict[str, Any]:
+        done = [p for p in pairs if p[0] not in ("pending", "no_trade")]
+        w = sum(p[0] in ("won", "won_drift") for p in done)
+        l = sum(p[0] in ("lost", "lost_drift") for p in done)
+        rets = [max(-75.0, min(75.0, p[1])) for p in done if p[1] is not None]
+        ex = [max(-75.0, min(75.0, p[1])) - p[2] for p in done if p[1] is not None and p[2] is not None]
+        return {"resolved": len(done), "wins": w, "losses": l,
+                "win_rate": round(100.0 * w / (w + l), 1) if w + l else None,
+                "avg_return_pct": round(sum(rets) / len(rets), 2) if rets else None,
+                "avg_excess_vs_spy_pct": round(sum(ex) / len(ex), 2) if ex else None}
+
+    before = [(r["status"], r.get("exit_return_pct"), None) for r in rows]
+    after = [((new.get(r["id"]) or {}).get("status", "pending"), (new.get(r["id"]) or {}).get("exit_return_pct"),
+              (new.get(r["id"]) or {}).get("spy_return_pct")) for r in rows]
+    moves: Dict[str, int] = {}
+    changed = []
+    for r, (s, x, _) in zip(rows, after):
+        moves[f"{r['status']} -> {s}"] = moves.get(f"{r['status']} -> {s}", 0) + 1
+        old = r.get("exit_return_pct")
+        if s != r["status"] or (old is None) != (x is None) or (old is not None and abs(old - x) >= 0.01):
+            changed.append({"id": r["id"], "symbol": r["symbol"], "status": f"{r['status']} -> {s}",
+                            "exit_return_pct": [old, x]})
+    return {"rows": len(rows), "changed": len(changed), "before": stats(before), "after": stats(after),
+            "transitions": dict(sorted(moves.items(), key=lambda kv: -kv[1])),
+            "biggest_changes": sorted(changed, key=lambda c: -abs((c["exit_return_pct"][0] or 0)
+                                                                    - (c["exit_return_pct"][1] or 0)))[:25]}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -824,3 +1030,6 @@ def get_recent_picks(limit: int = 20) -> List[Dict[str, Any]]:
             "confidence":       r["confidence"],
         })
     return out
+
+
+_ensure_schema()
