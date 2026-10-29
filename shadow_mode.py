@@ -271,7 +271,8 @@ def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Stats over unique positions (see _positions); raw_* are the counts
     before repeats were collapsed."""
     no_trade = sum(r.get("status") == "no_trade" for r in rows)
-    rows = [r for r in rows if r.get("status") != "no_trade"]
+    voided = sum(r.get("status") == "void" for r in rows)  # gapped past stop/target before entry
+    rows = [r for r in rows if r.get("status") not in ("no_trade", "void")]
     uniq = _positions(rows)
     closed = [r for r in uniq if r["status"] not in ("pending",)]
     wins = sum(r["status"] in ("won", "won_drift") for r in closed)
@@ -281,7 +282,7 @@ def _summary(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     excess = [r["excess_pct"] for r in closed if r.get("excess_pct") is not None]
     return {"picks": len(uniq), "closed": len(closed), "pending": len(uniq) - len(closed),
             "raw_picks": len(rows), "raw_closed": sum(r["status"] != "pending" for r in rows),
-            "no_trade_scans": no_trade,
+            "no_trade_scans": no_trade, "voided": voided,
             "win_rate": round(100.0 * wins / (wins + losses), 1) if wins + losses else None,
             "avg_return_pct": round(statistics.mean(rets), 2) if rets else None,
             "total_return_pct": round(sum(rets), 1) if rets else None,

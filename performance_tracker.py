@@ -403,6 +403,7 @@ OUTCOME_COLUMNS = {
     "spy_basis":          "TEXT",     # 'exact', or 'approx' when intraday bars were missing
     "resolver_version":   "INTEGER",
     "outcome_alerted_at": "REAL",
+    "void_reason":        "TEXT",     # status 'void': 'gap_past_stop' | 'gap_past_target'
 }
 
 
@@ -525,6 +526,12 @@ def resolve_trade(
             break
         best, worst = max(best, ret(h if is_long else l)), min(worst, ret(l if is_long else h))
 
+    if exit_ and exit_[2] == "gap" and i == 0:
+        # The fill itself is already past a level: the plan was broken before
+        # anyone could enter, so it's no trade either way, not a win or loss.
+        return {"status": "void", "void_reason": "gap_past_stop" if exit_[0] == "lost" else "gap_past_target",
+                "entry_basis": "live" if live else "next_open", "fill_price": round(fill, 4), "fill_at": fill_at}
+
     if exit_:
         status, px, kind = exit_
         # a gap fills at the bar's open: the session open, or the fill itself on a live first bar
@@ -627,9 +634,21 @@ def _resolve_row(row: Dict[str, Any], sessions: List[Dict[str, Any]], spy_sessio
     is_long = str(row["direction"] or "long").lower() != "short"
     has_plan = bool(_sf(row["entry_price"]))
     stop, target1 = (row["stop"], row["target1"]) if has_plan else (None, None)
-    basis = row["entry_basis"] or "next_open"
+    basis, fill_price = row["entry_basis"] or "next_open", row["fill_price"]
+    rec = float(row["recorded_at"])
 
-    kw = dict(recorded_at=float(row["recorded_at"]), fill_price=row["fill_price"], stop=stop,
+    # Scanned during a session with no live fill captured (picks from before
+    # fills were captured, or a stale last trade): the first tradable price
+    # is the scan-time intraday bar, not the next open.
+    scan_bar = False
+    if basis != "live" and any(s["open_ts"] <= rec < s["close_ts"] for s in sessions):
+        px, exact = _price_at(sessions, intraday, sym, rec)
+        if exact and px:
+            basis, fill_price, scan_bar = "live", px, True
+        elif now - rec <= _INTRADAY_GIVE_UP_S:
+            return None  # intraday bars not in yet
+
+    kw = dict(recorded_at=rec, fill_price=fill_price, stop=stop,
               target1=target1, direction=row["direction"] or "long", sessions=sessions)
     res = resolve_trade(entry_basis=basis, **kw)
     if res.get("waiting_for") == "scan_day_bars":
@@ -642,6 +661,12 @@ def _resolve_row(row: Dict[str, Any], sessions: List[Dict[str, Any]], spy_sessio
             res = resolve_trade(entry_basis="next_open", **kw)
     if res["status"] == "pending":
         return None
+    if scan_bar and res["entry_basis"] == "live":
+        res["entry_basis"] = "scan_bar"
+    if res["status"] == "void":
+        return dict(_RESET, status="void", void_reason=res["void_reason"], entry_basis=res["entry_basis"],
+                    fill_price=res["fill_price"], fill_at=res["fill_at"], hit_target=0, hit_stop=0,
+                    resolver_version=RESOLVER_VERSION)
 
     exact = True
     exit_at = res["exit_at"]
@@ -674,6 +699,7 @@ def _resolve_row(row: Dict[str, Any], sessions: List[Dict[str, Any]], spy_sessio
         "spy_return_pct":   spy,
         "spy_basis":        "exact" if exact and ok_in and ok_out else "approx",
         "resolver_version": RESOLVER_VERSION,
+        "void_reason":      None,
     }
 
 
@@ -712,7 +738,7 @@ def write_outcome(db: sqlite3.Connection, table: str, row_id: int, outcome: Dict
 
 
 _RESET = {k: None for k in ("exit_price", "exit_at", "exit_return_pct", "max_return_pct", "max_drawdown_pct",
-                            "days_to_outcome", "spy_return_pct", "spy_basis")}
+                            "days_to_outcome", "spy_return_pct", "spy_basis", "void_reason")}
 
 
 def rescore_all(apply: bool = False, now: Optional[float] = None,
@@ -766,7 +792,7 @@ def rescore_all(apply: bool = False, now: Optional[float] = None,
 
 def _rescore_diff(rows: List[Dict[str, Any]], new: Dict[int, Optional[Dict[str, Any]]]) -> Dict[str, Any]:
     def stats(pairs: List[Tuple[str, Optional[float], Optional[float]]]) -> Dict[str, Any]:
-        done = [p for p in pairs if p[0] not in ("pending", "no_trade")]
+        done = [p for p in pairs if p[0] not in ("pending", "no_trade", "void")]
         w = sum(p[0] in ("won", "won_drift") for p in done)
         l = sum(p[0] in ("lost", "lost_drift") for p in done)
         rets = [max(-75.0, min(75.0, p[1])) for p in done if p[1] is not None]
@@ -787,7 +813,13 @@ def _rescore_diff(rows: List[Dict[str, Any]], new: Dict[int, Optional[Dict[str, 
         if s != r["status"] or (old is None) != (x is None) or (old is not None and abs(old - x) >= 0.01):
             changed.append({"id": r["id"], "symbol": r["symbol"], "status": f"{r['status']} -> {s}",
                             "exit_return_pct": [old, x]})
+    outs = [new.get(r["id"]) or {} for r in rows]
+    count = lambda key: {k: sum(o.get(key) == k for o in outs) for k in sorted({o.get(key) for o in outs} - {None})}
     return {"rows": len(rows), "changed": len(changed), "before": stats(before), "after": stats(after),
+            "voided": count("void_reason"), "entry_basis": count("entry_basis"),
+            "resolved_to_pending": [{"id": r["id"], "symbol": r["symbol"], "was": r["status"]}
+                                    for r, (s, _, _) in zip(rows, after)
+                                    if s == "pending" and r["status"] not in ("pending", "no_trade")],
             "transitions": dict(sorted(moves.items(), key=lambda kv: -kv[1])),
             "biggest_changes": sorted(changed, key=lambda c: -abs((c["exit_return_pct"][0] or 0)
                                                                     - (c["exit_return_pct"][1] or 0)))[:25]}

@@ -11840,7 +11840,7 @@ def performance_summary():
         # had this filter since it was restored; this endpoint never did.
         cur.execute(
             "SELECT status, max_return_pct, exit_return_pct FROM picks "
-            "WHERE status != 'pending' AND entry_price IS NOT NULL AND entry_price > 0"
+            "WHERE status NOT IN ('pending', 'void') AND entry_price IS NOT NULL AND entry_price > 0"
         )
         rows = cur.fetchall() or []
         con.close()
@@ -11881,7 +11881,7 @@ def performance_picks():
         con = _sq.connect(db_path)
         con.row_factory = _sq.Row
         cur = con.cursor()
-        cur.execute("SELECT symbol, status, entry_price, max_return_pct, exit_return_pct, edge_signals, recorded_at, hit_target, hit_stop FROM picks ORDER BY recorded_at DESC LIMIT 50")
+        cur.execute("SELECT symbol, status, entry_price, max_return_pct, exit_return_pct, edge_signals, recorded_at, hit_target, hit_stop FROM picks WHERE status != 'void' ORDER BY recorded_at DESC LIMIT 50")
         for row in cur.fetchall():
             try:
                 date_str = _dt.datetime.utcfromtimestamp(row["recorded_at"]).strftime("%Y-%m-%d")
@@ -12165,7 +12165,7 @@ def _chat_build_context(user_id: Optional[int] = None, user_plan: Optional[str] 
             "COUNT(CASE WHEN status IN ('won','won_drift') AND exit_return_pct IS NOT NULL THEN 1 END) as avg_win_n, "
             "AVG(CASE WHEN status IN ('lost','lost_drift') THEN exit_return_pct END) as avg_loss_pct, "
             "COUNT(CASE WHEN status IN ('lost','lost_drift') AND exit_return_pct IS NOT NULL THEN 1 END) as avg_loss_n "
-            "FROM picks WHERE recorded_at >= ?",
+            "FROM picks WHERE recorded_at >= ? AND status != 'void'",
             (_since_ts,),
         ).fetchone()
         con2.close()
@@ -12523,7 +12523,7 @@ def public_performance():
                       max_return_pct, max_drawdown_pct, exit_return_pct, status,
                       edge_signals, days_to_outcome
                FROM picks
-               WHERE status NOT IN ('expired_neutral')
+               WHERE status NOT IN ('expired_neutral', 'void')
                  AND entry_price IS NOT NULL AND entry_price > 0
                ORDER BY recorded_at DESC"""
         ).fetchall()
