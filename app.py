@@ -12514,7 +12514,7 @@ def public_performance():
     """
     _ensure_perf_tracker_schema()
     import sqlite3 as _sq, json as _js
-    _pt_path = os.getenv("PERF_TRACKER_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "perf_tracker.db"))
+    _pt_path = os.getenv("PERF_TRACKER_DB", os.path.join(os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__))), "perf_tracker.db"))
     _RETURN_CAP = 75.0
     try:
         con = _sq.connect(_pt_path, timeout=5)
