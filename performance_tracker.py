@@ -703,6 +703,21 @@ def _resolve_row(row: Dict[str, Any], sessions: List[Dict[str, Any]], spy_sessio
     }
 
 
+def _daily_bars(rows: List[Dict[str, Any]], now: float) -> Dict[str, List[Dict[str, Any]]]:
+    """Raw daily bars per symbol (plus SPY) from just before its oldest pick
+    to now. Not get_bars_batch: its total-bar cap keeps the oldest bars, so
+    the last symbols in a batch lose their recent sessions and their picks
+    look open forever."""
+    from data_fetcher import get_intraday_bars
+    since: Dict[str, float] = {}
+    for r in rows:
+        sym = str(r["symbol"]).upper()
+        since[sym] = min(since.get(sym, now), float(r["recorded_at"]))
+    if since:
+        since["SPY"] = min(since.values())
+    return {sym: get_intraday_bars(sym, ts - 5 * 86400, now, timeframe="1Day") or [] for sym, ts in since.items()}
+
+
 def resolve_rows(rows: List[Any], now: Optional[float] = None,
                  bars_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
                  intraday_fetch: Optional[Callable] = None) -> Dict[int, Optional[Dict[str, Any]]]:
@@ -712,8 +727,7 @@ def resolve_rows(rows: List[Any], now: Optional[float] = None,
     now = now or time.time()
     rows = [dict(r) for r in rows]
     if bars_map is None:
-        from data_fetcher import get_bars_batch
-        bars_map = get_bars_batch(sorted({str(r["symbol"]).upper() for r in rows} | {"SPY"}), "1Day", 200) or {}
+        bars_map = _daily_bars(rows, now)
     bars_map = {str(k).upper(): v for k, v in bars_map.items()}
     spy_sessions = sessions_from_bars(bars_map.get("SPY") or [], now)
     intraday = _Intraday(intraday_fetch)
@@ -760,8 +774,7 @@ def rescore_all(apply: bool = False, now: Optional[float] = None,
                 "SELECT * FROM shadow_picks WHERE status != 'no_trade' ORDER BY recorded_at")]
     every = [r for rows in tables.values() for r in rows]
     if bars_map is None and every:
-        from data_fetcher import get_bars_batch
-        bars_map = get_bars_batch(sorted({str(r["symbol"]).upper() for r in every} | {"SPY"}), "1Day", 200) or {}
+        bars_map = _daily_bars(every, now)
 
     new: Dict[str, Dict[int, Optional[Dict[str, Any]]]] = {}
     for table, rows in tables.items():
