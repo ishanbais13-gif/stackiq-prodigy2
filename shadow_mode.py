@@ -380,6 +380,9 @@ def latest_for_display() -> Dict[str, Any]:
         "stop": None if passed else r["stop"],
         "target": None if passed else r["target1"],
         "fill_price": None if passed else r.get("fill_price"),
+        # Scanned outside market hours: scored from the next session's open,
+        # so entry_price above is only the last close.
+        "entry_at_next_open": not passed and r.get("entry_basis") == "next_open",
         "status": r["status"],
         "track_record": {**_summary(rows), "since": min(x["recorded_at"] for x in rows)},
     }

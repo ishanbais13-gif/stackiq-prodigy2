@@ -415,14 +415,20 @@ def add_outcome_columns(db: sqlite3.Connection, table: str) -> None:
     db.commit()
 
 
+def in_regular_hours(ts: float) -> bool:
+    """Weekday 9:30-16:00 ET by the clock. Doesn't know holidays or early
+    closes; capture_fill rules those out with the live trade's timestamp."""
+    t = datetime.fromtimestamp(ts, NY)
+    return t.weekday() < 5 and (9, 30) <= (t.hour, t.minute) < (16, 0)
+
+
 def capture_fill(symbol: str, now: Optional[float] = None) -> Dict[str, Any]:
     """Fill convention for a pick, decided at scan time. During a regular
     session it's the live trade price, proven live by its own timestamp
     (which also rules out holidays and early closes); otherwise the resolver
     fills it later with the next session's open."""
     now = now or time.time()
-    t = datetime.fromtimestamp(now, NY)
-    if t.weekday() < 5 and (9, 30) <= (t.hour, t.minute) < (16, 0):
+    if in_regular_hours(now):
         try:
             from data_fetcher import get_latest_trade
             lt = get_latest_trade(symbol)

@@ -9082,6 +9082,7 @@ class BestPickV2Response(BaseModel):
     position_size_pct: Optional[float] = None
     upgrade_for_levels: Optional[bool] = None
     conviction: Optional[str] = None
+    entry_at_next_open: Optional[bool] = None
 
 
 def _best_pick_contract(x: Any) -> Dict[str, Any]:
@@ -9773,12 +9774,14 @@ async def best_pick_v2(
     # The bg scan runs for 20 min every 4 hours and produces the true best pick.
     # Without this, every request runs a 25-second partial scan → different pick each load.
     out: Optional[Dict[str, Any]] = None
+    scan_ts = time.time()
     if not bool(refresh):
         try:
             _cached_pick = _LAST_V2_PICK.get("pick")
             _cached_ts = float(_LAST_V2_PICK.get("ts") or 0.0)
             if isinstance(_cached_pick, dict) and str(_cached_pick.get("symbol") or "").strip() and (time.time() - _cached_ts) < 4 * 3600:
                 out = dict(_cached_pick)
+                scan_ts = _cached_ts
                 try:
                     wl_cands = out.get("watchlist_candidates")
                     if isinstance(wl_cands, list) and wl_cands:
@@ -9892,6 +9895,12 @@ async def best_pick_v2(
 
     if _ai_s100 < 55 and not out.get("low_conviction_note"):
         out["low_conviction_note"] = "Reduce size — moderate conviction"
+
+    # Display only: a pick scanned outside market hours is scored from the
+    # next session's open (performance_tracker.capture_fill), so the entry
+    # in its trade plan is just the last close.
+    import performance_tracker as _pt
+    out["entry_at_next_open"] = not _pt.in_regular_hours(scan_ts)
 
     # --- Tier gating: Starter gets no trade levels ---
     _plan = str(_user_field(_user, "plan") or "free").lower()
