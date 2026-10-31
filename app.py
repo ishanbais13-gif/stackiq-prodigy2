@@ -9903,6 +9903,23 @@ async def best_pick_v2_alias(max_scan: int = 400, refresh: bool = False, allow_l
     return await best_pick_v2(max_scan=max_scan, refresh=refresh, allow_llm_news=allow_llm_news)
 
 
+@app.get("/experimental_pick")
+def experimental_pick(_user=_dep_starter):
+    """The shadow model's latest pick, shown as a labeled experimental second
+    pick. Read-only over shadow_picks: doesn't touch the real pick, its cache,
+    record_pick, or Starter's weekly cap."""
+    import shadow_mode
+    try:
+        out = shadow_mode.latest_for_display()
+    except Exception as e:
+        log.warning(f"experimental_pick: {e}")
+        return {"available": False}
+    # Same tier rule as the real pick: Starter sees the symbol, not the levels.
+    if str(_user_field(_user, "plan") or "free").lower() == "starter":
+        out.update({"entry": None, "stop": None, "target": None, "fill_price": None, "upgrade_for_levels": True})
+    return out
+
+
 @app.post("/best_pick_v2/unlock")
 async def best_pick_v2_free_unlock(
     max_scan: int = 400,

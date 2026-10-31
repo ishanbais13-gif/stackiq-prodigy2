@@ -9,8 +9,9 @@ picks are filled and resolved by performance_tracker's own resolver
 (capture_fill at scan time, resolve_rows after), with the same entry, exit,
 time-stop and SPY rules, so the two records compare like for like.
 
-Nothing here feeds back into the real pick, alerts, or any user-facing
-endpoint. The only reader is the admin comparison endpoint.
+Nothing here feeds back into the real pick or alerts. Readers: the admin
+comparison endpoint, and /experimental_pick, which shows the latest shadow
+pick to users as a clearly labeled experimental second pick.
 
 Feature definitions must stay identical to the training script: every
 price-derived feature uses COMPLETED daily bars only (session ended before the
@@ -352,4 +353,33 @@ def compare(limit: int = 200) -> Dict[str, Any]:
         },
         "min_trade_prob": _MIN_TRADE_PROB,
         "rows": shadow[:limit],
+    }
+
+
+def latest_for_display() -> Dict[str, Any]:
+    """The current model's most recent scan result plus its track record, for
+    the user-facing "experimental pick" card. Read-only: same rows and stats
+    as compare(); win_prob is left out because it isn't calibrated yet."""
+    version = (_model() or {}).get("version")
+    with _conn() as con:
+        rows = [dict(r) for r in con.execute(
+            "SELECT * FROM shadow_picks WHERE model_version = ? ORDER BY recorded_at DESC", (version,)).fetchall()]
+    if not rows:
+        return {"available": False}
+    _add_spy(rows)
+    r = rows[0]
+    passed = r["status"] == "no_trade"
+    return {
+        "available": True,
+        "model_version": version,
+        "recorded_at": r["recorded_at"],
+        "passed": passed,
+        "symbol": None if passed else r["symbol"],
+        "direction": r.get("direction") or "long",
+        "entry": None if passed else r["entry_price"],
+        "stop": None if passed else r["stop"],
+        "target": None if passed else r["target1"],
+        "fill_price": None if passed else r.get("fill_price"),
+        "status": r["status"],
+        "track_record": {**_summary(rows), "since": min(x["recorded_at"] for x in rows)},
     }
