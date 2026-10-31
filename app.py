@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi import FastAPI, HTTPException, Query, Body, Depends, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Body, Depends, Request, Response, UploadFile, File, Form
 from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
@@ -2755,7 +2755,6 @@ def health_background():
     return {"ok": bool(loops) and all(v.get("healthy") for v in loops.values()), "loops": loops}
 
 
-
 @app.on_event("startup")
 def _startup_init():
     try:
@@ -2830,6 +2829,14 @@ def _startup_init():
         _t_nn.start()
     except Exception:
         pass
+    try:
+        # Growth agent's own idea engine -- keeps the approval queue filled
+        # without anyone typing a topic. First run 5 min after startup, then
+        # every 24h; see growth_agent.start_auto_generate_loop.
+        import growth_agent as _growth_agent
+        _growth_agent.start_auto_generate_loop()
+    except Exception as _gae:
+        log.warning(f"growth_agent auto-generate loop failed to start: {_gae}")
 
 _ALLOWED_ORIGINS_RAW = os.getenv("ALLOWED_ORIGINS", "")
 _CORS_ORIGINS: list[str] = (
@@ -8843,7 +8850,6 @@ def background_loop_status() -> Dict[str, Any]:
 _bg_v2_scan_loop = _resilient_loop("v2_scan", _bg_v2_scan_once, 4 * 3600, 3 * 3600)
 
 
-
 # ---------------------------------------------------------------------------
 # Shared new-pick alert trigger (used by both the best_pick_v2 and
 # pre-mover background scanners)
@@ -10706,17 +10712,33 @@ def admin_growth_generate(payload: Dict[str, Any] = Body(...)):
 
 @app.get("/admin/growth/queue", include_in_schema=False)
 def admin_growth_queue(secret: str = "", status: Optional[str] = None, limit: int = 50):
-    """List queue items, newest first. ?status=pending|approved|rejected to filter."""
+    """List queue items, newest first. ?status=pending|approved|rejected|published to filter."""
     _check_admin_secret(secret)
     import growth_agent
     return {"ok": True, "items": growth_agent.list_queue(status=status, limit=limit)}
 
 
+@app.post("/admin/growth/auto-generate", include_in_schema=False)
+def admin_growth_auto_generate(payload: Dict[str, Any] = Body(...)):
+    """Trigger one round of the idea engine right now (brainstorm + generate
+    across _AUTO_BATCH_PLAN) instead of waiting for the daily timer -- so the
+    queue can be refilled on demand from the dashboard. Body: {secret}."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    import growth_agent
+    result = growth_agent.auto_generate_batch()
+    return {"ok": True, "created": result["created"], "errors": result["errors"]}
+
+
 @app.post("/admin/growth/review", include_in_schema=False)
 def admin_growth_review(payload: Dict[str, Any] = Body(...)):
     """Approve or reject one queued item. Body: {secret, id, action: 'approve'|'reject', notes?}.
-    Approving marks it ready to publish -- it still does not auto-post anywhere; that's a
-    separate, explicit /admin/growth/publish call."""
+    Approve is the one click: if a real destination is ready (blog always;
+    Reddit once connected, for content generated for Reddit or with no
+    specific platform), it publishes immediately as part of the same call --
+    see growth_agent._pick_auto_publish_platform. Nothing auto-publishes
+    anywhere that isn't self-serve (TikTok still needs a video upload via
+    /admin/growth/publish/tiktok; Instagram/ad platforms still need their
+    own connection + review)."""
     _check_admin_secret(str((payload or {}).get("secret") or ""))
     import growth_agent
     try:
@@ -10800,6 +10822,62 @@ def public_growth_blog_post(item_id: int):
         if p["id"] == item_id:
             return {"ok": True, "post": p}
     raise HTTPException(status_code=404, detail="Not found")
+
+
+# ---------------------------------------------------------------------------
+# TikTok OAuth + video publish. Separate from the generic connections/publish
+# routes above because TikTok needs a real authorization-code handshake (not
+# a one-shot credential form like Reddit) and an actual video file to post --
+# see growth_agent.py's TikTok section for what's really live vs. gated by
+# TikTok's own app review.
+# ---------------------------------------------------------------------------
+
+@app.get("/admin/growth/connections/tiktok/authorize", include_in_schema=False)
+def admin_growth_tiktok_authorize(secret: str = ""):
+    """Returns the URL to send the browser to for TikTok's consent screen.
+    Requires client_key/client_secret already saved via /admin/growth/connections."""
+    _check_admin_secret(secret)
+    import growth_agent
+    try:
+        return {"ok": True, "authorize_url": growth_agent.tiktok_authorize_url()}
+    except growth_agent.PublishError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/admin/growth/connections/tiktok/complete", include_in_schema=False)
+def admin_growth_tiktok_complete(payload: Dict[str, Any] = Body(...)):
+    """Call after TikTok redirects back to the frontend callback page with
+    ?code=...&state=.... Body: {secret, code, state}. Exchanges the code for
+    real access/refresh tokens and stores them on the connection."""
+    _check_admin_secret(str((payload or {}).get("secret") or ""))
+    import growth_agent
+    try:
+        result = growth_agent.tiktok_exchange_code(
+            code=str((payload or {}).get("code") or ""),
+            state=str((payload or {}).get("state") or ""),
+        )
+        return {"ok": True, "connection": result}
+    except growth_agent.PublishError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.post("/admin/growth/publish/tiktok", include_in_schema=False)
+async def admin_growth_publish_tiktok(
+    secret: str = Form(...), id: int = Form(...), video: UploadFile = File(...),
+):
+    """Publish one already-approved item to TikTok with an actual video file
+    (multipart, not JSON -- TikTok needs the real bytes). Posts as
+    SELF_ONLY -- see growth_agent.PLATFORM_SETUP_NOTES['tiktok'] for why."""
+    _check_admin_secret(secret)
+    import growth_agent
+    video_bytes = await video.read()
+    try:
+        item = growth_agent.publish_tiktok_video(item_id=int(id), video_bytes=video_bytes)
+        return {"ok": True, "item": item}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except growth_agent.PublishError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 @app.post("/admin/table-stats", include_in_schema=False)
